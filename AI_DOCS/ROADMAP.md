@@ -12,7 +12,7 @@
 
 ## Phase 0 — Project setup
 
-1. [ ] **Repo:** `git init`, private GitHub repo, `.gitignore` (with `.env`) and folder layout (`backend/`, `engine/`, `shared/`, `frontend/`, `infra/`).
+1. [x] **Repo:** `git init`, private GitHub repo, `.gitignore` (with `.env`) and folder layout (`backend/`, `engine/`, `shared/`, `frontend/`, `infra/`).
 2. [ ] **Compose stack:** Docker Compose with Postgres + TimescaleDB, Redis, API, engine and frontend. Each service starts and has a trivial health check.
 3. [ ] **Config:** typed settings with pydantic-settings; `.env.example` with no real secrets; `MODE=paper` by default.
 4. [ ] **Quality gates:** uv + pnpm set up; pre-commit with ruff, mypy, ESLint, Prettier, gitleaks; pytest runs one empty test.
@@ -22,9 +22,9 @@
 
 ## Phase 1 — Exchange connection and market data
 
-1. [ ] **ExchangeAdapter (coinsph):** CCXT async wrapper for balances, candles, tickers, place/cancel order, with a sandbox flag. Tested against recorded responses. Answers the open questions on testnet and WebSocket support.
+1. [ ] **ExchangeAdapter (mexc):** CCXT async wrapper for balances, candles, tickers, place/cancel order, with a sandbox flag. Tested against recorded responses. Answers the open questions on testnet and WebSocket support.
 2. [ ] **Candle store + backfill:** TimescaleDB hypertable, Alembic migration, downloader for 1m–1d with gap detection and filling.
-3. [ ] **Live prices:** stream (WebSocket, or REST polling if CCXT has no `watch*` for `coinsph`) → latest price in Redis + published on a channel; auto-reconnect with backoff.
+3. [ ] **Live prices:** stream (WebSocket, or REST polling if CCXT's `watch*` for `mexc` isn't reliable) → latest price in Redis + published on a channel; auto-reconnect with backoff.
 4. [ ] **Resilience:** rate limits respected; retries with backoff on network errors; structured logs for every reconnect/retry.
 
 **Exit criteria:** a year of 1h candles for the first pair is stored with no gaps; live prices update in Redis for an hour without crashing.
@@ -32,7 +32,7 @@
 ## Phase 2 — Strategy engine and backtesting
 
 1. [ ] **Strategy interface + EMA crossover:** base class (params schema, warm-up, `on_candle` → signal), first strategy, tests on known price series.
-2. [ ] **Event-driven backtester:** replays candles through the same strategy code; models fees, slippage (higher for PHP pairs) and minimum order sizes; stores `backtest_runs`.
+2. [ ] **Event-driven backtester:** replays candles through the same strategy code; models fees, slippage (higher for small-cap pairs) and minimum order sizes; stores `backtest_runs`.
 3. [ ] **Report:** total return, max drawdown, Sharpe, win rate, profit factor, number of trades, equity curve.
 4. [ ] **More strategies:** RSI mean reversion and Bollinger breakout.
 5. [ ] **Overfitting checks:** parameter sweeps and walk-forward testing.
@@ -117,7 +117,7 @@
 > - [ ] Starting capital is an amount you can afford to lose fully
 > - [ ] Weekly review time set in your calendar
 
-1. [ ] **LiveBroker + reconciliation:** live broker on the Broker interface; startup reconciliation with the exchange; a tiny real order test (or testnet, if Coins Pro has one).
+1. [ ] **LiveBroker + reconciliation:** live broker on the Broker interface; startup reconciliation with the exchange; a tiny real order test (or testnet, if MEXC has one).
 2. [ ] **First live bot:** switch one bot from PaperBroker to LiveBroker with a small amount (UX3 flow).
 3. [ ] **Weekly review:** compare live vs. paper vs. backtest every week; turn bots off when they stop matching.
 4. [ ] **Scale-up rule:** scale only after 1–2 months of results close to expectations.

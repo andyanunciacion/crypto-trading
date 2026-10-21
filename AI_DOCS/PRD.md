@@ -5,7 +5,7 @@
 
 ## 1. Summary
 
-A self-hosted web app that watches crypto markets, runs swappable trading strategies, and places orders automatically on a Philippine-licensed exchange (Coins.ph / Coins Pro first). One person runs it. Strategies are backtested, then paper traded, then run live with a small amount. A risk layer that can't be bypassed checks every order. A dashboard and Telegram give live P&L, control and a kill switch. Real money is used only in the last phase.
+A self-hosted web app that watches crypto markets, runs swappable trading strategies, and places orders automatically on MEXC (spot). One person runs it. Strategies are backtested, then paper traded, then run live with a small amount. A risk layer that can't be bypassed checks every order. A dashboard and Telegram give live P&L, control and a kill switch. Real money is used only in the last phase.
 
 ## 2. Problems
 
@@ -17,7 +17,7 @@ A self-hosted web app that watches crypto markets, runs swappable trading strate
 | P4 | Bugs and leaked API keys can drain an account faster than any market move | Every order passes a RiskManager; trade-only, IP-locked keys encrypted at rest; kill switch; 2FA dashboard |
 | P5 | No single strategy works in every market (trending vs. ranging) | Strategies are plug-ins; switch them by hand or automatically by market regime |
 | P6 | Away from the PC, I don't know when something goes wrong | Telegram alerts for trades, errors and downtime, plus remote /kill |
-| P7 | Most big global exchanges are blocked or restricted for Philippine users | Built on CCXT behind a generic `ExchangeAdapter`, starting with Coins.ph; other exchanges can be added if they become legal |
+| P7 | Local licensed exchanges (Coins.ph) have higher fees and few pairs; global exchanges like MEXC are cheaper and deeper but aren't registered in the Philippines and could restrict accounts | Built on CCXT behind a generic `ExchangeAdapter`, starting with MEXC; moving to another exchange means a new adapter, not a rewrite |
 
 ## 3. Users
 
@@ -121,7 +121,6 @@ Phase tags: **[P0]** Setup · **[P1]** Market data · **[P2]** Strategies & back
 
 - **Multiple users or accounts.** It's a personal tool. Adding users would change auth, data isolation and the risk model.
 - **Withdrawals or moving funds.** Withdrawal endpoints are never used, and API keys never have withdrawal permission.
-- **Exchanges that are blocked in the Philippines, or reaching them through a VPN.** Their terms and the legal risk make it not worth it.
 - **Derivatives, margin and leverage.** Spot only.
 - **High-frequency or latency-sensitive strategies.** Strategies run on closed candles.
 - **A mobile app.** Telegram covers the phone.
@@ -134,9 +133,9 @@ Phase tags: **[P0]** Setup · **[P1]** Market data · **[P2]** Strategies & back
 | A bug places wrong or duplicate orders | RiskManager on every order; unique client order IDs; tests first on money code; I review every diff that touches orders, risk or keys |
 | API key leak | Trade-only, IP-locked key; encrypted at rest; `.env` in `.gitignore` from day one; gitleaks in pre-commit; separate exchange sub-account with only the trading money |
 | Overfitted strategy loses money live | Walk-forward testing; 2–4 weeks of paper trading close to the backtest; go-live checklist; start with money I can afford to lose |
-| Thin PHP order books → high slippage | Model higher slippage in backtests; prefer limit orders; check order-book depth before choosing pairs |
+| Thin order books on small-cap pairs → high slippage | Model higher slippage in backtests; prefer limit orders; check order-book depth before choosing pairs |
 | Engine down unnoticed | Heartbeat alert ≤ 2 min; Docker restart policies |
-| Exchange rules change in the Philippines | Generic `ExchangeAdapter`; check the BSP licensed VASP list and SEC advisories before switching exchanges |
+| MEXC isn't registered with the PH SEC (August 2025 advisory, ISP blocks) → account restricted or frozen | Only the trading budget sits on the exchange; move profits off by hand regularly; generic `ExchangeAdapter` so moving is a new adapter; watch SEC advisories and MEXC notices (ARCHITECTURE D21) |
 | Dashboard compromised | 2FA; reachable only via Tailscale or IP limits; no withdrawal ability anywhere in the app |
 | State mismatch after a crash or restart | Persist all state; reconcile with the exchange on startup before trading |
 | Scope creep stalls the project | Phases with exit criteria; one exchange, one pair and one strategy end to end first |
@@ -146,9 +145,11 @@ Not financial advice: treat every strategy as an experiment.
 ## 9. Open questions
 
 - [x] Build custom on CCXT, or extend Freqtrade? → Custom on CCXT (ARCHITECTURE D1).
-- [ ] Does Coins Pro have a testnet or sandbox? If not, rely on paper mode plus one tiny real order test before Phase 9.
-- [ ] Does CCXT support WebSocket streams (`watch*` methods) for `coinsph`? If not, poll REST for live prices in Phase 1.
-- [ ] Which pairs and quote currency come first: PHP pairs (e.g. BTC/PHP) or USDT pairs on Coins Pro? Check order-book depth and fees.
+- [x] Which exchange first? → MEXC spot (ARCHITECTURE D21, replacing Coins.ph).
+- [ ] Does MEXC have a spot testnet or sandbox? If not, rely on paper mode plus one tiny real order test before Phase 9.
+- [ ] Do CCXT's WebSocket streams (`watch*` methods) work reliably for `mexc`? If not, poll REST for live prices in Phase 1.
+- [ ] Which USDT pair comes first? Check order-book depth, fees and minimum order size.
+- [ ] MEXC API key rules: can keys be IP-locked and trade-only, and do they expire? Find out in P1-1.
 - [ ] pandas-ta or TA-Lib for indicators? Check maintenance status and how each installs in Docker before Phase 2.
 - [ ] Which VPS provider in Singapore (DigitalOcean, Vultr, Lightsail or Hetzner)? Decide in Phase 8.
 - [ ] Dashboard access: Tailscale only, or a domain with IP limits? Decide in Phase 8.

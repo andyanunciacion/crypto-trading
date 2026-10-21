@@ -8,7 +8,7 @@
 - **Solo builder + Claude, learning as we go.** Prefer well-documented, widely used tools with good docs and examples. Fewer moving parts beats clever designs.
 - **Money is at stake.** Correctness and safety come before speed and features. Money code is tested first and reviewed by hand.
 - **The engine must survive the UI.** The trading engine is its own process. The API and dashboard can crash or restart without affecting trading or risk checks (D3).
-- **Philippine exchange access.** Coins.ph is the first exchange; everything exchange-specific stays behind one adapter (D4).
+- **One exchange to start, easy to leave.** MEXC spot is the first exchange; everything exchange-specific stays behind one adapter, so moving means writing a new adapter, not a rewrite (D21).
 - **Low running cost.** Under about USD 30/month, self-hosted on one small VPS (D10).
 - **Same setup on PC and server.** Everything runs in Docker Compose (Docker Desktop + WSL 2 locally).
 
@@ -50,7 +50,7 @@ Every order passes the risk manager before it reaches the exchange
          | prices                                 orders |
          |                                               v
 +--------------------------------------------------------------------+
-| Exchange API (Coins.ph, via CCXT)                                  |
+| Exchange API (MEXC, via CCXT)                                      |
 | Trade-only key, IP-locked, no withdrawals                          |
 +--------------------------------------------------------------------+
 ```
@@ -74,7 +74,7 @@ Prices flow from the exchange through market data to the strategies. Signals pas
 ### 3.2 Engine and API (Python 3.12+)
 | Concern | Choice | Why |
 |---|---|---|
-| Exchange access | **CCXT** (async), wrapped in `ExchangeAdapter` | One API for 100+ exchanges; supports `coinsph` |
+| Exchange access | **CCXT** (async), wrapped in `ExchangeAdapter` | One API for 100+ exchanges; supports `mexc` |
 | API | **FastAPI + Uvicorn** | Async, typed, auto-generated docs, built-in WebSockets |
 | Engine | **Separate asyncio worker** | Survives API/UI restarts (D3) |
 | Indicators | **pandas, numpy** + pandas-ta or TA-Lib (open question) | RSI, EMA, MACD, Bollinger Bands, ATR, ADX |
@@ -124,7 +124,7 @@ Conventions:
 - **Money and quantities are `Decimal`** in Python and `NUMERIC` in Postgres. Indicator math may use float inside pandas; anything that becomes a price, amount, fee, balance or P&L is converted to Decimal at the strategy → risk boundary (D9).
 - **Timestamps are UTC** (`timestamptz`). The dashboard shows Asia/Manila time.
 - **IDs:** `bigint` identity for internal rows; orders also carry a unique `client_order_id` (D18).
-- **Symbols** use CCXT's unified format (`BTC/PHP`, `BTC/USDT`).
+- **Symbols** use CCXT's unified format (`BTC/USDT`, `ETH/USDT`).
 - **Schema changes go through Alembic migrations only.**
 - Every row that records a trading decision stores the **mode** (`backtest`, `paper`, `live`).
 
@@ -190,10 +190,10 @@ Every strategy is a plug-in with the same interface. The backtester, paper broke
 ## 8. Exchange integration
 
 - `ExchangeAdapter` wraps CCXT: balances, candles, tickers, place/cancel order, plus a sandbox flag. Nothing else imports CCXT.
-- First exchange: **Coins.ph / Coins Pro** (`coinsph` in CCXT). Whether it has a testnet and WebSocket support in CCXT is an open question (PRD §9). The fallback is REST polling, with paper mode as the testing environment.
-- PHP pairs can have thin order books: model higher slippage in backtests and prefer limit orders.
+- First exchange: **MEXC spot** (`mexc` in CCXT), see D21. Whether MEXC has a spot testnet, and how well CCXT's `watch*` WebSocket methods work for it, are open questions (PRD §9). The fallback is REST polling, with paper mode as the testing environment.
+- Pairs are USDT-quoted. Small-cap pairs can have thin order books: model higher slippage for them in backtests and prefer limit orders.
 - Rate limits are respected (CCXT `enableRateLimit`), with retries and backoff on network errors only, never on rejected orders.
-- Status of exchanges for Philippine users as of October 2026 is in `archive/main-file.md`. Recheck the BSP and SEC lists before switching.
+- **Accepted regulatory risk (D21):** MEXC isn't registered with the Philippine SEC (named in the August 2025 advisory; ISP-blocked). Treat the account as something that could be restricted or frozen without notice: keep only the trading budget on it, and move profits off by hand regularly (the app itself never withdraws).
 
 ## 9. Auth and authorization
 
@@ -232,7 +232,7 @@ Rough figures as of October 2026. **Verify current pricing before committing.**
 | D1 | **Custom app on CCXT** instead of extending Freqtrade | Learn and own the whole design; tailor the risk layer and switching | The goal shifts to "a working bot soon", or a phase badly overruns |
 | D2 | **Python for engine/API, TypeScript/Next.js for the dashboard** | Python has the trading and data libraries; Next.js is well supported | — |
 | D3 | **Engine is a separate worker**; API/UI talk to it only via Redis commands and the DB | Trading and risk checks keep running if the UI or API crashes | — |
-| D4 | **Coins.ph (`coinsph`) first, behind a generic `ExchangeAdapter`** | BSP-licensed with an API; most global exchanges are blocked for PH users | Binance or another exchange becomes legal and offers better liquidity/fees |
+| D4 | ~~**Coins.ph (`coinsph`) first, behind a generic `ExchangeAdapter`**~~ **Superseded by D21** | BSP-licensed with an API; most global exchanges are blocked for PH users | — |
 | D5 | **PostgreSQL + TimescaleDB** instead of a separate time-series DB | One database for candles and trading records | Candle queries get slow at the data volume we keep |
 | D6 | **Redis** for live prices, pub/sub commands and locks | Simple and fast; one extra container | Commands must survive a Redis restart → move them to Redis Streams or a DB queue |
 | D7 | **Same strategy code in backtest, paper and live; strategies return signals only** | Comparable results; safe switching; no exchange access from strategies | — (core rule) |
@@ -249,3 +249,4 @@ Rough figures as of October 2026. **Verify current pricing before committing.**
 | D18 | **Unique client order IDs + reconcile with the exchange on startup** | Retries never duplicate orders; state stays correct after a crash | — |
 | D19 | **Phases with exit criteria, not dates** | Part-time solo work; timing is unpredictable | — |
 | D20 | **Decision log lives here** instead of a separate `docs/decisions.md` | One source of truth for the "why" | — |
+| D21 | **MEXC spot (`mexc`) first, behind the generic `ExchangeAdapter`** (supersedes D4) | Owner tested both: MEXC has lower fees, deeper USDT order books and many more pairs than Coins.ph. Accepted risk: MEXC isn't registered with the PH SEC, so the account could be restricted or frozen | MEXC restricts the account or region, or a registered PH exchange matches its fees and liquidity |

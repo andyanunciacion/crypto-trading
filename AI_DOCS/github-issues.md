@@ -14,7 +14,7 @@
 ### P0-T1 · Repo and folder layout
 `infra` · Depends on: —
 **Goal:** a versioned monorepo with the agreed layout.
-- [ ] `git init` ✅; private GitHub repo; push
+- [x] `git init`; private GitHub repo; push
 - [x] `.gitignore` covering `.env`, Python, Node and Docker artifacts
 - [x] Folders `backend/`, `engine/`, `shared/`, `frontend/`, `infra/` with placeholder READMEs
 
@@ -59,15 +59,15 @@
 
 ## Phase 1 — Exchange connection and market data
 
-### P1-1 · ExchangeAdapter for coinsph
+### P1-1 · ExchangeAdapter for mexc
 `engine` `money` · Depends on: P0-T3
 **Goal:** the only gateway to the exchange.
 - [ ] Async CCXT wrapper: balances, candles, tickers, place/cancel order; sandbox flag
 - [ ] Decimal conversion at the adapter boundary
 - [ ] Tests with recorded responses (no network in tests)
-- [ ] Find out: testnet? `watch*` WebSocket support? Record answers in PRD §9
+- [ ] Find out: spot testnet? `watch*` WebSocket support? API key rules (IP lock, trade-only, expiry)? Record answers in PRD §9
 
-**Done when:** tests pass offline, nothing outside the adapter imports `ccxt`, and the two open questions are ticked in the PRD.
+**Done when:** tests pass offline, nothing outside the adapter imports `ccxt`, and the three open questions are ticked in the PRD.
 
 ### P1-2 · Candle store and backfill
 `engine` · Depends on: P1-1
@@ -112,7 +112,7 @@
 `strategy` `money` · Depends on: P2-1
 **Goal:** honest backtests using live strategy code.
 - [ ] Candle replay through the strategy
-- [ ] Fees, slippage (configurable, higher default for PHP pairs), minimum order sizes
+- [ ] Fees, slippage (configurable, higher default for small-cap pairs), minimum order sizes
 - [ ] `backtest_runs` table storing inputs and results
 
 **Done when:** a backtest's results can be reproduced from its stored inputs, and fees match a hand calculation in a test.
