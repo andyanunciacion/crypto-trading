@@ -25,7 +25,7 @@ If code and docs disagree, ask which is right, then update the one that's wrong.
 ## Current status
 Phase 0: planning docs written; repo on GitHub (`andyanunciacion/crypto-trading`, branch `production`). The Docker Compose stack runs: TimescaleDB, Redis, a FastAPI `/health` stub, an engine heartbeat loop and a Next.js hello page, all with health checks.
 
-**Work queue:** `AI_DOCS/github-issues.md` until the issues exist on GitHub, then GitHub. Done: planning docs, P0-T1, P0-T2. Next: P0-T3 (typed config) → P0-T5. Branches: `<issue#>-<short-slug>`. Commit titles: `#<issue#> <title>` (e.g. `#1 Switch first exchange to MEXC; mark P0-T1 done`), every commit, taking the issue number from the branch name.
+**Work queue:** `AI_DOCS/github-issues.md` until the issues exist on GitHub, then GitHub. Done: planning docs, P0-T1, P0-T2, P0-T3. Next: P0-T4 (quality gates) → P0-T5. Branches: `<issue#>-<short-slug>`. Commit titles: `#<issue#> <title>` (e.g. `#1 Switch first exchange to MEXC; mark P0-T1 done`), every commit, taking the issue number from the branch name.
 
 ## Commands
 Only list commands that exist. First run: copy `.env.example` to `.env` and set a password.
@@ -33,9 +33,10 @@ Only list commands that exist. First run: copy `.env.example` to `.env` and set 
 - `docker compose logs -f engine`: follow the engine's JSON logs
 - `docker compose down`: stop everything (data stays in the `pgdata`/`redisdata` volumes; `-v` would delete it)
 - `uv sync --all-packages`: create or update the local `.venv` for backend and engine (Python 3.12, from `.python-version`)
+- `uv run --package shared pytest shared/tests`: run the config tests
 - `pnpm install` / `pnpm typecheck` in `frontend/`
 
-Planned: pytest inside the engine/backend containers, `pre-commit run --all-files`.
+Planned: pytest for engine/backend, `pre-commit run --all-files`.
 
 ## Working with the owner
 - Solo developer **learning both the software and the trading side**. Briefly explain the **why** behind non-obvious code patterns (async, migrations, Docker, Next.js) *and* trading concepts (slippage, drawdown, walk-forward, regimes). Keep it to a sentence or two and name the concept so it can be looked up.

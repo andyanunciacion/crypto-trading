@@ -115,7 +115,7 @@ frontend/    Next.js dashboard
 infra/       Caddy config, deploy and backup scripts
 AI_DOCS/     Planning docs (this folder)
 compose.yaml       Docker Compose stack (at the root, so `docker compose up` works from a fresh clone)
-pyproject.toml     uv workspace root; members: backend, engine (shared joins in P0-T3)
+pyproject.toml     uv workspace root; members: backend, engine, shared
 uv.lock            the single Python lockfile for the workspace
 ```
 
@@ -248,7 +248,7 @@ Rough figures as of October 2026. **Verify current pricing before committing.**
 | D14 | **pnpm** for the frontend | Fast, strict installs | — |
 | D15 | **Custom event-driven backtester** as the source of truth; vectorbt only if sweeps are too slow (proposed) | Realistic fills/fees; reuses live strategy code (D7) | Parameter sweeps take too long → add vectorbt for coarse sweeps only |
 | D16 | **Telegram** for alerts and remote commands | Free, instant on the phone, has a bot API | — |
-| D17 | **Paper is the default mode**; live needs a config flag + confirmation | Stops accidental real-money trading | — |
+| D17 | **Paper is the default mode**; live needs a config flag + confirmation. The flag is the global `MODE` setting (`paper`/`live`, default `paper`, P0-T3); each bot still has its own mode, and none can go live while `MODE=paper` | Stops accidental real-money trading | — |
 | D18 | **Unique client order IDs + reconcile with the exchange on startup** | Retries never duplicate orders; state stays correct after a crash | — |
 | D19 | **Phases with exit criteria, not dates** | Part-time solo work; timing is unpredictable | — |
 | D20 | **Decision log lives here** instead of a separate `docs/decisions.md` | One source of truth for the "why" | — |
