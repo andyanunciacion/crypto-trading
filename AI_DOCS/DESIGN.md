@@ -14,7 +14,7 @@
 1. **Safety is always visible.** The kill switch and the current mode (PAPER / LIVE) are on every screen.
 2. **Show freshness.** Live numbers say how old they are. Stale data is visibly marked, never shown as current.
 3. **Dangerous actions take deliberate effort; stopping is fast.** Going live or loosening risk limits needs confirmation. Pausing and killing are one step.
-4. **Every number has a unit.** Currency (PHP, USDT, BTC) and sign (+/−) are always shown.
+4. **Every number has a unit.** Currency (USDT, BTC) and sign (+/−) are always shown.
 5. **Explain trades.** Any trade on the chart or in history links to why it happened: the signal, its inputs, and the risk check.
 6. **Desktop first.** The phone experience is Telegram; the dashboard only needs to be usable on a phone, not optimized for it.
 

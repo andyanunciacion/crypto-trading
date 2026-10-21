@@ -1,6 +1,6 @@
 # crypto-trading
 
-A self-hosted web app that watches crypto markets, runs swappable trading strategies and places orders automatically, with a risk layer that can't be bypassed. A personal tool for one operator, trading spot on Coins.ph (Philippines).
+A self-hosted web app that watches crypto markets, runs swappable trading strategies and places orders automatically, with a risk layer that can't be bypassed. A personal tool for one operator, trading spot on MEXC from the Philippines (ARCHITECTURE D21).
 
 ## Docs — read before feature work
 - `AI_DOCS/PRD.md`: what and why (features are tagged by phase: [P0]–[P9])
@@ -23,9 +23,9 @@ If code and docs disagree, ask which is right, then update the one that's wrong.
 - **Use Decimal, not float**, for prices, amounts, fees, balances and P&L (floats only inside indicator math).
 
 ## Current status
-Phase 0: planning docs written; repo initialised with `.gitignore` and the folder layout (placeholder READMEs only, no code yet). `P0-T1` is waiting only on the first push to a private GitHub repo.
+Phase 0: planning docs written; repo pushed to GitHub (`andyanunciacion/crypto-trading`, branch `production`) with `.gitignore` and the folder layout (placeholder READMEs only, no code yet).
 
-**Work queue:** `AI_DOCS/github-issues.md` until the issues exist on GitHub, then GitHub. Done: planning docs, P0-T1 (local). Next: push → P0-T2 → P0-T5. Branches: `<issue#>-<short-slug>`.
+**Work queue:** `AI_DOCS/github-issues.md` until the issues exist on GitHub, then GitHub. Done: planning docs, P0-T1. Next: P0-T2 (Docker Compose stack) → P0-T5. Branches: `<issue#>-<short-slug>`. Commit titles: `#<issue#> <title>` (e.g. `#1 Switch first exchange to MEXC; mark P0-T1 done`), every commit, taking the issue number from the branch name.
 
 ## Commands
 None yet. This section grows as tooling lands; only list commands that exist. Planned: `docker compose up` (start everything), tests run with pytest inside the engine/backend containers, `pre-commit run --all-files`.

@@ -1,6 +1,6 @@
 # crypto-trading — Start here
 
-A self-hosted web app that runs swappable crypto trading strategies on Coins.ph, with backtesting, paper trading, a risk layer that can't be bypassed, a dashboard and Telegram alerts. Built by a solo developer together with Claude.
+A self-hosted web app that runs swappable crypto trading strategies on MEXC (spot), with backtesting, paper trading, a risk layer that can't be bypassed, a dashboard and Telegram alerts. Built by a solo developer together with Claude.
 
 | Doc | Answers |
 |---|---|
