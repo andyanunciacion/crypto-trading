@@ -32,9 +32,9 @@
 ### P0-T3 · Typed config
 `infra` `security` · Depends on: P0-T2
 **Goal:** one typed config used by API and engine.
-- [ ] `shared/config.py` with pydantic-settings
-- [ ] `.env.example` with every key and no real values; `MODE=paper` default
-- [ ] Startup fails with a clear error if required settings are missing
+- [x] `shared/config.py` with pydantic-settings
+- [x] `.env.example` with every key and no real values; `MODE=paper` default
+- [x] Startup fails with a clear error if required settings are missing
 
 **Done when:** API and engine read config from `shared/`, and starting without a required var gives a readable error.
 

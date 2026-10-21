@@ -5,9 +5,13 @@ description = "FastAPI app for the crypto-trading dashboard"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.156.8",
+    "shared",
     "uvicorn[standard]>=0.54.0",
 ]
 
 [build-system]
 requires = ["uv_build>=0.13.4,<0.14"]
 build-backend = "uv_build"
+
+[tool.uv.sources]
+shared = { workspace = true }
