@@ -63,8 +63,8 @@ Prices flow from the exchange through market data to the strategies. Signals pas
 | Concern | Choice | Why |
 |---|---|---|
 | Repo | **Monorepo**, private GitHub | One place for engine, API, frontend and docs |
-| Python packaging | **uv** (proposed, D13) | Fast; lockfile; installs Python versions |
-| Node packaging | **pnpm**, Node 20+ LTS | Fast, strict dependency resolution |
+| Python packaging | **uv** workspace, one `uv.lock` at the root (D13) | Fast; lockfile; installs Python versions; API and engine share library versions |
+| Node packaging | **pnpm**, Node 24 LTS | Fast, strict dependency resolution |
 | Lint / types (Python) | **ruff**, **mypy** (strict) | Catch bugs early; keep Claude's output consistent |
 | Lint / format (TS) | **ESLint**, **Prettier** | Standard for Next.js |
 | Hooks | **pre-commit** with ruff, mypy, gitleaks | Secret scanning before anything reaches Git |
@@ -112,8 +112,11 @@ backend/     FastAPI app: REST + WebSocket, auth, reads DB, sends commands to th
 engine/      Trading worker: market data, strategies, risk manager, brokers, bot runner, regime switcher
 shared/      Code used by both: SQLAlchemy models, pydantic schemas, config, Decimal/money helpers
 frontend/    Next.js dashboard
-infra/       Docker Compose files, Caddy config, deploy and backup scripts
+infra/       Caddy config, deploy and backup scripts
 AI_DOCS/     Planning docs (this folder)
+compose.yaml       Docker Compose stack (at the root, so `docker compose up` works from a fresh clone)
+pyproject.toml     uv workspace root; members: backend, engine (shared joins in P0-T3)
+uv.lock            the single Python lockfile for the workspace
 ```
 
 Each Python package has its own `tests/` folder. Alembic migrations live in `shared/`.
@@ -241,7 +244,7 @@ Rough figures as of October 2026. **Verify current pricing before committing.**
 | D10 | **Self-hosted on one Singapore VPS with Docker Compose** instead of managed services | Low cost; low latency from Manila and to the exchange; TimescaleDB is costly as a managed service | Server upkeep takes more time than building |
 | D11 | **Single user, JWT cookie + TOTP**, dashboard behind Tailscale/IP limits | The app controls money; nobody else uses it | More users are needed |
 | D12 | **Exchange keys encrypted with Fernet**, master key in server env | Keys never stored in plain text | Moving to a managed secrets store |
-| D13 | **uv** instead of Poetry (proposed) | Faster; lockfile; installs Python itself | Tooling friction in Docker or CI |
+| D13 | **uv** instead of Poetry, as **one workspace with a single root `uv.lock`** (adopted in P0-T2) | Faster; lockfile; installs Python itself; one lock keeps API and engine on the same library versions | Tooling friction in Docker or CI |
 | D14 | **pnpm** for the frontend | Fast, strict installs | — |
 | D15 | **Custom event-driven backtester** as the source of truth; vectorbt only if sweeps are too slow (proposed) | Realistic fills/fees; reuses live strategy code (D7) | Parameter sweeps take too long → add vectorbt for coarse sweeps only |
 | D16 | **Telegram** for alerts and remote commands | Free, instant on the phone, has a bot API | — |

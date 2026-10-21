@@ -23,9 +23,9 @@
 ### P0-T2 · Docker Compose stack
 `infra` · Depends on: P0-T1
 **Goal:** every service starts with one command.
-- [ ] Postgres 16 + TimescaleDB, Redis
-- [ ] Minimal FastAPI app (`/health`), minimal engine loop (logs a heartbeat), Next.js hello page
-- [ ] Health checks and named volumes
+- [x] Postgres 16 + TimescaleDB, Redis
+- [x] Minimal FastAPI app (`/health`), minimal engine loop (logs a heartbeat), Next.js hello page
+- [x] Health checks and named volumes
 
 **Done when:** `docker compose up` starts all five services and each health check is green.
 

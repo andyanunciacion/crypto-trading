@@ -1,0 +1,13 @@
+# Build context for the backend and engine images is the repo root.
+# Keep secrets and everything the Python images don't need out of it.
+.git
+.env
+.env.*
+**/.venv
+**/__pycache__
+**/.mypy_cache
+**/.ruff_cache
+**/.pytest_cache
+frontend
+AI_DOCS
+infra

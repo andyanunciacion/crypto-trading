@@ -13,7 +13,7 @@
 ## Phase 0 — Project setup
 
 1. [x] **Repo:** `git init`, private GitHub repo, `.gitignore` (with `.env`) and folder layout (`backend/`, `engine/`, `shared/`, `frontend/`, `infra/`).
-2. [ ] **Compose stack:** Docker Compose with Postgres + TimescaleDB, Redis, API, engine and frontend. Each service starts and has a trivial health check.
+2. [x] **Compose stack:** Docker Compose with Postgres + TimescaleDB, Redis, API, engine and frontend. Each service starts and has a trivial health check.
 3. [ ] **Config:** typed settings with pydantic-settings; `.env.example` with no real secrets; `MODE=paper` by default.
 4. [ ] **Quality gates:** uv + pnpm set up; pre-commit with ruff, mypy, ESLint, Prettier, gitleaks; pytest runs one empty test.
 5. [ ] **CI:** GitHub Actions runs lint, type check and tests on every push.

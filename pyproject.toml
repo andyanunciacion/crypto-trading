@@ -1,0 +1,5 @@
+# uv workspace root: one lockfile (uv.lock) for every Python package in the repo,
+# so the API and the engine always run the same library versions.
+# This root is not a package itself; P0-T3 adds `shared` as a member.
+[tool.uv.workspace]
+members = ["backend", "engine"]
