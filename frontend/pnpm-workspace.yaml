@@ -1,0 +1,5 @@
+# pnpm runs a dependency's install scripts only if it is listed here as true.
+allowBuilds:
+  # ESLint's import resolver. Its script only checks that the prebuilt native binary
+  # is present, and pnpm already installs that as a platform-specific package.
+  unrs-resolver: false

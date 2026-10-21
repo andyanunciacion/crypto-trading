@@ -1,0 +1,58 @@
+# Checks that run on staged files before every commit.
+# Set up once with `uv run pre-commit install`; run by hand with
+# `uv run pre-commit run --all-files`. Update pinned revs with `uv run pre-commit autoupdate`.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        # pnpm 12 writes pnpm-lock.yaml as several YAML documents in one file.
+        args: [--allow-multiple-documents]
+      - id: check-toml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-added-large-files
+
+  # Scans staged changes for API keys, tokens and passwords.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.0
+    hooks:
+      - id: gitleaks
+        # pre-commit downloads this Go just to build gitleaks, instead of using whatever Go
+        # is on the machine (too old ones can't read gitleaks' go.mod). Match its go.mod.
+        language_version: 1.25.4
+
+  # Local hooks use our own tool versions (uv.lock, pnpm-lock.yaml), so they match CI and the editor.
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --fix --force-exclude
+        language: system
+        types_or: [python, pyi]
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format --force-exclude
+        language: system
+        types_or: [python, pyi]
+      # Runs on the whole project, not only staged files: strict mode needs the full picture.
+      - id: mypy
+        name: mypy (strict)
+        entry: uv run mypy
+        language: system
+        types_or: [python, pyi, toml]
+        pass_filenames: false
+      - id: eslint
+        name: eslint (frontend)
+        entry: pnpm --dir frontend lint
+        language: system
+        files: ^frontend/
+        pass_filenames: false
+      - id: prettier
+        name: prettier (frontend)
+        entry: pnpm --dir frontend format:check
+        language: system
+        files: ^frontend/
+        pass_filenames: false

@@ -1,6 +1,7 @@
 """Tests for shared.config. They never read the real .env (env_file=None)."""
 
 import pytest
+
 from shared.config import load_settings
 
 PASSWORD = "s3cret-test-password"

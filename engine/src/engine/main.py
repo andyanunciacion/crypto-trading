@@ -5,10 +5,12 @@ Market data, strategies, the RiskManager and brokers plug into it in later phase
 """
 
 import asyncio
+import contextlib
 import signal
 from pathlib import Path
 
 import structlog
+
 from shared.config import Settings, load_settings
 
 HEARTBEAT_INTERVAL_SECONDS = 10
@@ -36,11 +38,9 @@ async def run(settings: Settings) -> None:
     # Python running as PID 1 in a container ignores SIGTERM unless it has a handler,
     # so without this `docker compose stop` would wait 10 s and then kill the engine.
     for sig in (signal.SIGTERM, signal.SIGINT):
-        try:
+        # Windows event loops don't support signal handlers; Ctrl+C still works.
+        with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop.set)
-        except NotImplementedError:
-            # Windows event loops don't support signal handlers; Ctrl+C still works.
-            pass
 
     log.info(
         "engine.starting",
@@ -50,12 +50,11 @@ async def run(settings: Settings) -> None:
     beat = 0
     while not stop.is_set():
         beat += 1
-        HEARTBEAT_FILE.touch()
+        # File I/O blocks; in a thread it can't stall the event loop.
+        await asyncio.to_thread(HEARTBEAT_FILE.touch)
         log.info("engine.heartbeat", beat=beat)
-        try:
+        with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(stop.wait(), timeout=HEARTBEAT_INTERVAL_SECONDS)
-        except TimeoutError:
-            pass
     log.info("engine.stopping")
 
 

@@ -35,8 +35,7 @@ def load_settings(env_file: str | None = ".env") -> Settings:
     `env_file=None` skips the .env file (tests use this).
     """
     try:
-        # mypy can't tell that pydantic fills the required fields from the environment.
-        return Settings(_env_file=env_file)  # type: ignore[call-arg]
+        return Settings(_env_file=env_file)
     except ValidationError as exc:
         raise SystemExit(_describe(exc)) from None
 
