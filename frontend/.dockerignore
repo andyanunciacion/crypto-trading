@@ -1,0 +1,7 @@
+# Build context for the frontend image is frontend/ (see compose.yaml).
+node_modules
+.next
+.env
+.env.*
+*.tsbuildinfo
+next-env.d.ts
