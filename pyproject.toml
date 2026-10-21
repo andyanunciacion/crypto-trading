@@ -3,3 +3,46 @@
 # This root is not a package itself; `shared` holds code both of the others use.
 [tool.uv.workspace]
 members = ["backend", "engine", "shared"]
+
+# Dev tools for the whole repo live here, so every package is checked the same way.
+[dependency-groups]
+dev = [
+    "mypy>=2.4.0",
+    "pre-commit>=4.7.0",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.17.1",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+# Where our own packages live, so imports of them sort as first-party.
+src = ["backend/src", "engine/src", "shared/src"]
+
+[tool.ruff.lint]
+# E/W pycodestyle, F pyflakes, I import order, B bugbear, UP pyupgrade, SIM simplify,
+# RUF ruff-specific, ASYNC async pitfalls, DTZ naive datetimes (timestamps must be UTC).
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "ASYNC", "DTZ"]
+
+[tool.mypy]
+strict = true
+# Teaches mypy how pydantic models and settings build their __init__.
+plugins = ["pydantic.mypy"]
+files = [
+    "shared/src", "shared/tests",
+    "backend/src", "backend/tests",
+    "engine/src", "engine/tests",
+]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+[tool.pytest.ini_options]
+testpaths = ["shared/tests", "backend/tests", "engine/tests"]
+# The tests/ folders have no __init__.py, so test file names must be unique across packages.
+# Run `async def` tests on an event loop without marking each one.
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

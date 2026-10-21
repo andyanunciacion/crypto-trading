@@ -41,10 +41,10 @@
 ### P0-T4 · Quality gates
 `infra` · Depends on: P0-T1
 **Goal:** consistent code from the first commit.
-- [ ] uv project(s) for Python; pnpm for frontend
-- [ ] ruff, mypy (strict), ESLint, Prettier configured
-- [ ] pre-commit with ruff, mypy, gitleaks
-- [ ] pytest with one passing test per Python package
+- [x] uv project(s) for Python; pnpm for frontend
+- [x] ruff, mypy (strict), ESLint, Prettier configured
+- [x] pre-commit with ruff, mypy, gitleaks
+- [x] pytest with one passing test per Python package
 
 **Done when:** `pre-commit run --all-files` passes, and committing a fake API key is blocked by gitleaks.
 

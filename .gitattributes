@@ -1,0 +1,3 @@
+# Always LF line endings, even on Windows with core.autocrlf=true: Prettier, ruff
+# and the Linux containers all expect LF, and mixed endings make noisy diffs.
+* text=auto eol=lf

@@ -15,3 +15,8 @@ build-backend = "uv_build"
 
 [tool.uv.sources]
 shared = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.16.0",
+]

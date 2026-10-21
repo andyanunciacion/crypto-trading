@@ -23,20 +23,24 @@ If code and docs disagree, ask which is right, then update the one that's wrong.
 - **Use Decimal, not float**, for prices, amounts, fees, balances and P&L (floats only inside indicator math).
 
 ## Current status
-Phase 0: planning docs written; repo on GitHub (`andyanunciacion/crypto-trading`, branch `production`). The Docker Compose stack runs: TimescaleDB, Redis, a FastAPI `/health` stub, an engine heartbeat loop and a Next.js hello page, all with health checks.
+Phase 0: planning docs written; repo on GitHub (`andyanunciacion/crypto-trading`, branch `production`). The Docker Compose stack runs: TimescaleDB, Redis, a FastAPI `/health` stub, an engine heartbeat loop and a Next.js hello page, all with health checks. Quality gates are in place: ruff, mypy strict, pytest, ESLint, Prettier and gitleaks, all run by pre-commit.
 
-**Work queue:** `AI_DOCS/github-issues.md` until the issues exist on GitHub, then GitHub. Done: planning docs, P0-T1, P0-T2, P0-T3. Next: P0-T4 (quality gates) → P0-T5. Branches: `<issue#>-<short-slug>`. Commit titles: `#<issue#> <title>` (e.g. `#1 Switch first exchange to MEXC; mark P0-T1 done`), every commit, taking the issue number from the branch name.
+**Work queue:** `AI_DOCS/github-issues.md` until the issues exist on GitHub, then GitHub. Done: planning docs, P0-T1, P0-T2, P0-T3, P0-T4. Next: P0-T5 (CI) → Phase 1. Branches: `<issue#>-<short-slug>`. Commit titles: `#<issue#> <title>` (e.g. `#1 Switch first exchange to MEXC; mark P0-T1 done`), every commit, taking the issue number from the branch name.
 
 ## Commands
 Only list commands that exist. First run: copy `.env.example` to `.env` and set a password.
 - `docker compose up --build -d`: build and start all five services; `docker compose ps` should show each one `(healthy)`
 - `docker compose logs -f engine`: follow the engine's JSON logs
 - `docker compose down`: stop everything (data stays in the `pgdata`/`redisdata` volumes; `-v` would delete it)
-- `uv sync --all-packages`: create or update the local `.venv` for backend and engine (Python 3.12, from `.python-version`)
-- `uv run --package shared pytest shared/tests`: run the config tests
-- `pnpm install` / `pnpm typecheck` in `frontend/`
+- `uv sync --all-packages`: create or update the local `.venv` for backend, engine and the dev tools (Python 3.12, from `.python-version`)
+- `uv run pytest`: run every Python package's tests
+- `uv run ruff check .` / `uv run ruff format .`: lint / format Python
+- `uv run mypy`: strict type check of all Python packages and tests
+- `uv run pre-commit install`: once per clone, so the hooks run on every commit
+- `uv run pre-commit run --all-files`: every check, incl. gitleaks, ESLint and Prettier
+- In `frontend/`: `pnpm install`, `pnpm typecheck`, `pnpm lint`, `pnpm format` / `pnpm format:check`
 
-Planned: pytest for engine/backend, `pre-commit run --all-files`.
+Planned: CI (P0-T5).
 
 ## Working with the owner
 - Solo developer **learning both the software and the trading side**. Briefly explain the **why** behind non-obvious code patterns (async, migrations, Docker, Next.js) *and* trading concepts (slippage, drawdown, walk-forward, regimes). Keep it to a sentence or two and name the concept so it can be looked up.
