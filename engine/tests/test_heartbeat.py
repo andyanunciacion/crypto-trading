@@ -1,7 +1,6 @@
 """The engine loop writes its heartbeat file, which Docker's health check watches."""
 
 import asyncio
-import os
 from pathlib import Path
 
 import pytest
