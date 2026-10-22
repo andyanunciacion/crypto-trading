@@ -1,10 +1,12 @@
 """ExchangeAdapter against recorded MEXC responses (see conftest.py; no network)."""
 
+import json
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from conftest import ReplaySession, Reply, without_waits
+from conftest import FIXTURES_DIR, ReplaySession, Reply, without_waits
 from pydantic import ValidationError
 
 from engine.exchange.adapter import ExchangeAdapter
@@ -16,7 +18,7 @@ from engine.exchange.errors import (
     SandboxUnavailable,
     TradingDisabled,
 )
-from engine.exchange.models import OrderRequest
+from engine.exchange.models import OrderRequest, Ticker
 
 BTC = "BTC/USDT"
 
@@ -101,6 +103,89 @@ async def test_ticker(adapter: ExchangeAdapter) -> None:
     assert ticker.ask == Decimal("81666.33")
     assert ticker.last == Decimal("81670.41")
     assert ticker.ts.tzinfo is UTC
+
+
+def test_a_ticker_needs_at_least_one_price() -> None:
+    with pytest.raises(ValidationError, match="no price"):
+        Ticker(symbol=BTC, ts=datetime(2026, 10, 22, tzinfo=UTC))
+
+
+# --- Streaming (WebSocket) -------------------------------------------------------------
+
+
+@dataclass
+class FakeStreamClient:
+    """Stands in for CCXT's WebSocket client: hands back recorded, already-parsed updates."""
+
+    updates: list[dict[str, object]]
+    closed: bool = False
+
+    async def watch_ticker(self, symbol: str) -> dict[str, object]:
+        return self.updates.pop(0)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def recorded_stream_ticker() -> dict[str, object]:
+    raw: dict[str, object] = json.loads(
+        (FIXTURES_DIR / "mexc/ws_ticker_btcusdt.json").read_text(encoding="utf-8")
+    )
+    return raw
+
+
+async def test_streamed_ticker_has_bid_and_ask_but_no_last(adapter: ExchangeAdapter) -> None:
+    # MEXC's spot stream is its book ticker: best bid and ask only, no last trade.
+    adapter._stream_clients[BTC] = FakeStreamClient([recorded_stream_ticker()])
+
+    ticker = await adapter.watch_ticker(BTC)
+
+    assert ticker.symbol == BTC
+    assert ticker.bid == Decimal("81819.48")
+    assert ticker.ask == Decimal("81819.49")
+    assert ticker.last is None
+    assert ticker.ts == datetime(2026, 10, 22, 14, 40, 55, 344000, tzinfo=UTC)
+
+
+async def test_streamed_ticker_without_prices_is_an_error(adapter: ExchangeAdapter) -> None:
+    empty = recorded_stream_ticker() | {"bid": None, "ask": None}
+    adapter._stream_clients[BTC] = FakeStreamClient([empty])
+
+    with pytest.raises(ExchangeError, match="unexpected"):
+        await adapter.watch_ticker(BTC)
+
+
+async def test_stream_client_reuses_the_loaded_markets(
+    adapter: ExchangeAdapter, replay: ReplaySession
+) -> None:
+    # Each reconnect builds a new client; it must not download every market again.
+    client = await adapter._stream_client(BTC)
+    client.timeout_on_exit = 0  # no real socket to wait for
+    again = await adapter._stream_client(BTC)
+
+    assert again is client
+    assert client.markets is adapter._exchange.markets
+    assert client.number is str  # numbers stay strings, as on the REST client
+    assert len(replay.sent_to("GET", "/api/v3/exchangeInfo")) == 1  # the REST load only
+
+
+async def test_close_stream_drops_the_client(adapter: ExchangeAdapter) -> None:
+    fake = FakeStreamClient([])
+    adapter._stream_clients[BTC] = fake
+
+    await adapter.close_stream(BTC)
+    await adapter.close_stream(BTC)  # closing twice is fine
+
+    assert fake.closed
+    assert BTC not in adapter._stream_clients
+
+
+async def test_close_also_closes_the_streams(replay: ReplaySession) -> None:
+    fake = FakeStreamClient([])
+    async with without_waits(ExchangeAdapter(session=replay)) as exchange:
+        exchange._stream_clients[BTC] = fake
+
+    assert fake.closed
 
 
 async def test_market_rules(adapter: ExchangeAdapter) -> None:

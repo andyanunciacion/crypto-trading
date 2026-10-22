@@ -5,9 +5,9 @@ leave the adapter.
 """
 
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 Timeframe = Literal["1m", "5m", "15m", "1h", "4h", "1d"]
 OrderSide = Literal["buy", "sell"]
@@ -41,11 +41,23 @@ class Candle(_Frozen):
 
 
 class Ticker(_Frozen):
+    """The current price of one symbol: best bid and ask, and the last trade.
+
+    MEXC's spot WebSocket sends only the best bid and ask (its "book ticker"), so a
+    streamed ticker has no `last`. REST sends all three. Every ticker has at least one.
+    """
+
     symbol: str
     ts: AwareDatetime
     bid: Decimal | None = Field(default=None, gt=0)  # None when the book side is empty
     ask: Decimal | None = Field(default=None, gt=0)
-    last: Decimal = Field(gt=0)
+    last: Decimal | None = Field(default=None, gt=0)  # None from the WebSocket
+
+    @model_validator(mode="after")
+    def _has_a_price(self) -> Self:
+        if self.bid is None and self.ask is None and self.last is None:
+            raise ValueError("ticker has no price: no bid, ask or last")
+        return self
 
 
 class MarketRules(_Frozen):

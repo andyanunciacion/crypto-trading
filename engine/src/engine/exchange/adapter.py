@@ -1,6 +1,7 @@
 """The only gateway to the exchange: everything that talks to MEXC goes through here.
 
-Wraps CCXT's async client; this package is the only place that imports ccxt. On the
+Wraps CCXT's async client, plus its WebSocket clients (ccxt.pro) for live prices;
+this package is the only place that imports ccxt. On the
 way out, CCXT's dicts become the validated models in models.py (Decimal money, UTC
 times) and CCXT's exceptions become the ones in errors.py.
 
@@ -8,6 +9,7 @@ The adapter doesn't decide whether to trade; the RiskManager does that. It refus
 orders only when trading is switched off, or when the exchange would refuse them anyway.
 """
 
+import asyncio
 import contextlib
 import logging
 from collections.abc import Iterator
@@ -17,6 +19,7 @@ from types import TracebackType
 from typing import Any, Self
 
 import ccxt.async_support as ccxt
+import ccxt.pro as ccxt_pro  # the WebSocket clients
 import structlog
 from pydantic import BaseModel, SecretStr, ValidationError
 
@@ -40,6 +43,7 @@ logging.getLogger("ccxt").setLevel(logging.INFO)
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 # Keys in CCXT's balance dict that aren't currencies.
 _BALANCE_META = frozenset({"info", "free", "used", "total", "timestamp", "datetime"})
+_STREAM_CLOSE_TIMEOUT_SECONDS = 10
 
 
 class ExchangeAdapter:
@@ -77,6 +81,9 @@ class ExchangeAdapter:
             config["apiKey"] = api_key.get_secret_value()
         if api_secret is not None:
             config["secret"] = api_secret.get_secret_value()
+        # WebSocket clients (ccxt.pro) are built later, one per streamed symbol, with the
+        # same settings. Never with the test session: that one only replays HTTP.
+        self._stream_config = dict(config)
         if session is not None:
             # CCXT uses this instead of opening its own connection pool.
             config["session"] = session
@@ -85,6 +92,8 @@ class ExchangeAdapter:
         # Numbers come back as strings, so they reach Decimal without passing through float.
         self._exchange.number = str
         self._trading_enabled = trading_enabled
+        self._sandbox = sandbox
+        self._stream_clients: dict[str, Any] = {}
 
         if self._exchange.precisionMode != ccxt.TICK_SIZE:
             # market_rules() reads precision as step sizes; other modes mean digit counts.
@@ -99,6 +108,8 @@ class ExchangeAdapter:
             self._exchange.set_sandbox_mode(True)
 
     async def close(self) -> None:
+        for symbol in list(self._stream_clients):
+            await self.close_stream(symbol)
         await self._exchange.close()
 
     async def __aenter__(self) -> Self:
@@ -146,16 +157,58 @@ class ExchangeAdapter:
     async def fetch_ticker(self, symbol: str) -> Ticker:
         with _translated_errors():
             raw = await self._exchange.fetch_ticker(symbol)
-        return _parse(
-            Ticker,
-            {
-                "symbol": raw.get("symbol"),
-                "ts": _from_ms(raw.get("timestamp")),
-                "bid": raw.get("bid"),
-                "ask": raw.get("ask"),
-                "last": raw.get("last"),
-            },
-        )
+        return _parse_ticker(raw)
+
+    async def watch_ticker(self, symbol: str) -> Ticker:
+        """Wait for the next price update of `symbol` over the exchange's WebSocket.
+
+        The first call connects and subscribes; later calls wait on the same connection.
+        On MEXC spot the updates carry the best bid and ask only (no `last`), up to 10 a
+        second. A failed connection raises `ExchangeNetworkError`, but one can also just
+        go quiet (a pulled network often doesn't error), so callers need a timeout of
+        their own. After any failure, call `close_stream(symbol)`: the next call then
+        opens a fresh connection.
+        """
+        client = await self._stream_client(symbol)
+        with _translated_errors():
+            raw = await client.watch_ticker(symbol)
+        return _parse_ticker(raw)
+
+    async def close_stream(self, symbol: str) -> None:
+        """Close `symbol`'s WebSocket, if one is open. Never raises."""
+        client = self._stream_clients.pop(symbol, None)
+        if client is None:
+            return
+        try:
+            # A socket whose network is gone can take a while to close politely.
+            async with asyncio.timeout(_STREAM_CLOSE_TIMEOUT_SECONDS):
+                await client.close()
+        except Exception as exc:
+            # It's dropped either way; the next watch opens a new connection.
+            log.warning("exchange.stream.close_failed", symbol=symbol, error=type(exc).__name__)
+
+    async def _stream_client(self, symbol: str) -> Any:
+        """The WebSocket client for `symbol`, built on first use and after close_stream().
+
+        One client (so one connection) per symbol: a quiet or broken stream for one
+        symbol can be dropped without cutting off the others. Each new client reuses
+        the REST client's markets instead of downloading them all again on every
+        reconnect.
+        """
+        client = self._stream_clients.get(symbol)
+        if client is not None:
+            return client
+        if not hasattr(ccxt_pro, self.exchange_id):
+            raise errors.ExchangeError(f"{self.exchange_id} has no WebSocket support in CCXT")
+        with _translated_errors():
+            await self._exchange.load_markets()
+            client = getattr(ccxt_pro, self.exchange_id)(dict(self._stream_config))
+            client.number = str
+            if self._sandbox:
+                client.set_sandbox_mode(True)
+            client.set_markets_from_exchange(self._exchange)
+        self._stream_clients[symbol] = client
+        return client
 
     async def market_rules(self, symbol: str) -> MarketRules:
         """Step sizes and minimums for `symbol`. Markets load once, on first use."""
@@ -282,6 +335,20 @@ def _refuse_if_off_market(request: OrderRequest, rules: MarketRules) -> None:
     if problems:
         log.warning("exchange.order.refused", problems=problems, **request.model_dump(mode="json"))
         raise errors.OrderRejected("; ".join(problems))
+
+
+def _parse_ticker(raw: Any) -> Ticker:
+    # REST and WebSocket tickers arrive in the same CCXT shape.
+    return _parse(
+        Ticker,
+        {
+            "symbol": raw.get("symbol"),
+            "ts": _from_ms(raw.get("timestamp")),
+            "bid": raw.get("bid"),
+            "ask": raw.get("ask"),
+            "last": raw.get("last"),
+        },
+    )
 
 
 def _parse_order(raw: Any, client_order_id: str) -> Order:

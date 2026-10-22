@@ -1,0 +1,29 @@
+{
+  "info": {
+    "bidPrice": "81819.48",
+    "bidQuantity": "0.12200121",
+    "askPrice": "81819.49",
+    "askQuantity": "2.961881"
+  },
+  "symbol": "BTC/USDT",
+  "timestamp": 1792680055344,
+  "datetime": "2026-10-22T14:40:55.344Z",
+  "open": null,
+  "high": null,
+  "low": null,
+  "close": null,
+  "last": null,
+  "bid": "81819.48",
+  "bidVolume": "0.12200121",
+  "ask": "81819.49",
+  "askVolume": "2.961881",
+  "vwap": null,
+  "previousClose": null,
+  "change": null,
+  "percentage": null,
+  "average": null,
+  "baseVolume": null,
+  "quoteVolume": null,
+  "indexPrice": null,
+  "markPrice": null
+}

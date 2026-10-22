@@ -81,9 +81,9 @@
 ### P1-3 · Live price stream
 `engine` · Depends on: P1-1
 **Goal:** current prices always available in Redis.
-- [ ] WebSocket stream, or REST polling fallback
-- [ ] Latest price per symbol in Redis + published on a channel
-- [ ] Auto-reconnect with exponential backoff
+- [x] WebSocket stream, or REST polling fallback
+- [x] Latest price per symbol in Redis + published on a channel
+- [x] Auto-reconnect with exponential backoff
 
 **Done when:** prices update in Redis for one hour without a crash, including after pulling the network for 30 seconds.
 

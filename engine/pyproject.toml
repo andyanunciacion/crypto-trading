@@ -5,6 +5,8 @@ description = "crypto-trading worker: market data, strategies, risk and brokers"
 requires-python = ">=3.12"
 dependencies = [
     "ccxt>=4.5.89",
+    "protobuf>=5.29.3,<6",
+    "redis>=8.1.0",
     "shared",
     "structlog>=26.1.0",
 ]
