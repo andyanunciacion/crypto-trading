@@ -80,6 +80,7 @@ class ExchangeAdapter:
         if session is not None:
             # CCXT uses this instead of opening its own connection pool.
             config["session"] = session
+        self.exchange_id = exchange_id
         self._exchange: Any = getattr(ccxt, exchange_id)(config)
         # Numbers come back as strings, so they reach Decimal without passing through float.
         self._exchange.number = str

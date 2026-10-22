@@ -8,6 +8,7 @@ from typing import Literal
 
 from pydantic import SecretStr, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy import URL
 
 
 class Settings(BaseSettings):
@@ -27,6 +28,19 @@ class Settings(BaseSettings):
     postgres_port: int = 5432
 
     redis_url: str = "redis://redis:6379/0"
+
+    @property
+    def database_url(self) -> URL:
+        # Built from parts, not a formatted string, so a password containing '@', ':' or
+        # '/' can't break the URL. A URL object also hides the password when printed.
+        return URL.create(
+            "postgresql+asyncpg",
+            username=self.postgres_user,
+            password=self.postgres_password.get_secret_value(),
+            host=self.postgres_host,
+            port=self.postgres_port,
+            database=self.postgres_db,
+        )
 
 
 def load_settings(env_file: str | None = ".env") -> Settings:

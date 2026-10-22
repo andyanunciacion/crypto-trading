@@ -72,9 +72,9 @@
 ### P1-2 · Candle store and backfill
 `engine` · Depends on: P1-1
 **Goal:** complete price history in the database.
-- [ ] `candles` hypertable via Alembic
-- [ ] Downloader for 1m, 5m, 15m, 1h, 4h, 1d; idempotent upserts
-- [ ] Gap detection and filling
+- [x] `candles` hypertable via Alembic
+- [x] Downloader for 1m, 5m, 15m, 1h, 4h, 1d; idempotent upserts
+- [x] Gap detection and filling
 
 **Done when:** a year of 1h candles for the first pair is stored, and a gap-check query returns no gaps.
 
