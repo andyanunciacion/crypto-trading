@@ -51,7 +51,7 @@
 ### P0-T5 · CI
 `infra` · Depends on: P0-T4
 **Goal:** checks run on every push.
-- [ ] GitHub Actions: ruff, mypy, pytest, ESLint, frontend type check
+- [x] GitHub Actions: ruff, mypy, pytest, ESLint, frontend type check (+ Prettier, gitleaks)
 
 **Done when:** a push runs the workflow green, and a deliberate lint error turns it red.
 

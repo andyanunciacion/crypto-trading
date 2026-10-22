@@ -16,7 +16,7 @@
 2. [x] **Compose stack:** Docker Compose with Postgres + TimescaleDB, Redis, API, engine and frontend. Each service starts and has a trivial health check.
 3. [x] **Config:** typed settings with pydantic-settings; `.env.example` with no real secrets; `MODE=paper` by default.
 4. [x] **Quality gates:** uv + pnpm set up; pre-commit with ruff, mypy, ESLint, Prettier, gitleaks; pytest runs one empty test.
-5. [ ] **CI:** GitHub Actions runs lint, type check and tests on every push.
+5. [x] **CI:** GitHub Actions runs lint, type check and tests on every push.
 
 **Exit criteria:** `docker compose up` starts every service; CI passes on an empty test; gitleaks blocks a commit containing a fake key.
 
