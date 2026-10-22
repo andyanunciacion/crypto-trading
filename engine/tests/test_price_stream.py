@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
+from structlog.testing import capture_logs
 
 from engine.backoff import Backoff
 from engine.exchange.errors import ExchangeError, ExchangeNetworkError
@@ -158,6 +159,22 @@ async def test_network_errors_reconnect_with_growing_backoff_then_reset() -> Non
     assert exchange.closed[:3] == [BTC, BTC, BTC]  # each dead socket is dropped first
     assert exchange.stream == []  # it reconnected after each failure
     assert backoff.attempts == 0  # the first good update resets it
+
+
+async def test_every_reconnect_is_logged() -> None:
+    down = ExchangeNetworkError("connection reset")
+    exchange = FakeExchange([down, down, ticker()])
+    sink = MemorySink()
+
+    with capture_logs() as logs:
+        await run_until(make_stream(exchange, sink), lambda: len(sink.by("ws")) == 1)
+
+    reconnects = [e for e in logs if e["event"] == "prices.stream.reconnecting"]
+    assert [e["attempt"] for e in reconnects] == [1, 2]
+    assert reconnects[0]["error"] == "ExchangeNetworkError"
+    assert reconnects[0]["log_level"] == "warning"
+    (recovered,) = [e for e in logs if e["event"] == "prices.stream.recovered"]
+    assert recovered["attempts"] == 2
 
 
 async def test_a_silent_stream_counts_as_dead() -> None:

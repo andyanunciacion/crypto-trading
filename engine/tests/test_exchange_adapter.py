@@ -8,6 +8,7 @@ from decimal import Decimal
 import pytest
 from conftest import FIXTURES_DIR, ReplaySession, Reply, without_waits
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
 from engine.exchange.adapter import ExchangeAdapter
 from engine.exchange.errors import (
@@ -334,6 +335,8 @@ async def test_network_failures_are_retryable(
 
     with pytest.raises(ExchangeNetworkError):
         await adapter.fetch_ticker(BTC)
+    # Retried with backoff, then given up: 5 tries in all.
+    assert len(replay.sent_to("GET", "/api/v3/ticker/24hr")) == 5
 
 
 async def test_rejections_are_not_network_errors(
@@ -347,6 +350,128 @@ async def test_rejections_are_not_network_errors(
     with pytest.raises(ExchangeError) as caught:
         await trading_adapter.place_order(limit_buy())
     assert not isinstance(caught.value, ExchangeNetworkError)
+
+
+# --- Retries (P1-4): reads retry on network errors; orders never resend ---------------
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        Reply(error=TimeoutError()),
+        Reply(body="Service Unavailable", status=503),
+        Reply(body="Too Many Requests", status=429),  # rate limited
+    ],
+    ids=["timeout", "http-503", "http-429"],
+)
+async def test_reads_retry_network_errors(
+    adapter: ExchangeAdapter, replay: ReplaySession, failure: Reply
+) -> None:
+    replay.routes["GET", "/api/v3/klines"] = [failure, Reply("mexc/klines_btcusdt_60m.json")]
+
+    with capture_logs() as logs:
+        candles = await adapter.fetch_candles(BTC, "1h")
+
+    assert len(candles) == 3
+    assert len(replay.sent_to("GET", "/api/v3/klines")) == 2
+    (retry,) = [e for e in logs if e["event"] == "exchange.retrying"]
+    assert retry["operation"] == "fetch_candles"
+    assert retry["symbol"] == BTC
+
+
+async def test_market_loading_retries(adapter: ExchangeAdapter, replay: ReplaySession) -> None:
+    replay.routes["GET", "/api/v3/exchangeInfo"] = [
+        Reply(error=TimeoutError()),
+        Reply("mexc/exchange_info.json"),
+    ]
+
+    rules = await adapter.market_rules(BTC)
+
+    assert rules.price_step == Decimal("0.01")
+    assert len(replay.sent_to("GET", "/api/v3/exchangeInfo")) == 2
+
+
+async def test_balances_retry(trading_adapter: ExchangeAdapter, replay: ReplaySession) -> None:
+    replay.routes["GET", "/api/v3/account"] = [
+        Reply(error=TimeoutError()),
+        Reply("mexc/account.json"),
+    ]
+
+    balances = await trading_adapter.fetch_balances()
+
+    assert set(balances) == {"BTC", "USDT"}
+    assert len(replay.sent_to("GET", "/api/v3/account")) == 2
+
+
+async def test_auth_errors_are_not_retried(
+    trading_adapter: ExchangeAdapter, replay: ReplaySession
+) -> None:
+    replay.routes["GET", "/api/v3/account"] = Reply("mexc/error_bad_signature.json", status=400)
+
+    with pytest.raises(AuthError):
+        await trading_adapter.fetch_balances()
+    assert len(replay.sent_to("GET", "/api/v3/account")) == 1
+
+
+async def test_rejected_orders_are_not_retried(
+    trading_adapter: ExchangeAdapter, replay: ReplaySession
+) -> None:
+    replay.routes["POST", "/api/v3/order"] = Reply(
+        "mexc/error_insufficient_balance.json", status=400
+    )
+
+    with capture_logs() as logs, pytest.raises(OrderRejected):
+        await trading_adapter.place_order(limit_buy())
+
+    assert len(replay.sent_to("POST", "/api/v3/order")) == 1
+    assert not [e for e in logs if e["event"].startswith("exchange.retry")]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [Reply(error=TimeoutError()), Reply(body="Service Unavailable", status=503)],
+    ids=["timeout", "http-503"],
+)
+async def test_orders_with_unknown_outcome_are_not_resent(
+    trading_adapter: ExchangeAdapter, replay: ReplaySession, failure: Reply
+) -> None:
+    # The order may have reached the exchange. Resending could place it twice;
+    # LiveBroker (P9) looks it up by client order ID instead (D18, D27).
+    replay.routes["POST", "/api/v3/order"] = [failure, Reply("mexc/order_new.json")]
+
+    with pytest.raises(ExchangeNetworkError):
+        await trading_adapter.place_order(limit_buy())
+
+    assert len(replay.sent_to("POST", "/api/v3/order")) == 1
+
+
+async def test_cancels_are_not_retried(
+    trading_adapter: ExchangeAdapter, replay: ReplaySession
+) -> None:
+    replay.routes["DELETE", "/api/v3/order"] = [
+        Reply(error=TimeoutError()),
+        Reply("mexc/order_cancel.json"),
+    ]
+
+    with pytest.raises(ExchangeNetworkError):
+        await trading_adapter.cancel_order(BTC, "bot1-000001")
+
+    assert len(replay.sent_to("DELETE", "/api/v3/order")) == 1
+
+
+async def test_order_checks_retry_before_anything_is_sent(
+    trading_adapter: ExchangeAdapter, replay: ReplaySession
+) -> None:
+    # Loading the market rules is a read, and no order has gone out yet: safe to retry.
+    replay.routes["GET", "/api/v3/exchangeInfo"] = [
+        Reply(error=TimeoutError()),
+        Reply("mexc/exchange_info.json"),
+    ]
+
+    order = await trading_adapter.place_order(limit_buy())
+
+    assert order.client_order_id == "bot1-000001"
+    assert len(replay.sent_to("POST", "/api/v3/order")) == 1
 
 
 # --- Safety --------------------------------------------------------------------------

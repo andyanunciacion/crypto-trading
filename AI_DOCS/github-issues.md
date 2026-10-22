@@ -90,8 +90,8 @@
 ### P1-4 · Rate limits and retries
 `engine` · Depends on: P1-1
 **Goal:** the engine is polite to the exchange and resilient to network errors.
-- [ ] `enableRateLimit`; retry with backoff on network errors only (never on rejected orders)
-- [ ] structlog entries for every retry and reconnect
+- [x] `enableRateLimit`; retry with backoff on network errors only (never on rejected orders)
+- [x] structlog entries for every retry and reconnect
 
 **Done when:** tests show network errors retry and rejected orders don't.
 

@@ -85,7 +85,8 @@ class _PendingResponse:
 
 @dataclass
 class ReplaySession:
-    routes: dict[tuple[str, str], Reply] = field(default_factory=lambda: dict(ROUTES))
+    # A list of replies is served in order, one per request; the last one then repeats.
+    routes: dict[tuple[str, str], Reply | list[Reply]] = field(default_factory=lambda: dict(ROUTES))
     sent: list[SentRequest] = field(default_factory=list)
     headers: dict[str, str] = field(default_factory=dict)  # CCXT merges these into requests
 
@@ -111,6 +112,8 @@ class ReplaySession:
         reply = self.routes.get((method, parts.path))
         if reply is None:
             raise AssertionError(f"unexpected request in an offline test: {method} {url}")
+        if isinstance(reply, list):
+            reply = reply.pop(0) if len(reply) > 1 else reply[0]
         return _PendingResponse(reply)
 
 
@@ -118,8 +121,10 @@ def without_waits(adapter: ExchangeAdapter) -> ExchangeAdapter:
     # The replay answers instantly, so skip CCXT's pacing: its rate limiter would wait
     # seconds per test (MEXC weights exchangeInfo at 25 x 50 ms), and close() waits
     # 250 ms for real sockets to shut. test_rate_limiting_is_on checks the real default.
+    # Retries happen at once too; test_retry.py checks the backoff.
     adapter._exchange.enableRateLimit = False
     adapter._exchange.timeout_on_exit = 0
+    adapter._retry_base_delay = 0
     return adapter
 
 
