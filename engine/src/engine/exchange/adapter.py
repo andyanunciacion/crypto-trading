@@ -7,12 +7,15 @@ times) and CCXT's exceptions become the ones in errors.py.
 
 The adapter doesn't decide whether to trade; the RiskManager does that. It refuses
 orders only when trading is switched off, or when the exchange would refuse them anyway.
+
+CCXT's rate limiter spaces out requests. Reads that hit a network error are retried
+with backoff (retry.py); orders never are, since one may already be on the exchange (D27).
 """
 
 import asyncio
 import contextlib
 import logging
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import TracebackType
@@ -23,6 +26,7 @@ import ccxt.pro as ccxt_pro  # the WebSocket clients
 import structlog
 from pydantic import BaseModel, SecretStr, ValidationError
 
+from engine.backoff import Backoff
 from engine.exchange import errors
 from engine.exchange.models import (
     Balance,
@@ -33,6 +37,7 @@ from engine.exchange.models import (
     Ticker,
     Timeframe,
 )
+from engine.exchange.retry import with_retries
 
 log = structlog.get_logger()
 
@@ -44,6 +49,7 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 # Keys in CCXT's balance dict that aren't currencies.
 _BALANCE_META = frozenset({"info", "free", "used", "total", "timestamp", "datetime"})
 _STREAM_CLOSE_TIMEOUT_SECONDS = 10
+_RETRY_CAP_SECONDS = 30.0
 
 
 class ExchangeAdapter:
@@ -51,7 +57,9 @@ class ExchangeAdapter:
 
     `trading_enabled=False` (the default) makes `place_order`/`cancel_order` refuse.
     Only LiveBroker (P9) turns it on, and only when `MODE=live` (D17, D22).
-    `session` lets tests replace the network with recorded replies.
+    A read is tried up to `retry_attempts` times, waiting about 1, 2, 4, 8 s between
+    tries (from `retry_base_delay`). `session` lets tests replace the network with
+    recorded replies.
     """
 
     def __init__(
@@ -62,6 +70,8 @@ class ExchangeAdapter:
         api_secret: SecretStr | None = None,
         sandbox: bool = False,
         trading_enabled: bool = False,
+        retry_attempts: int = 5,
+        retry_base_delay: float = 1.0,
         session: object | None = None,
     ) -> None:
         if exchange_id not in ccxt.exchanges:
@@ -92,6 +102,8 @@ class ExchangeAdapter:
         # Numbers come back as strings, so they reach Decimal without passing through float.
         self._exchange.number = str
         self._trading_enabled = trading_enabled
+        self._retry_attempts = retry_attempts
+        self._retry_base_delay = retry_base_delay
         self._sandbox = sandbox
         self._stream_clients: dict[str, Any] = {}
 
@@ -137,8 +149,12 @@ class ExchangeAdapter:
         The newest one may still be open (not closed yet); callers decide what to do with it.
         """
         since_ms = None if since is None else _to_ms(since)
-        with _translated_errors():
-            rows = await self._exchange.fetch_ohlcv(symbol, timeframe, since_ms, limit)
+        rows = await self._read(
+            "fetch_candles",
+            lambda: self._exchange.fetch_ohlcv(symbol, timeframe, since_ms, limit),
+            symbol=symbol,
+            timeframe=timeframe,
+        )
         return [
             _parse(
                 Candle,
@@ -155,8 +171,9 @@ class ExchangeAdapter:
         ]
 
     async def fetch_ticker(self, symbol: str) -> Ticker:
-        with _translated_errors():
-            raw = await self._exchange.fetch_ticker(symbol)
+        raw = await self._read(
+            "fetch_ticker", lambda: self._exchange.fetch_ticker(symbol), symbol=symbol
+        )
         return _parse_ticker(raw)
 
     async def watch_ticker(self, symbol: str) -> Ticker:
@@ -212,8 +229,8 @@ class ExchangeAdapter:
 
     async def market_rules(self, symbol: str) -> MarketRules:
         """Step sizes and minimums for `symbol`. Markets load once, on first use."""
+        await self._read("load_markets", self._exchange.load_markets)
         with _translated_errors():
-            await self._exchange.load_markets()
             market = self._exchange.market(symbol)
         return _parse(
             MarketRules,
@@ -230,8 +247,7 @@ class ExchangeAdapter:
 
     async def fetch_balances(self) -> dict[str, Balance]:
         """Non-zero balances by currency code. Needs an API key."""
-        with _translated_errors():
-            raw = await self._exchange.fetch_balance()
+        raw = await self._read("fetch_balances", self._exchange.fetch_balance)
         balances: dict[str, Balance] = {}
         for currency, entry in raw.items():
             if currency in _BALANCE_META or not isinstance(entry, dict):
@@ -250,6 +266,8 @@ class ExchangeAdapter:
         return balances
 
     # --- Orders: only LiveBroker (P9) calls these, after the RiskManager -------------
+    # Sent once, never retried here: after a network error the order may already be on
+    # the exchange, so the caller looks it up by client order ID before resending (D27).
 
     async def place_order(self, request: OrderRequest) -> Order:
         """Place a limit order, exactly as requested: it's never rounded or resized.
@@ -297,6 +315,24 @@ class ExchangeAdapter:
         order = _parse_order(raw, client_order_id)
         log.info("exchange.order.cancelled", **order.model_dump(mode="json"))
         return order
+
+    async def _read[T](
+        self, operation: str, call: Callable[[], Awaitable[T]], **log_fields: object
+    ) -> T:
+        """Run a read through CCXT, retrying network errors with backoff (P1-4)."""
+
+        async def attempt() -> T:
+            with _translated_errors():
+                return await call()
+
+        return await with_retries(
+            attempt,
+            operation=operation,
+            attempts=self._retry_attempts,
+            # Fresh per call: concurrent reads don't share a failure count.
+            backoff=Backoff(self._retry_base_delay, _RETRY_CAP_SECONDS),
+            **log_fields,
+        )
 
     def _require_trading(self, action: str) -> None:
         if not self._trading_enabled:

@@ -1,7 +1,9 @@
 """The adapter's own exceptions, so no code outside it ever needs CCXT's.
 
 Retry rule (P1-4): only `ExchangeNetworkError` may be retried. Everything else means
-the exchange understood the request and said no, so retrying can't help.
+the exchange understood the request and said no, so retrying can't help. The adapter
+already retries its reads (retry.py); a network error that reaches you from a read
+means the retries ran out.
 """
 
 
@@ -13,7 +15,8 @@ class ExchangeNetworkError(ExchangeError):
     """Timeout, connection failure, rate limit or maintenance: safe to retry.
 
     From `place_order` it means the outcome is unknown: the order may have reached
-    the exchange. Retry with the same client order ID, never a new one (D18).
+    the exchange. The adapter doesn't resend it; look the order up by its client order
+    ID first, and if it must be resent, use the same ID, never a new one (D18, D27).
     """
 
 
