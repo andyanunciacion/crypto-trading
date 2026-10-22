@@ -62,10 +62,10 @@
 ### P1-1 · ExchangeAdapter for mexc
 `engine` `money` · Depends on: P0-T3
 **Goal:** the only gateway to the exchange.
-- [ ] Async CCXT wrapper: balances, candles, tickers, place/cancel order; sandbox flag
-- [ ] Decimal conversion at the adapter boundary
-- [ ] Tests with recorded responses (no network in tests)
-- [ ] Find out: spot testnet? `watch*` WebSocket support? API key rules (IP lock, trade-only, expiry)? Record answers in PRD §9
+- [x] Async CCXT wrapper: balances, candles, tickers, place/cancel order; sandbox flag
+- [x] Decimal conversion at the adapter boundary
+- [x] Tests with recorded responses (no network in tests)
+- [x] Find out: spot testnet? `watch*` WebSocket support? API key rules (IP lock, trade-only, expiry)? Record answers in PRD §9
 
 **Done when:** tests pass offline, nothing outside the adapter imports `ccxt`, and the three open questions are ticked in the PRD.
 
@@ -382,9 +382,10 @@
 `engine` `money` `security` · Depends on: P8-5
 - [ ] `LiveBroker` on the Broker interface
 - [ ] Startup reconciliation with the exchange before trading
-- [ ] Tiny real order test (or testnet)
+- [ ] Binance spot testnet run (D23): `ExchangeAdapter("binance", sandbox=True)` with testnet keys (GitHub login at testnet.binance.vision). Place, partly fill and cancel through the full path, plus a rejected order and a restart with reconciliation
+- [ ] Tiny real order test on MEXC (covers what the testnet can't: MEXC's replies, error codes, minimums, 0.5% price band)
 
-**Done when:** a tiny real order is placed and cancelled through the full path, and reconciliation fixes a seeded mismatch in a test.
+**Done when:** the full path passes on the Binance testnet, then a tiny real MEXC order is placed and cancelled through it, and reconciliation fixes a seeded mismatch in a test.
 
 ### P9-2 · Go-live gate and first live bot
 `money` `blocked` · Depends on: P9-1

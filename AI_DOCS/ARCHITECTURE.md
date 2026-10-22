@@ -192,8 +192,10 @@ Every strategy is a plug-in with the same interface. The backtester, paper broke
 
 ## 8. Exchange integration
 
-- `ExchangeAdapter` wraps CCXT: balances, candles, tickers, place/cancel order, plus a sandbox flag. Nothing else imports CCXT.
-- First exchange: **MEXC spot** (`mexc` in CCXT), see D21. Whether MEXC has a spot testnet, and how well CCXT's `watch*` WebSocket methods work for it, are open questions (PRD §9). The fallback is REST polling, with paper mode as the testing environment.
+- `ExchangeAdapter` (`engine/src/engine/exchange/`) wraps CCXT: balances, candles, tickers, market rules (step sizes, minimums), place/cancel limit order, plus a sandbox flag. Nothing else imports CCXT, and a test enforces that. It returns pydantic models with `Decimal` money: CCXT runs in string-number mode, so values never pass through float. It raises its own errors, of which only `ExchangeNetworkError` is retryable. Tests replay recorded MEXC JSON through real CCXT parsing, with no network.
+- **Adapter guards (D22):** order calls refuse unless the adapter was built with `trading_enabled=True`. Orders off the market's step sizes or below its minimums are refused before sending, never rounded. `sandbox=True` on an exchange with no sandbox is an error, never a quiet fallback to live.
+- First exchange: **MEXC spot** (`mexc` in CCXT), see D21. **MEXC has no spot testnet**, so paper mode is the testing environment. For LiveBroker's real-HTTP order path, P9 adds a step on **Binance's spot testnet** before the tiny real MEXC order (D23). The adapter loads spot markets only, which sandbox mode on Binance needs. CCXT's `watch*` WebSockets work for MEXC spot (Protobuf, ccxt ≥ 4.5.18); REST polling stays as the fallback (PRD §9).
+- **API keys:** IP-lock every key. On MEXC a key with no IP expires after 90 days. Give it spot read + trade only (no withdraw/transfer), and optionally limit it to the traded pairs.
 - Pairs are USDT-quoted. Small-cap pairs can have thin order books: model higher slippage for them in backtests and prefer limit orders.
 - Rate limits are respected (CCXT `enableRateLimit`), with retries and backoff on network errors only, never on rejected orders.
 - **Accepted regulatory risk (D21):** MEXC isn't registered with the Philippine SEC (named in the August 2025 advisory; ISP-blocked). Treat the account as something that could be restricted or frozen without notice: keep only the trading budget on it, and move profits off by hand regularly (the app itself never withdraws).
@@ -213,7 +215,7 @@ Every strategy is a plug-in with the same interface. The backtester, paper broke
 - **Orders:** unique `client_order_id` so retries never duplicate; on startup the engine reconciles with the exchange before trading (D18).
 - **Logs:** structlog JSON with the inputs behind each signal and risk decision. Never log keys, secrets or TOTP codes.
 - **Testing:** unit tests for every risk rule, position math and fee calculation, written first. Strategy tests use known price series. Backtest-vs-replay parity test. Integration tests against Postgres/Redis in Docker. Playwright for login, bot control and kill switch.
-- **Environments:** local (Docker Desktop), server (paper first, then live). There's no separate staging server: paper mode on the server plays that role.
+- **Environments:** local (Docker Desktop), server (paper first, then live). There's no separate staging server: paper mode on the server plays that role. Binance's spot testnet is a test-only exchange for LiveBroker in P9 (D23); it never holds real money.
 
 ## 11. Cost estimate
 
@@ -253,3 +255,5 @@ Rough figures as of October 2026. **Verify current pricing before committing.**
 | D19 | **Phases with exit criteria, not dates** | Part-time solo work; timing is unpredictable | — |
 | D20 | **Decision log lives here** instead of a separate `docs/decisions.md` | One source of truth for the "why" | — |
 | D21 | **MEXC spot (`mexc`) first, behind the generic `ExchangeAdapter`** (supersedes D4) | Owner tested both: MEXC has lower fees, deeper USDT order books and many more pairs than Coins.ph. Accepted risk: MEXC isn't registered with the PH SEC, so the account could be restricted or frozen | MEXC restricts the account or region, or a registered PH exchange matches its fees and liquidity |
+| D22 | **`ExchangeAdapter` has its own trading gate and never resizes orders** (adopted in P1-1). Order calls need `trading_enabled=True`, which only LiveBroker sets, and only when `MODE=live`. Orders that don't fit the market's steps/minimums are refused, not rounded. Limit orders only for now | Defense in depth on top of D17: a bug elsewhere still can't place a real order. Silent rounding would change size without the RiskManager seeing it; rounding belongs to sizing (P4-1) | A broker needs market orders (kill-switch close-out, P4-5) |
+| D23 | **Binance spot testnet as a P9 test step for LiveBroker**, before the tiny real MEXC order. Test only: fake money, keys via GitHub login, no Binance account. The adapter loads spot markets only, because CCXT refuses Binance's futures testnet | MEXC has no testnet. The testnet exercises our generic order path against a real server (signing, client order IDs, place/fill/cancel, rejections, reconciliation), so the first real-money step only has MEXC's quirks left to find. It can't test MEXC-specific behaviour or strategies (thin, synthetic order books) | Binance retires the spot testnet, it becomes unreachable, or MEXC adds a testnet |

@@ -35,6 +35,13 @@ files = [
     "engine/src", "engine/tests",
 ]
 
+# CCXT ships no type information (no py.typed), so mypy treats it as Any. Only
+# engine/src/engine/exchange/ imports it, and it validates everything CCXT returns
+# into typed pydantic models straight away.
+[[tool.mypy.overrides]]
+module = ["ccxt", "ccxt.*"]
+ignore_missing_imports = true
+
 [tool.pydantic-mypy]
 init_forbid_extra = true
 init_typed = true
