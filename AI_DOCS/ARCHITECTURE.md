@@ -77,7 +77,7 @@ Prices flow from the exchange through market data to the strategies. Signals pas
 | Exchange access | **CCXT** (async), wrapped in `ExchangeAdapter` | One API for 100+ exchanges; supports `mexc` |
 | API | **FastAPI + Uvicorn** | Async, typed, auto-generated docs, built-in WebSockets |
 | Engine | **Separate asyncio worker** | Survives API/UI restarts (D3) |
-| Indicators | **pandas, numpy** + pandas-ta or TA-Lib (open question) | RSI, EMA, MACD, Bollinger Bands, ATR, ADX |
+| Indicators | **Hand-rolled** in `engine/src/engine/strategies/indicators.py` (D28); pandas-ta or TA-Lib only if that stops scaling | RSI, EMA, MACD, Bollinger Bands, ATR, ADX |
 | Backtesting | **Custom event-driven backtester** (D15) | Runs the same strategy code as live trading |
 | Validation and config | **pydantic**, **pydantic-settings** | Typed settings, strategy params and API schemas |
 | ORM and migrations | **SQLAlchemy 2.x (async) + Alembic**, **asyncpg** driver (D24) | Typed models; versioned schema changes |
@@ -171,12 +171,13 @@ Every order goes **strategy signal → RiskManager → Broker**. Nothing else ca
 
 ## 7. Strategy system
 
-Every strategy is a plug-in with the same interface. The backtester, paper broker and live broker all run it unchanged (D7).
+Every strategy is a plug-in with the same interface (`engine/src/engine/strategies/base.py`). The backtester, paper broker and live broker all run it unchanged (D7).
 
-- `name`, `version`, and a typed `params` schema (pydantic; the dashboard renders it as a form)
+- `name`, `version` (an int, bumped when the logic changes), and a typed `params_model` (pydantic, `extra="forbid"`; the dashboard renders its JSON schema as a form)
 - `warmup_candles`: how much history it needs before it gives signals
-- `on_candle(market_data, position)` → BUY, SELL or HOLD, with an optional size hint and stop level
-- Optional `on_fill()`, `on_start()`, `on_stop()` hooks
+- `on_candle(candles, position)` → `Signal`. `candles` are closed candles, oldest first, ending with the one that just closed; `position` is `None` when flat. Until there are `warmup_candles` of them it returns HOLD (`"warming up"`); after that, the base class passes exactly the last `warmup_candles` to the strategy's `decide()`. **Strategies are stateless (D28):** a signal depends only on that window.
+- `Signal`: `action` (`buy`/`sell`/`hold`), `ts` (the candle's open time), `reason`, `indicators` (the values behind it, for logging and UX9), and optional `size_hint` (0–1) and `stop` price, both Decimal. Strategies don't log; whoever calls them logs the signal.
+- `on_fill()`, `on_start()`, `on_stop()` hooks: deferred until P3, when there are fills
 - **No exchange access.** Strategies return signals only.
 
 | Strategy | Works best in | Core idea | Phase |
@@ -264,3 +265,4 @@ Rough figures as of October 2026. **Verify current pricing before committing.**
 | D25 | **Missing candles are reported, never synthesized** (adopted in P1-2). Gaps the exchange can't fill are logged (`candles.gap_unfillable`) and the backfill CLI exits 1; nothing is forward-filled | A made-up flat candle is a fake price: strategies and backtests would trade on data that never existed. A visible gap can be judged by hand | Real gaps keep blocking backtests → decide per case (e.g. skip the window), still without writing fake rows |
 | D26 | **Live prices: WebSocket book ticker → Redis key (latest, no TTL) + channel (every update); silence watchdog; REST polling during the reconnect backoff** (adopted in P1-3). `Ticker.last` is optional, because MEXC's spot stream carries bid/ask only. Any stream error reconnects; nothing crashes the stream | Bid/ask is the price you can actually trade at, and what the PaperBroker fills against (P3), so subscribing to trades only for `last` isn't worth a second stream. No TTL: a stale price must show as old (UX5), not vanish. A pulled network often leaves a socket silent rather than erroring, so silence counts as failure. Polling during the backoff keeps prices fresh without a separate fallback mode. Retrying is safe here because these are public prices, not orders (P1-4's rule) | A strategy or the UI needs the last trade price, or many symbols make per-symbol connections too costly (MEXC allows 30 subscriptions per connection) |
 | D27 | **The adapter retries reads, never orders** (adopted in P1-4). Reads retry network errors up to 5 times with jittered backoff; orders and cancels are sent once, and a network error on them is passed up as "outcome unknown" | A read can be repeated freely. A timed-out order may already be on the book, and it isn't verified that MEXC refuses a repeated client order ID, so a blind resend could double a position. LiveBroker (P9) looks the order up by client order ID and reconciles before deciding (D18) | LiveBroker lands (P9): decide its resend rule, after checking how MEXC treats a duplicate client order ID |
+| D28 | **Strategies are stateless over a warm-up window; indicators are hand-rolled** (adopted in P2-1). `on_candle` gets the candle history and the strategy decides on exactly the last `warmup_candles` of it, keeping nothing between calls. Indicators are plain float functions in `strategies/indicators.py`, tested against hand-worked values, with no pandas/pandas-ta/TA-Lib | Same window means same signal, so backtest, live and a restarted bot agree by construction, and hot-swaps (P6) have no state to hand over. That makes the parity test (P2-6) and restart recovery (P3-4) simple. An EMA's start-up seed fades by (1−α) per candle, so EMA crossover's 3 × slow warm-up leaves ~0.2% of it. Recomputing a window per candle is cheap at 1m+. EMA, RSI and Bollinger are a few lines each, and need no new install in Docker | Recomputing gets slow (very long windows, sweeps in P2-5), a strategy genuinely needs memory beyond a window, or the indicator list outgrows hand-rolling (ADX/ATR in P6 are the test) |

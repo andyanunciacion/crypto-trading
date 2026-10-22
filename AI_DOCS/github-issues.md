@@ -102,9 +102,9 @@
 ### P2-1 · Strategy interface + EMA crossover
 `strategy` · Depends on: P1-2
 **Goal:** a plug-in contract every strategy follows.
-- [ ] Base class: name, version, pydantic params, `warmup_candles`, `on_candle` → signal
-- [ ] EMA crossover strategy
-- [ ] Tests on hand-built price series with known crossovers
+- [x] Base class: name, version, pydantic params, `warmup_candles`, `on_candle` → signal
+- [x] EMA crossover strategy
+- [x] Tests on hand-built price series with known crossovers
 
 **Done when:** EMA crossover emits BUY/SELL exactly at the expected candles in tests.
 
