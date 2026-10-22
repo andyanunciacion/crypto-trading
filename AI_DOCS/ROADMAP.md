@@ -31,7 +31,7 @@
 
 ## Phase 2 — Strategy engine and backtesting
 
-1. [ ] **Strategy interface + EMA crossover:** base class (params schema, warm-up, `on_candle` → signal), first strategy, tests on known price series.
+1. [x] **Strategy interface + EMA crossover:** base class (params schema, warm-up, `on_candle` → signal), first strategy, tests on known price series.
 2. [ ] **Event-driven backtester:** replays candles through the same strategy code; models fees, slippage (higher for small-cap pairs) and minimum order sizes; stores `backtest_runs`.
 3. [ ] **Report:** total return, max drawdown, Sharpe, win rate, profit factor, number of trades, equity curve.
 4. [ ] **More strategies:** RSI mean reversion and Bollinger breakout.
