@@ -111,9 +111,9 @@
 ### P2-2 · Event-driven backtester
 `strategy` `money` · Depends on: P2-1
 **Goal:** honest backtests using live strategy code.
-- [ ] Candle replay through the strategy
-- [ ] Fees, slippage (configurable, higher default for small-cap pairs), minimum order sizes
-- [ ] `backtest_runs` table storing inputs and results
+- [x] Candle replay through the strategy
+- [x] Fees, slippage (configurable, higher default for small-cap pairs), minimum order sizes
+- [x] `backtest_runs` table storing inputs and results
 
 **Done when:** a backtest's results can be reproduced from its stored inputs, and fees match a hand calculation in a test.
 
