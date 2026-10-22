@@ -23,9 +23,9 @@ If code and docs disagree, ask which is right, then update the one that's wrong.
 - **Use Decimal, not float**, for prices, amounts, fees, balances and P&L (floats only inside indicator math).
 
 ## Current status
-Phase 0: planning docs written; repo on GitHub (`andyanunciacion/crypto-trading`, branch `production`). The Docker Compose stack runs: TimescaleDB, Redis, a FastAPI `/health` stub, an engine heartbeat loop and a Next.js hello page, all with health checks. Quality gates are in place: ruff, mypy strict, pytest, ESLint, Prettier and gitleaks, all run by pre-commit.
+Phase 0 done; Phase 1 next. Repo on GitHub (`andyanunciacion/crypto-trading`, branch `production`). The Docker Compose stack runs: TimescaleDB, Redis, a FastAPI `/health` stub, an engine heartbeat loop and a Next.js hello page, all with health checks. Quality gates are in place: ruff, mypy strict, pytest, ESLint, Prettier and gitleaks, all run by pre-commit and again by GitHub Actions CI on every push.
 
-**Work queue:** `AI_DOCS/github-issues.md` until the issues exist on GitHub, then GitHub. Done: planning docs, P0-T1, P0-T2, P0-T3, P0-T4. Next: P0-T5 (CI) → Phase 1. Branches: `<issue#>-<short-slug>`. Commit titles: `#<issue#> <title>` (e.g. `#1 Switch first exchange to MEXC; mark P0-T1 done`), every commit, taking the issue number from the branch name.
+**Work queue:** `AI_DOCS/github-issues.md` until the issues exist on GitHub, then GitHub. Done: planning docs, P0-T1, P0-T2, P0-T3, P0-T4, P0-T5. Next: Phase 1, starting with P1-1 (ExchangeAdapter for MEXC). Branches: `<issue#>-<short-slug>`. Commit titles: `#<issue#> <title>` (e.g. `#1 Switch first exchange to MEXC; mark P0-T1 done`), every commit, taking the issue number from the branch name.
 
 ## Commands
 Only list commands that exist. First run: copy `.env.example` to `.env` and set a password.
@@ -40,7 +40,7 @@ Only list commands that exist. First run: copy `.env.example` to `.env` and set 
 - `uv run pre-commit run --all-files`: every check, incl. gitleaks, ESLint and Prettier
 - In `frontend/`: `pnpm install`, `pnpm typecheck`, `pnpm lint`, `pnpm format` / `pnpm format:check`
 
-Planned: CI (P0-T5).
+CI: `.github/workflows/ci.yml` runs the same checks (plus a full-history gitleaks scan) on every push; results are on the repo's Actions page.
 
 ## Working with the owner
 - Solo developer **learning both the software and the trading side**. Briefly explain the **why** behind non-obvious code patterns (async, migrations, Docker, Next.js) *and* trading concepts (slippage, drawdown, walk-forward, regimes). Keep it to a sentence or two and name the concept so it can be looked up.
