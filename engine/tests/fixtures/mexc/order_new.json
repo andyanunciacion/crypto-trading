@@ -1,0 +1,10 @@
+{
+  "symbol": "BTCUSDT",
+  "orderId": "C02__594221748317392896088",
+  "orderListId": -1,
+  "price": "80000",
+  "origQty": "0.0001",
+  "type": "LIMIT",
+  "side": "BUY",
+  "transactTime": 1792674404564
+}

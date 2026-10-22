@@ -23,9 +23,9 @@ If code and docs disagree, ask which is right, then update the one that's wrong.
 - **Use Decimal, not float**, for prices, amounts, fees, balances and P&L (floats only inside indicator math).
 
 ## Current status
-Phase 0 done; Phase 1 next. Repo on GitHub (`andyanunciacion/crypto-trading`, branch `production`). The Docker Compose stack runs: TimescaleDB, Redis, a FastAPI `/health` stub, an engine heartbeat loop and a Next.js hello page, all with health checks. Quality gates are in place: ruff, mypy strict, pytest, ESLint, Prettier and gitleaks, all run by pre-commit and again by GitHub Actions CI on every push.
+Phase 0 done; Phase 1 in progress. `ExchangeAdapter` for MEXC exists (`engine/src/engine/exchange/`), tested offline against recorded responses. Repo on GitHub (`andyanunciacion/crypto-trading`, branch `production`). The Docker Compose stack runs: TimescaleDB, Redis, a FastAPI `/health` stub, an engine heartbeat loop and a Next.js hello page, all with health checks. Quality gates are in place: ruff, mypy strict, pytest, ESLint, Prettier and gitleaks, all run by pre-commit and again by GitHub Actions CI on every push.
 
-**Work queue:** `AI_DOCS/github-issues.md` until the issues exist on GitHub, then GitHub. Done: planning docs, P0-T1, P0-T2, P0-T3, P0-T4, P0-T5. Next: Phase 1, starting with P1-1 (ExchangeAdapter for MEXC). Branches: `<issue#>-<short-slug>`. Commit titles: `#<issue#> <title>` (e.g. `#1 Switch first exchange to MEXC; mark P0-T1 done`), every commit, taking the issue number from the branch name.
+**Work queue:** `AI_DOCS/github-issues.md` until the issues exist on GitHub, then GitHub. Done: planning docs, P0-T1, P0-T2, P0-T3, P0-T4, P0-T5, P1-1. Next: P1-2 (candle store and backfill). Branches: `<issue#>-<short-slug>`. Commit titles: `#<issue#> <title>` (e.g. `#1 Switch first exchange to MEXC; mark P0-T1 done`), every commit, taking the issue number from the branch name.
 
 ## Commands
 Only list commands that exist. First run: copy `.env.example` to `.env` and set a password.
@@ -33,7 +33,8 @@ Only list commands that exist. First run: copy `.env.example` to `.env` and set 
 - `docker compose logs -f engine`: follow the engine's JSON logs
 - `docker compose down`: stop everything (data stays in the `pgdata`/`redisdata` volumes; `-v` would delete it)
 - `uv sync --all-packages`: create or update the local `.venv` for backend, engine and the dev tools (Python 3.12, from `.python-version`)
-- `uv run pytest`: run every Python package's tests
+- `uv run pytest`: run every Python package's tests (offline; the exchange tests replay recorded MEXC responses)
+- `uv run python -m engine.exchange.record mexc` (or `binance_testnet`): re-record that exchange's public test fixtures (needs network); then update the values the tests expect
 - `uv run ruff check .` / `uv run ruff format .`: lint / format Python
 - `uv run mypy`: strict type check of all Python packages and tests
 - `uv run pre-commit install`: once per clone, so the hooks run on every commit

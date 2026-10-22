@@ -1,0 +1,14 @@
+{
+  "symbol": "BTCUSDT",
+  "origClientOrderId": "bot1-000001",
+  "orderId": "C02__594221748317392896088",
+  "clientOrderId": "",
+  "price": "80000",
+  "origQty": "0.0001",
+  "executedQty": "0",
+  "cummulativeQuoteQty": "0",
+  "status": "CANCELED",
+  "timeInForce": "",
+  "type": "LIMIT",
+  "side": "BUY"
+}

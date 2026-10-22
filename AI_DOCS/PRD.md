@@ -146,10 +146,10 @@ Not financial advice: treat every strategy as an experiment.
 
 - [x] Build custom on CCXT, or extend Freqtrade? → Custom on CCXT (ARCHITECTURE D1).
 - [x] Which exchange first? → MEXC spot (ARCHITECTURE D21, replacing Coins.ph).
-- [ ] Does MEXC have a spot testnet or sandbox? If not, rely on paper mode plus one tiny real order test before Phase 9.
-- [ ] Do CCXT's WebSocket streams (`watch*` methods) work reliably for `mexc`? If not, poll REST for live prices in Phase 1.
+- [x] Does MEXC have a spot testnet or sandbox? → **No.** MEXC's API connects only to the live exchange. The one test feature is `POST /api/v3/order/test`, which validates an order without placing it. So: paper mode, then in Phase 9 the order path on Binance's spot testnet (fake money, ARCHITECTURE D23), then one tiny real MEXC order (P1-1).
+- [x] Do CCXT's WebSocket streams (`watch*` methods) work reliably for `mexc`? → **Supported:** `watchTicker`, `watchOHLCV` and `watchTrades`. MEXC spot streams are Protobuf, and a bug where they returned no data (ccxt#27253) was fixed in ccxt 4.5.18; we're on 4.5.89. Use WebSocket in P1-3 with REST polling as the fallback. P1-3's one-hour run is the reliability check (P1-1).
 - [ ] Which USDT pair comes first? Check order-book depth, fees and minimum order size.
-- [ ] MEXC API key rules: can keys be IP-locked and trade-only, and do they expire? Find out in P1-1.
+- [x] MEXC API key rules: can keys be IP-locked and trade-only, and do they expire? → **Yes, yes, and only without an IP.** Each key can be linked to up to 10 IPs. Permissions are granular (`SPOT_ACCOUNT_READ`, `SPOT_DEAL_WRITE`, ...), and withdrawal/transfer stay off. A key can also be limited to chosen pairs. A key with **no IP linked expires after 90 days** (renewable in its last 5 days). Use an IP-locked key with spot read + trade only. To confirm on the account: only a third-party guide says IP-linked keys never expire. MEXC's "Query APIKey Info" endpoint reports a key's remaining validity in days (P1-1).
 - [ ] pandas-ta or TA-Lib for indicators? Check maintenance status and how each installs in Docker before Phase 2.
 - [ ] Which VPS provider in Singapore (DigitalOcean, Vultr, Lightsail or Hetzner)? Decide in Phase 8.
 - [ ] Dashboard access: Tailscale only, or a domain with IP limits? Decide in Phase 8.
