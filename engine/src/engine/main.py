@@ -1,7 +1,8 @@
 """Engine entry point. Run with `python -m engine`.
 
-For now this is only a heartbeat loop, so Docker can tell the worker is alive.
-Market data, strategies, the RiskManager and brokers plug into it in later phases.
+Runs a heartbeat loop, so Docker can tell the worker is alive, and one live price
+stream per symbol in PRICE_SYMBOLS (into Redis). Strategies, the RiskManager and
+brokers plug into it in later phases.
 """
 
 import asyncio
@@ -10,7 +11,10 @@ import signal
 from pathlib import Path
 
 import structlog
+from redis.asyncio import Redis
 
+from engine.exchange.adapter import ExchangeAdapter
+from engine.marketdata.prices import PriceStream, RedisPriceSink
 from shared.config import Settings, load_settings
 
 HEARTBEAT_INTERVAL_SECONDS = 10
@@ -32,6 +36,17 @@ def configure_logging(level: str) -> None:
     )
 
 
+async def heartbeat(stop: asyncio.Event) -> None:
+    beat = 0
+    while not stop.is_set():
+        beat += 1
+        # File I/O blocks; in a thread it can't stall the event loop.
+        await asyncio.to_thread(HEARTBEAT_FILE.touch)
+        log.info("engine.heartbeat", beat=beat)
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=HEARTBEAT_INTERVAL_SECONDS)
+
+
 async def run(settings: Settings) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -46,15 +61,25 @@ async def run(settings: Settings) -> None:
         "engine.starting",
         mode=settings.mode,
         heartbeat_interval_s=HEARTBEAT_INTERVAL_SECONDS,
+        price_symbols=settings.price_symbols,
     )
-    beat = 0
-    while not stop.is_set():
-        beat += 1
-        # File I/O blocks; in a thread it can't stall the event loop.
-        await asyncio.to_thread(HEARTBEAT_FILE.touch)
-        log.info("engine.heartbeat", beat=beat)
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(stop.wait(), timeout=HEARTBEAT_INTERVAL_SECONDS)
+    redis = Redis.from_url(settings.redis_url)
+    try:
+        # Public market data only: no API key, and trading stays off (D22).
+        async with ExchangeAdapter() as exchange:
+            sink = RedisPriceSink(redis)
+            # A TaskGroup runs the tasks side by side and waits for all of them to end.
+            async with asyncio.TaskGroup() as tasks:
+                tasks.create_task(heartbeat(stop))
+                streams = [
+                    tasks.create_task(PriceStream(exchange, sink, symbol).run())
+                    for symbol in settings.price_symbols
+                ]
+                await stop.wait()
+                for stream in streams:
+                    stream.cancel()
+    finally:
+        await redis.aclose()
     log.info("engine.stopping")
 
 

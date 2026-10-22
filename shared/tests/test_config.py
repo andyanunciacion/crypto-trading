@@ -14,6 +14,7 @@ CONFIG_VARS = (
     "POSTGRES_HOST",
     "POSTGRES_PORT",
     "REDIS_URL",
+    "PRICE_SYMBOLS",
 )
 
 
@@ -36,7 +37,24 @@ def test_defaults_are_paper_and_docker_hosts(env: pytest.MonkeyPatch) -> None:
     assert settings.postgres_host == "db"
     assert settings.postgres_port == 5432
     assert settings.redis_url == "redis://redis:6379/0"
+    assert settings.price_symbols == ["BTC/USDT"]
     assert settings.postgres_password.get_secret_value() == PASSWORD
+
+
+def test_price_symbols_are_comma_separated(env: pytest.MonkeyPatch) -> None:
+    env.setenv("PRICE_SYMBOLS", "BTC/USDT, ETH/USDT,")
+
+    assert load_settings(env_file=None).price_symbols == ["BTC/USDT", "ETH/USDT"]
+
+
+@pytest.mark.parametrize("value", ["", "BTCUSDT", "btc/usdt"], ids=["empty", "no-slash", "lower"])
+def test_bad_price_symbols_name_the_setting(env: pytest.MonkeyPatch, value: str) -> None:
+    env.setenv("PRICE_SYMBOLS", value)
+
+    with pytest.raises(SystemExit) as exc:
+        load_settings(env_file=None)
+
+    assert "PRICE_SYMBOLS" in str(exc.value)
 
 
 def test_missing_required_setting_names_it(env: pytest.MonkeyPatch) -> None:

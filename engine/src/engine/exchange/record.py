@@ -15,6 +15,7 @@ import ssl
 from pathlib import Path
 
 import ccxt.async_support as ccxt
+import ccxt.pro as ccxt_pro
 
 # src/engine/exchange/record.py -> engine/tests/fixtures
 FIXTURES_DIR = Path(__file__).resolve().parents[3] / "tests" / "fixtures"
@@ -48,7 +49,22 @@ async def fetch_mexc() -> dict[str, object]:
         "mexc/contract_detail.json": {"success": True, "code": 0, "data": []},
         "mexc/klines_btcusdt_60m.json": klines,
         "mexc/ticker_24hr_btcusdt.json": ticker,
+        **await fetch_mexc_stream(),
     }
+
+
+async def fetch_mexc_stream() -> dict[str, object]:
+    # MEXC's WebSocket sends Protobuf, which can't be replayed through a fake socket as
+    # easily as JSON. So this records one update after CCXT has decoded and parsed it:
+    # the dict the adapter's watch_ticker receives.
+    exchange = ccxt_pro.mexc()
+    exchange.number = str  # as the adapter sets it, so the numbers are recorded as strings
+    _trust_os_certificates(exchange)
+    try:
+        ticker = await exchange.watch_ticker("BTC/USDT")
+    finally:
+        await exchange.close()
+    return {"mexc/ws_ticker_btcusdt.json": ticker}
 
 
 async def fetch_binance_testnet() -> dict[str, object]:

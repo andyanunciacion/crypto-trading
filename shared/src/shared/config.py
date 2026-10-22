@@ -4,11 +4,14 @@ Every setting is an upper-case env var (`MODE`, `POSTGRES_PASSWORD`, ...); see
 .env.example for the full list. Call `load_settings()` once at startup.
 """
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import SecretStr, ValidationError
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, SecretStr, ValidationError, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from sqlalchemy import URL
+
+# CCXT's unified format: upper-case BASE/QUOTE, e.g. BTC/USDT.
+Symbol = Annotated[str, Field(pattern=r"^[A-Z0-9]+/[A-Z0-9]+$")]
 
 
 class Settings(BaseSettings):
@@ -28,6 +31,20 @@ class Settings(BaseSettings):
     postgres_port: int = 5432
 
     redis_url: str = "redis://redis:6379/0"
+
+    # Symbols whose live price the engine streams into Redis: PRICE_SYMBOLS=BTC/USDT,ETH/USDT.
+    # Until bots exist (P3) this list is the whole choice; then the bots' symbols decide.
+    # NoDecode: read the env value as plain text (comma-separated), not as JSON.
+    price_symbols: Annotated[list[Symbol], NoDecode, Field(min_length=1)] = Field(
+        default_factory=lambda: ["BTC/USDT"]
+    )
+
+    @field_validator("price_symbols", mode="before")
+    @classmethod
+    def _split_commas(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [part.strip() for part in value.split(",") if part.strip()]
+        return value
 
     @property
     def database_url(self) -> URL:
