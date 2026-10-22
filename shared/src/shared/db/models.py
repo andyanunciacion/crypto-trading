@@ -6,8 +6,20 @@ that, and a test checks the two agree.
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
-from sqlalchemy import CheckConstraint, DateTime, MetaData, Numeric, Text
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    Identity,
+    Integer,
+    MetaData,
+    Numeric,
+    Text,
+    func,
+)
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # Must match engine.exchange.models.Timeframe (a test checks this).
@@ -44,3 +56,37 @@ class CandleRow(Base):
     low: Mapped[Decimal] = mapped_column(Numeric)
     close: Mapped[Decimal] = mapped_column(Numeric)
     volume: Mapped[Decimal] = mapped_column(Numeric)
+
+
+class BacktestRunRow(Base):
+    """One backtest: everything it was run with, and what came out.
+
+    The inputs plus the candles (checked by `candles_sha256`) reproduce the result exactly.
+    """
+
+    __tablename__ = "backtest_runs"
+    __table_args__ = (CheckConstraint(f"timeframe IN {TIMEFRAMES!r}", name="timeframe"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Inputs
+    strategy: Mapped[str] = mapped_column(Text)
+    strategy_version: Mapped[int] = mapped_column(Integer)
+    params: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    exchange: Mapped[str] = mapped_column(Text)
+    symbol: Mapped[str] = mapped_column(Text)
+    timeframe: Mapped[str] = mapped_column(Text)
+    range_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))  # first candle traded
+    range_end: Mapped[datetime] = mapped_column(DateTime(timezone=True))  # exclusive
+    warmup_candles: Mapped[int] = mapped_column(Integer)  # loaded from before range_start
+    initial_cash: Mapped[Decimal] = mapped_column(Numeric)
+    fee_rate: Mapped[Decimal] = mapped_column(Numeric)
+    slippage_rate: Mapped[Decimal] = mapped_column(Numeric)
+    market_rules: Mapped[dict[str, Any]] = mapped_column(JSONB)  # step sizes and minimums
+    candle_count: Mapped[int] = mapped_column(Integer)  # warm-up included
+    candles_sha256: Mapped[str] = mapped_column(Text)  # proves a re-run uses the same candles
+    backtester_version: Mapped[int] = mapped_column(Integer)
+    # Results. Money in the JSON is strings, so it stays exact.
+    final_equity: Mapped[Decimal] = mapped_column(Numeric)
+    total_fees: Mapped[Decimal] = mapped_column(Numeric)
+    result: Mapped[dict[str, Any]] = mapped_column(JSONB)  # signals, fills, equity curve
