@@ -23,7 +23,7 @@
 ## Phase 1 — Exchange connection and market data
 
 1. [x] **ExchangeAdapter (mexc):** CCXT async wrapper for balances, candles, tickers, place/cancel order, with a sandbox flag. Tested against recorded responses. Answers the open questions on testnet and WebSocket support.
-2. [ ] **Candle store + backfill:** TimescaleDB hypertable, Alembic migration, downloader for 1m–1d with gap detection and filling.
+2. [x] **Candle store + backfill:** TimescaleDB hypertable, Alembic migration, downloader for 1m–1d with gap detection and filling.
 3. [ ] **Live prices:** stream (WebSocket, or REST polling if CCXT's `watch*` for `mexc` isn't reliable) → latest price in Redis + published on a channel; auto-reconnect with backoff.
 4. [ ] **Resilience:** rate limits respected; retries with backoff on network errors; structured logs for every reconnect/retry.
 

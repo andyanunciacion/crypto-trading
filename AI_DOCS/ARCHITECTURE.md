@@ -80,11 +80,11 @@ Prices flow from the exchange through market data to the strategies. Signals pas
 | Indicators | **pandas, numpy** + pandas-ta or TA-Lib (open question) | RSI, EMA, MACD, Bollinger Bands, ATR, ADX |
 | Backtesting | **Custom event-driven backtester** (D15) | Runs the same strategy code as live trading |
 | Validation and config | **pydantic**, **pydantic-settings** | Typed settings, strategy params and API schemas |
-| ORM and migrations | **SQLAlchemy 2.0 + Alembic** | Typed models; versioned schema changes |
+| ORM and migrations | **SQLAlchemy 2.x (async) + Alembic**, **asyncpg** driver (D24) | Typed models; versioned schema changes |
 | Logging | **structlog** (JSON) | Every decision logged with its inputs |
 | Errors | **Sentry** (free tier) | Stack traces and alerts for crashes |
 | Alerts | **python-telegram-bot** | Phone alerts and remote kill switch (D16) |
-| Tests | **pytest, pytest-asyncio** | Engine, risk and strategy code must be tested |
+| Tests | **pytest, pytest-asyncio**, **testcontainers** (throwaway TimescaleDB for DB tests) | Engine, risk and strategy code must be tested |
 
 ### 3.3 Dashboard
 | Concern | Choice | Why |
@@ -119,7 +119,7 @@ pyproject.toml     uv workspace root; members: backend, engine, shared
 uv.lock            the single Python lockfile for the workspace
 ```
 
-Each Python package has its own `tests/` folder. Alembic migrations live in `shared/`.
+Each Python package has its own `tests/` folder. Alembic migrations live in `shared/src/shared/db/migrations/` and ship inside the package; the one-shot `migrate` Compose service applies them before the API and engine start (D24).
 
 ## 5. Data model
 
@@ -135,7 +135,7 @@ Conventions:
 
 | Entity | Key fields | Phase | Notes |
 |---|---|---|---|
-| `candles` | exchange, symbol, timeframe, ts, open, high, low, close, volume | P1 | TimescaleDB hypertable; unique (exchange, symbol, timeframe, ts) |
+| `candles` | exchange, symbol, timeframe, ts, open, high, low, close, volume | P1 | TimescaleDB hypertable on `ts` (7-day chunks); primary key (exchange, symbol, timeframe, ts); `ts` is the open time; closed candles only; never synthesized (D25) |
 | `backtest_runs` | strategy, version, params, symbol, timeframe, range, fee/slippage model, metrics, equity curve | P2 | Results are reproducible from stored inputs |
 | `bots` | name, exchange_account_id, symbol, timeframe, mode, status, active_strategy_config_id, switch_policy | P3 | `mode` defaults to `paper` |
 | `strategy_configs` | bot_id, strategy, version, params, created_at, created_by | P3 | Append-only: a change adds a row (history and rollback in P6) |
@@ -196,6 +196,7 @@ Every strategy is a plug-in with the same interface. The backtester, paper broke
 - **Adapter guards (D22):** order calls refuse unless the adapter was built with `trading_enabled=True`. Orders off the market's step sizes or below its minimums are refused before sending, never rounded. `sandbox=True` on an exchange with no sandbox is an error, never a quiet fallback to live.
 - First exchange: **MEXC spot** (`mexc` in CCXT), see D21. **MEXC has no spot testnet**, so paper mode is the testing environment. For LiveBroker's real-HTTP order path, P9 adds a step on **Binance's spot testnet** before the tiny real MEXC order (D23). The adapter loads spot markets only, which sandbox mode on Binance needs. CCXT's `watch*` WebSockets work for MEXC spot (Protobuf, ccxt ≥ 4.5.18); REST polling stays as the fallback (PRD §9).
 - **API keys:** IP-lock every key. On MEXC a key with no IP expires after 90 days. Give it spot read + trade only (no withdraw/transfer), and optionally limit it to the traded pairs.
+- **MEXC candle history** (probed October 2026, BTC/USDT): at most 500 candles per request. Kept for about **30 days at 1m**, about **360 days at 5m/15m**, and back to at least 2019 at 1h/4h/1d; older requests return an empty list, not an error. So 1m history older than 30 days can't be backfilled: once the engine keeps candles current (P1-3), an outage longer than that leaves a permanent 1m gap. The backfill (`engine/src/engine/marketdata/`) pages forward with `fetch_candles`, stores closed candles only, and fills gaps between stored candles.
 - Pairs are USDT-quoted. Small-cap pairs can have thin order books: model higher slippage for them in backtests and prefer limit orders.
 - Rate limits are respected (CCXT `enableRateLimit`), with retries and backoff on network errors only, never on rejected orders.
 - **Accepted regulatory risk (D21):** MEXC isn't registered with the Philippine SEC (named in the August 2025 advisory; ISP-blocked). Treat the account as something that could be restricted or frozen without notice: keep only the trading budget on it, and move profits off by hand regularly (the app itself never withdraws).
@@ -257,3 +258,5 @@ Rough figures as of October 2026. **Verify current pricing before committing.**
 | D21 | **MEXC spot (`mexc`) first, behind the generic `ExchangeAdapter`** (supersedes D4) | Owner tested both: MEXC has lower fees, deeper USDT order books and many more pairs than Coins.ph. Accepted risk: MEXC isn't registered with the PH SEC, so the account could be restricted or frozen | MEXC restricts the account or region, or a registered PH exchange matches its fees and liquidity |
 | D22 | **`ExchangeAdapter` has its own trading gate and never resizes orders** (adopted in P1-1). Order calls need `trading_enabled=True`, which only LiveBroker sets, and only when `MODE=live`. Orders that don't fit the market's steps/minimums are refused, not rounded. Limit orders only for now | Defense in depth on top of D17: a bug elsewhere still can't place a real order. Silent rounding would change size without the RiskManager seeing it; rounding belongs to sizing (P4-1) | A broker needs market orders (kill-switch close-out, P4-5) |
 | D23 | **Binance spot testnet as a P9 test step for LiveBroker**, before the tiny real MEXC order. Test only: fake money, keys via GitHub login, no Binance account. The adapter loads spot markets only, because CCXT refuses Binance's futures testnet | MEXC has no testnet. The testnet exercises our generic order path against a real server (signing, client order IDs, place/fill/cancel, rejections, reconciliation), so the first real-money step only has MEXC's quirks left to find. It can't test MEXC-specific behaviour or strategies (thin, synthetic order books) | Binance retires the spot testnet, it becomes unreachable, or MEXC adds a testnet |
+| D24 | **asyncpg as the single Postgres driver; migrations run by a one-shot `migrate` Compose service** (adopted in P1-2). Alembic's async `env.py` uses the same driver as the app. `api` and `engine` start only after `migrate` exits successfully | One driver for app and migrations. psycopg 3's async mode doesn't run on Windows' default event loop, which the local tests use. A separate migrate step means no service ever runs against an old schema, and two services never race to migrate | Need a driver feature asyncpg lacks, or migrations become slow enough to delay startup |
+| D25 | **Missing candles are reported, never synthesized** (adopted in P1-2). Gaps the exchange can't fill are logged (`candles.gap_unfillable`) and the backfill CLI exits 1; nothing is forward-filled | A made-up flat candle is a fake price: strategies and backtests would trade on data that never existed. A visible gap can be judged by hand | Real gaps keep blocking backtests → decide per case (e.g. skip the window), still without writing fake rows |

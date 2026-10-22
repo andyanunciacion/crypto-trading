@@ -23,17 +23,20 @@ If code and docs disagree, ask which is right, then update the one that's wrong.
 - **Use Decimal, not float**, for prices, amounts, fees, balances and P&L (floats only inside indicator math).
 
 ## Current status
-Phase 0 done; Phase 1 in progress. `ExchangeAdapter` for MEXC exists (`engine/src/engine/exchange/`), tested offline against recorded responses. Repo on GitHub (`andyanunciacion/crypto-trading`, branch `production`). The Docker Compose stack runs: TimescaleDB, Redis, a FastAPI `/health` stub, an engine heartbeat loop and a Next.js hello page, all with health checks. Quality gates are in place: ruff, mypy strict, pytest, ESLint, Prettier and gitleaks, all run by pre-commit and again by GitHub Actions CI on every push.
+Phase 0 done; Phase 1 in progress. `ExchangeAdapter` for MEXC exists (`engine/src/engine/exchange/`), tested offline against recorded responses. Candles are stored in a TimescaleDB hypertable (schema in `shared/src/shared/db/`, Alembic migrations applied by the one-shot `migrate` service); a backfill CLI (`engine/src/engine/marketdata/`) downloads history and finds/fills gaps. Repo on GitHub (`andyanunciacion/crypto-trading`, branch `production`). The Docker Compose stack runs: TimescaleDB, Redis, a FastAPI `/health` stub, an engine heartbeat loop and a Next.js hello page, all with health checks. Quality gates are in place: ruff, mypy strict, pytest, ESLint, Prettier and gitleaks, all run by pre-commit and again by GitHub Actions CI on every push.
 
-**Work queue:** `AI_DOCS/github-issues.md` until the issues exist on GitHub, then GitHub. Done: planning docs, P0-T1, P0-T2, P0-T3, P0-T4, P0-T5, P1-1. Next: P1-2 (candle store and backfill). Branches: `<issue#>-<short-slug>`. Commit titles: `#<issue#> <title>` (e.g. `#1 Switch first exchange to MEXC; mark P0-T1 done`), every commit, taking the issue number from the branch name.
+**Work queue:** `AI_DOCS/github-issues.md` until the issues exist on GitHub, then GitHub. Done: planning docs, P0-T1, P0-T2, P0-T3, P0-T4, P0-T5, P1-1, P1-2. Next: P1-3 (live price stream). Branches: `<issue#>-<short-slug>`. Commit titles: `#<issue#> <title>` (e.g. `#1 Switch first exchange to MEXC; mark P0-T1 done`), every commit, taking the issue number from the branch name.
 
 ## Commands
 Only list commands that exist. First run: copy `.env.example` to `.env` and set a password.
-- `docker compose up --build -d`: build and start all five services; `docker compose ps` should show each one `(healthy)`
+- `docker compose up --build -d`: build and start all five services; `docker compose ps -a` should show each one `(healthy)`, plus `migrate` as `Exited (0)` (it applies database migrations, then stops)
+- `docker compose run --rm migrate`: apply database migrations by hand (`up` already does this)
+- `docker compose run --rm engine python -m engine.marketdata.backfill BTC/USDT 1h 4h --days 365`: download candles and fill gaps (exit 1 if gaps remain); add `--check` to only report gaps. MEXC keeps ~30 days of 1m and ~360 days of 5m/15m, so use `--days 30` for 1m
+- `uv run alembic -c shared/alembic.ini revision --rev-id 0002 -m "..."`: start a new migration file (then write it by hand)
 - `docker compose logs -f engine`: follow the engine's JSON logs
 - `docker compose down`: stop everything (data stays in the `pgdata`/`redisdata` volumes; `-v` would delete it)
 - `uv sync --all-packages`: create or update the local `.venv` for backend, engine and the dev tools (Python 3.12, from `.python-version`)
-- `uv run pytest`: run every Python package's tests (offline; the exchange tests replay recorded MEXC responses)
+- `uv run pytest`: run every Python package's tests (offline; the exchange tests replay recorded MEXC responses). Database tests start a throwaway TimescaleDB container (testcontainers), so keep Docker Desktop running; without it they're skipped locally (in CI they fail)
 - `uv run python -m engine.exchange.record mexc` (or `binance_testnet`): re-record that exchange's public test fixtures (needs network); then update the values the tests expect
 - `uv run ruff check .` / `uv run ruff format .`: lint / format Python
 - `uv run mypy`: strict type check of all Python packages and tests

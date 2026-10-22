@@ -31,6 +31,20 @@ services:
       timeout: 3s
       retries: 10
 
+  # One-shot: applies database migrations (Alembic), then exits. The API and engine wait
+  # for it to finish successfully, so they never run against an out-of-date schema.
+  # Reuses the engine image, which already contains shared/ and its migrations.
+  migrate:
+    build:
+      context: .
+      dockerfile: engine/Dockerfile
+    env_file: .env
+    command: ["python", "-m", "shared.db.migrate"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+
   api:
     build:
       context: .
@@ -44,6 +58,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       # The slim Python image has no curl; urlopen raises (exit 1) on any non-2xx.
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
@@ -62,6 +78,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       # Healthy only if the heartbeat loop touched its file in the last 30 s,
       # which proves the loop is running, not just that the process exists.

@@ -59,6 +59,17 @@ def test_invalid_mode_names_it(env: pytest.MonkeyPatch) -> None:
     assert "MODE" in str(exc.value)
 
 
+def test_database_url_survives_special_characters(env: pytest.MonkeyPatch) -> None:
+    env.setenv("POSTGRES_PASSWORD", "p@ss:w/rd%")
+    url = load_settings(env_file=None).database_url
+
+    assert url.drivername == "postgresql+asyncpg"
+    assert url.password == "p@ss:w/rd%"
+    assert (url.host, url.port, url.database) == ("db", 5432, "crypto_trading")
+    # Printing the URL (e.g. in a log line) hides the password.
+    assert "p@ss" not in str(url)
+
+
 def test_password_never_shown(env: pytest.MonkeyPatch) -> None:
     settings = load_settings(env_file=None)
     assert PASSWORD not in repr(settings)
