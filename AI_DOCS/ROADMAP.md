@@ -43,7 +43,7 @@
 ## Phase 3 — Paper trading
 
 1. [x] **Broker interface + PaperBroker:** fills at live bid/ask from Redis with fees and partial fills; orders, fills, positions and paper balances stored in Postgres; unique `client_order_id` on every order.
-2. [ ] **RiskManager stub in the path:** strategy → RiskManager (pass-through for now, logs every order) → Broker, so the wiring never changes later (D8).
+2. [x] **RiskManager stub in the path:** strategy → RiskManager (pass-through for now, logs every order) → Broker, so the wiring never changes later (D8).
 3. [ ] **Bot runner:** loads active bots and strategy configs from the DB; runs them on each closed candle.
 4. [ ] **Restart recovery:** state rebuilt from the DB on startup; no lost or duplicated positions (tested by killing the engine mid-run).
 
