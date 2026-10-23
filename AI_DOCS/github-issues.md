@@ -181,10 +181,10 @@
 Found on the first live paper buy (D36): 0.0122 BTC against 0.000612 BTC at the best ask. One slice filled at the ask (81646.11); the other 19 rested and filled at the order's limit (81686.94, ask + 0.05%), within 2 s. Two parts of D34 cause it:
 1. A resting order fills at its own limit. That fits an order that waited for the price to come to it, but this one crossed from the start, so its remainder always pays the full slippage buffer (pessimistic).
 2. Each book-ticker update offers the top-of-book size again, even when nothing changed (MEXC re-sends the same bid/ask about every 100 ms). The same 0.000612 BTC filled 20 times (optimistic).
-- [ ] Decide how the rest of a crossing order fills. Suggested: while it still crosses, fill at the current best ask/bid (taker), never worse than its limit. Record the decision in D34
-- [ ] Decide when top-of-book size counts again. Suggested: only when the best price or its size changed since the last update that filled against it. Record the decision in D34
-- [ ] Tests first in `matching.py`/`paper.py`, with hand-worked numbers: a crossing remainder fills at the ask, not its limit; an unchanged quote fills nothing more; a changed size or price does; an order that rested from the start still fills at its limit
-- [ ] Re-run a live paper bot and check its fills against the logged quotes by hand
+- [x] Decide how the rest of a crossing order fills. Suggested: while it still crosses, fill at the current best ask/bid (taker), never worse than its limit. Record the decision in D34
+- [x] Decide when top-of-book size counts again. Suggested: only when the best price or its size changed since the last update that filled against it. Record the decision in D34 (decided: at an unchanged best price only the size beyond what we took there; a new best price resets it)
+- [x] Tests first in `matching.py`/`paper.py`, with hand-worked numbers: a crossing remainder fills at the ask, not its limit; an unchanged quote fills nothing more; a changed size or price does; an order that rested from the start still fills at its limit
+- [x] Re-run a live paper bot and check its fills against the logged quotes by hand (a 124.8 ETH paper buy through the RiskManager against 4.1 ETH at the ask: 5 fills, each at the ask it met, never more than shown at a price)
 
 **Done when:** the tests pass, and on a live paper buy bigger than the top of book every fill is between the asks seen and the limit, with no two fills against the same unchanged quote.
 

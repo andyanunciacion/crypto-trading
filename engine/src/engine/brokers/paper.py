@@ -3,7 +3,11 @@
 Fills come from the latest book ticker the price stream keeps in Redis, sized by what
 is on offer at the best price (matching.py). Balances and positions follow ledger.py.
 Everything is stored in Postgres (`orders`, `fills`, `positions`, `paper_balances`),
-so a restarted engine carries on from where it was.
+so a restarted engine carries on from where it was. Two things only matching needs stay
+in memory: which open orders are still taking (they crossed when placed), and how much
+of each side's best price our fills took. A restart forgets both, which is safe: a
+taking order then rests at its limit (pessimistic), and the size at the best price
+counts once more, on one quote at most.
 
 Each operation is one database transaction: an order, its reservation and its first
 fills are written together or not at all. Balance and order rows are locked
@@ -44,7 +48,7 @@ from engine.brokers.ledger import (
     reserve,
     settle,
 )
-from engine.brokers.matching import Match, Resting, match
+from engine.brokers.matching import Match, Resting, Taken, crosses, forget_moved, match
 from engine.exchange.models import Balance, MarketRules, OrderRequest, OrderSide, order_problems
 from engine.marketdata.quotes import MAX_QUOTE_AGE, QuoteSource
 from engine.strategies.base import Position
@@ -92,12 +96,13 @@ class _Open:
             filled=row.filled,
         )
 
-    def resting(self) -> Resting:
+    def resting(self, *, taking: bool) -> Resting:
         return Resting(
             key=self.client_order_id,
             side=self.side,
             limit=self.limit,
             remaining=self.amount - self.filled,
+            taking=taking,
         )
 
 
@@ -120,6 +125,10 @@ class PaperBroker(Broker):
         self._fee_rate = fee_rate
         self._max_quote_age = max_quote_age
         self._clock = clock
+        # Matching state (module docstring). It's read and replaced with no `await` in
+        # between, so place_order and on_price can't both spend the same quote.
+        self._taking: set[str] = set()  # client order IDs
+        self._taken: dict[str, dict[OrderSide, Taken]] = {}  # by symbol
 
     @property
     def exchange(self) -> str:
@@ -182,6 +191,8 @@ class PaperBroker(Broker):
         """Fill the open orders a new price reaches. The bot runner calls it per update (P3-3)."""
         if update.exchange != self.exchange or not self._is_fresh(update):
             return []
+        # Even with nothing open, a moved price ends what we took at the old one.
+        self._taken[update.symbol] = forget_moved(self._taken.get(update.symbol, {}), update)
         now = self._clock()
         fills: list[BrokerFill] = []
         async with self._db.begin() as conn:
@@ -201,15 +212,20 @@ class PaperBroker(Broker):
                 return []
             orders = {row.client_order_id: _Open.from_row(row) for row in rows}
             rules = await self._rules.market_rules(update.symbol)
-            matches = match(
-                [o.resting() for o in orders.values()],
+            resting = [o.resting(taking=o.client_order_id in self._taking) for o in orders.values()]
+            # An order this update doesn't reach fills nothing now; live, it would be
+            # resting on the book at its limit from here on, so it stops taking.
+            self._taking.difference_update(r.key for r in resting if crosses(r, update) is False)
+            matched = match(
+                resting,
                 update,
-                taker=False,
                 amount_step=rules.amount_step,
+                taken=self._taken.get(update.symbol),
             )
+            self._taken[update.symbol] = matched.taken
             # Amounts are settled by now; applying them bot by bot locks balances in one
             # order everywhere, so concurrent updates for two symbols can't deadlock.
-            for m in sorted(matches, key=lambda m: orders[m.key].bot_id):
+            for m in sorted(matched.matches, key=lambda m: orders[m.key].bot_id):
                 fills.append(await self._fill(conn, orders[m.key], m, now, quote=update))
         return fills
 
@@ -226,6 +242,7 @@ class PaperBroker(Broker):
             if row is None:
                 raise UnknownOrder(f"no paper order {client_order_id!r}")
             released = None
+            self._taking.discard(client_order_id)
             if row.status == "open":
                 order = _Open.from_row(row)
                 released = await self._release(conn, order, row.amount - row.filled)
@@ -325,7 +342,14 @@ class PaperBroker(Broker):
         )
         if quote is None:
             return  # no fresh price: it rests until on_price brings one
-        for m in match([order.resting()], quote, taker=True, amount_step=rules.amount_step):
+        resting = order.resting(taking=True)
+        if crosses(resting, quote):
+            self._taking.add(order.client_order_id)  # _fill drops it once it's closed
+        matched = match(
+            [resting], quote, amount_step=rules.amount_step, taken=self._taken.get(order.symbol)
+        )
+        self._taken[order.symbol] = matched.taken
+        for m in matched.matches:
             await self._fill(conn, order, m, now, quote=quote)
 
     async def _fill(
@@ -359,6 +383,9 @@ class PaperBroker(Broker):
         # matching gives an order at most one fill per update, so `order.filled` is current.
         filled = order.filled + m.amount
         status = "closed" if filled == order.amount else "open"
+        taking = order.client_order_id in self._taking
+        if status == "closed":
+            self._taking.discard(order.client_order_id)
         await conn.execute(
             update(OrderRow)
             .where(OrderRow.id == order.id)
@@ -378,6 +405,10 @@ class PaperBroker(Broker):
             fee=str(fill.fee),
             filled=str(filled),
             status=status,
+            taking=taking,
+            # All our orders have taken at this side's best price so far, this fill
+            # included; it never exceeds the size the quote shows there.
+            taken_at_best=str(self._taken[order.symbol][order.side].amount),
             quote=quote.model_dump(mode="json"),
         )
         return fill
