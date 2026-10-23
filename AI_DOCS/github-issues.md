@@ -162,8 +162,8 @@
 ### P3-2 · RiskManager stub in the order path
 `risk` `money` · Depends on: P3-1
 **Goal:** every order passes the RiskManager from day one.
-- [ ] Pass-through RiskManager that logs every order with inputs
-- [ ] Brokers can only be reached through it
+- [x] Pass-through RiskManager that logs every order with inputs
+- [x] Brokers can only be reached through it
 
 **Done when:** a test shows that no code path reaches a Broker without the RiskManager.
 
