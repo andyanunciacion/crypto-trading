@@ -170,18 +170,33 @@
 ### P3-3 · Bot runner
 `engine` · Depends on: P3-2
 **Goal:** active bots run automatically.
-- [ ] `bots` and `strategy_configs` tables
-- [ ] Load active bots; run on each closed candle
+- [x] `bots` and `strategy_configs` tables
+- [x] Load active bots; run on each closed candle
 
 **Done when:** a seeded paper bot trades on new candles without manual steps.
+
+### P3-3b · Paper fills for orders that cross the book
+`engine` `money` · Depends on: P3-3 · Blocks: the 24-hour run in P3-4
+**Goal:** a paper order that crosses the book when placed fills the way it would live, not at the worst price it allows, and not on the same liquidity over and over.
+Found on the first live paper buy (D36): 0.0122 BTC against 0.000612 BTC at the best ask. One slice filled at the ask (81646.11); the other 19 rested and filled at the order's limit (81686.94, ask + 0.05%), within 2 s. Two parts of D34 cause it:
+1. A resting order fills at its own limit. That fits an order that waited for the price to come to it, but this one crossed from the start, so its remainder always pays the full slippage buffer (pessimistic).
+2. Each book-ticker update offers the top-of-book size again, even when nothing changed (MEXC re-sends the same bid/ask about every 100 ms). The same 0.000612 BTC filled 20 times (optimistic).
+- [ ] Decide how the rest of a crossing order fills. Suggested: while it still crosses, fill at the current best ask/bid (taker), never worse than its limit. Record the decision in D34
+- [ ] Decide when top-of-book size counts again. Suggested: only when the best price or its size changed since the last update that filled against it. Record the decision in D34
+- [ ] Tests first in `matching.py`/`paper.py`, with hand-worked numbers: a crossing remainder fills at the ask, not its limit; an unchanged quote fills nothing more; a changed size or price does; an order that rested from the start still fills at its limit
+- [ ] Re-run a live paper bot and check its fills against the logged quotes by hand
+
+**Done when:** the tests pass, and on a live paper buy bigger than the top of book every fill is between the asks seen and the limit, with no two fills against the same unchanged quote.
 
 ### P3-4 · Restart recovery
 `engine` `money` · Depends on: P3-3
 **Goal:** no lost or duplicated positions after a restart.
 - [ ] Rebuild state from DB on startup
 - [ ] Test: kill the engine mid-run, restart, compare state
+- [ ] Don't trade on missed candles. After the engine was down (PC asleep, network out, a restart), the candle stream delivers every candle it missed at once, and today each would place an order at the current price on a signal that may be hours old. Suggested rule: a bot acts only on a candle that closed less than one timeframe step ago; older ones just fill its warm-up window, logged as `bot.caught_up`. EMA crossover's event exit then misses a cross that happened while down, but the state exits still fire on the newest candle (D31). Record the rule in the decision log
+- [ ] Test: the engine misses several candles and comes back; each bot acts on the newest only
 
-**Done when:** the kill/restart test passes, and a 72-hour paper run completes with trades that check out by hand.
+**Done when:** both tests pass, and a 24-hour paper run (after P3-3b) of a fast 1m bot completes with no crashes and with trades that check out by hand (D37). Keep the PC from sleeping for the run; running for days is Phase 8's 2-week server run.
 
 ---
 

@@ -30,6 +30,9 @@ TIMEFRAMES = ("1m", "5m", "15m", "1h", "4h", "1d")
 # Must match engine.brokers.base.Mode and OrderStatus (a test checks these).
 TRADING_MODES = ("paper", "live")
 ORDER_STATUSES = ("open", "closed", "canceled", "rejected")
+BOT_STATUSES = ("running", "paused", "stopped")
+# What a strategy switch (P6) does with an open position.
+SWITCH_POLICIES = ("keep", "close_first", "hand_over")
 
 
 class Base(DeclarativeBase):
@@ -98,9 +101,55 @@ class BacktestRunRow(Base):
     result: Mapped[dict[str, Any]] = mapped_column(JSONB)  # signals, fills, equity curve
 
 
+# --- Bots (P3) --------------------------------------------------------------------------
+
+
+class BotRow(Base):
+    """One strategy config running on one symbol and timeframe, in paper or live mode.
+
+    The bot runner runs the bots whose status is "running" when the engine starts.
+    """
+
+    __tablename__ = "bots"
+    __table_args__ = (
+        CheckConstraint(f"timeframe IN {TIMEFRAMES!r}", name="timeframe"),
+        CheckConstraint(f"mode IN {TRADING_MODES!r}", name="mode"),
+        CheckConstraint(f"status IN {BOT_STATUSES!r}", name="status"),
+        CheckConstraint(f"switch_policy IN {SWITCH_POLICIES!r}", name="switch_policy"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    name: Mapped[str] = mapped_column(Text, unique=True)
+    # The CCXT id, e.g. "mexc". P5 replaces it with an exchange account (and its keys).
+    exchange: Mapped[str] = mapped_column(Text)
+    symbol: Mapped[str] = mapped_column(Text)
+    timeframe: Mapped[str] = mapped_column(Text)
+    mode: Mapped[str] = mapped_column(Text, server_default="paper")  # D17
+    status: Mapped[str] = mapped_column(Text, server_default="stopped")
+    # The config it runs now. use_alter: the two tables point at each other, so this
+    # foreign key is added after both exist.
+    active_strategy_config_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("strategy_configs.id", use_alter=True)
+    )
+    switch_policy: Mapped[str] = mapped_column(Text, server_default="keep")  # used from P6
+
+
+class StrategyConfigRow(Base):
+    """A strategy with specific params, for one bot. Append-only: a change adds a row."""
+
+    __tablename__ = "strategy_configs"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    bot_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("bots.id"), index=True)
+    strategy: Mapped[str] = mapped_column(Text)  # a name in engine.strategies.registry
+    version: Mapped[int] = mapped_column(Integer)  # the strategy's version when this was made
+    params: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_by: Mapped[str] = mapped_column(Text)  # e.g. "cli"; "regime" from P6
+
+
 # --- Trading (P3): written by the brokers ---------------------------------------------
-# `bot_id` has no foreign key yet: the `bots` table arrives with the bot runner (P3-3),
-# whose migration adds them.
 
 
 class OrderRow(Base):
@@ -124,7 +173,7 @@ class OrderRow(Base):
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    bot_id: Mapped[int] = mapped_column(BigInteger)
+    bot_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("bots.id"))
     mode: Mapped[str] = mapped_column(Text)
     exchange: Mapped[str] = mapped_column(Text)
     symbol: Mapped[str] = mapped_column(Text)
@@ -173,7 +222,7 @@ class PositionRow(Base):
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    bot_id: Mapped[int] = mapped_column(BigInteger)
+    bot_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("bots.id"))
     mode: Mapped[str] = mapped_column(Text)
     exchange: Mapped[str] = mapped_column(Text)
     symbol: Mapped[str] = mapped_column(Text)
@@ -194,7 +243,7 @@ class PaperBalanceRow(Base):
     __tablename__ = "paper_balances"
     __table_args__ = (CheckConstraint("free >= 0 AND used >= 0", name="not_negative"),)
 
-    bot_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    bot_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("bots.id"), primary_key=True)
     currency: Mapped[str] = mapped_column(Text, primary_key=True)
     free: Mapped[Decimal] = mapped_column(Numeric)
     used: Mapped[Decimal] = mapped_column(Numeric)  # held by open orders

@@ -16,11 +16,14 @@ from collections.abc import Iterator
 
 import pytest
 from sqlalchemy import URL
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncEngine
 from testcontainers.community.postgres import PostgresContainer
 from testcontainers.core.container import DockerContainer
 from testcontainers.core.wait_strategies import LogMessageWaitStrategy
 
 from shared.db.migrate import upgrade
+from shared.db.models import BotRow
 
 # Keep both in step with compose.yaml.
 TIMESCALE_IMAGE = "timescale/timescaledb:2.31.0-pg16"
@@ -68,6 +71,23 @@ def db_url(timescale_url: URL) -> URL:
     """The test database with every migration applied."""
     upgrade(timescale_url)
     return timescale_url
+
+
+async def insert_bot(db: AsyncEngine, bot_id: int = 1) -> None:
+    """Make sure bot `bot_id` exists, for tests that write orders or balances for it.
+
+    Those tables' `bot_id` must name a real bot. Tests that truncate `bots` should
+    `RESTART IDENTITY`: this sets the id itself, which doesn't move the id sequence on.
+    """
+    row = {
+        "id": bot_id,
+        "name": f"test-bot-{bot_id}",
+        "exchange": "mexc",
+        "symbol": "BTC/USDT",
+        "timeframe": "1m",
+    }
+    async with db.begin() as conn:
+        await conn.execute(insert(BotRow).values(row).on_conflict_do_nothing())
 
 
 @pytest.fixture(scope="session")

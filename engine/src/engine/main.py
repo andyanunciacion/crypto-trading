@@ -1,8 +1,9 @@
 """Engine entry point. Run with `python -m engine`.
 
 Runs a heartbeat loop, so Docker can tell the worker is alive, and one live price
-stream per symbol in PRICE_SYMBOLS (into Redis). Strategies, the RiskManager and
-brokers plug into it in later phases.
+stream per symbol (into Redis): PRICE_SYMBOLS plus the bots' symbols. Then it runs the
+bots that are "running" in the database, on paper (D36), and feeds live prices to the
+PaperBroker so resting orders fill. Bots are loaded once, at startup.
 """
 
 import asyncio
@@ -14,9 +15,15 @@ from typing import TextIO
 import structlog
 from redis.asyncio import Redis
 
+from engine.bots.runner import BotRunner
+from engine.bots.store import load_running_bots
 from engine.exchange.adapter import ExchangeAdapter
 from engine.marketdata.prices import PriceStream, RedisPriceSink
+from engine.marketdata.quotes import RedisQuotes
+from engine.marketdata.store import CandleStore
+from engine.risk.paper import PaperDesk
 from shared.config import Settings, load_settings
+from shared.db.session import make_engine
 
 HEARTBEAT_INTERVAL_SECONDS = 10
 # The Docker health check reads this file's modification time (see compose.yaml).
@@ -67,22 +74,40 @@ async def run(settings: Settings) -> None:
         price_symbols=settings.price_symbols,
     )
     redis = Redis.from_url(settings.redis_url)
+    db = make_engine(settings.database_url)
     try:
         # Public market data only: no API key, and trading stays off (D22).
         async with ExchangeAdapter() as exchange:
+            bots = await load_running_bots(db, exchange.exchange_id)
+            # dict.fromkeys drops repeats and keeps the order.
+            bot_symbols = list(dict.fromkeys(bot.symbol for bot in bots))
+            symbols = list(dict.fromkeys([*settings.price_symbols, *bot_symbols]))
             sink = RedisPriceSink(redis)
+            quotes = RedisQuotes(redis)
+            desk = PaperDesk(db, quotes, exchange)
             # A TaskGroup runs the tasks side by side and waits for all of them to end.
             async with asyncio.TaskGroup() as tasks:
                 tasks.create_task(heartbeat(stop))
-                streams = [
+                workers = [
                     tasks.create_task(PriceStream(exchange, sink, symbol).run())
-                    for symbol in settings.price_symbols
+                    for symbol in symbols
                 ]
+                if bots:
+                    runner = BotRunner(bots, desk.risk, exchange, quotes, CandleStore(db), db)
+                    workers.append(tasks.create_task(runner.run()))
+                    workers.append(
+                        tasks.create_task(
+                            desk.feed_prices(redis, exchange.exchange_id, bot_symbols)
+                        )
+                    )
+                else:
+                    log.info("bots.none", hint="python -m engine.bots.create adds one")
                 await stop.wait()
-                for stream in streams:
-                    stream.cancel()
+                for worker in workers:
+                    worker.cancel()
     finally:
         await redis.aclose()
+        await db.dispose()
     log.info("engine.stopping")
 
 

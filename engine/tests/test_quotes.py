@@ -7,8 +7,8 @@ from decimal import Decimal
 import pytest
 from redis.asyncio import Redis
 
-from engine.brokers.quotes import RedisQuotes
 from engine.marketdata.prices import RedisPriceSink
+from engine.marketdata.quotes import RedisQuotes
 from shared.prices import PriceUpdate
 
 T0 = datetime(2026, 10, 23, 12, 0, tzinfo=UTC)

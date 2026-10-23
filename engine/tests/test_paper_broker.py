@@ -30,6 +30,7 @@ from engine.strategies.base import Position
 from shared.db.models import ORDER_STATUSES, TRADING_MODES, OrderRow
 from shared.db.session import make_engine
 from shared.prices import PriceUpdate
+from shared.testing import insert_bot
 
 T0 = datetime(2026, 10, 23, 12, 0, tzinfo=UTC)
 BTC = "BTC/USDT"
@@ -122,6 +123,7 @@ async def setup(db_url: URL) -> AsyncIterator[Setup]:
     db = make_engine(db_url)
     async with db.begin() as conn:
         await conn.execute(text("TRUNCATE orders, fills, positions, paper_balances"))
+    await insert_bot(db, BOT)
     quotes, clock = FakeQuotes(), Clock()
     broker = PaperBroker(db, quotes, FakeRules(), clock=clock)
     await broker.deposit(BOT, "USDT", d("1000"))

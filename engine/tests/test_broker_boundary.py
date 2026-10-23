@@ -94,7 +94,7 @@ def test_the_data_only_names_cannot_place_orders() -> None:
         "from engine.brokers.base import Broker\n",
         "from engine.brokers.base import BrokerOrder, Broker\n",
         "from engine.brokers.base import *\n",
-        "from engine.brokers.quotes import RedisQuotes\n",
+        "from engine.brokers.ledger import reserve\n",
         "from engine.brokers import paper\n",
         "from engine import brokers\n",
         "import engine.brokers.paper\n",

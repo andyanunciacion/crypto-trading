@@ -1,0 +1,110 @@
+"""The create CLI: a running, funded paper bot, or nothing at all.
+
+Against a real TimescaleDB (see shared.testing). The exchange is the offline MEXC
+replay (conftest.py), so the symbol check runs through CCXT's real market data.
+"""
+
+from collections.abc import AsyncIterator
+from decimal import Decimal
+
+import pytest
+from sqlalchemy import URL, func, select, text
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from engine.bots.create import create_paper_bot, parse_args
+from engine.bots.store import load_running_bots
+from engine.exchange.adapter import ExchangeAdapter
+from engine.exchange.errors import ExchangeError
+from engine.exchange.models import Balance
+from engine.risk.paper import PaperDesk
+from engine.strategies.ema_crossover import EmaCrossover, EmaCrossoverParams
+from shared.db.models import BotRow
+from shared.db.session import make_engine
+from shared.prices import PriceUpdate
+
+EMA = EmaCrossover(EmaCrossoverParams(fast=9, slow=21))
+
+
+class NoQuotes:
+    async def latest(self, exchange: str, symbol: str) -> PriceUpdate | None:
+        return None
+
+
+@pytest.fixture
+async def db(db_url: URL) -> AsyncIterator[AsyncEngine]:
+    engine = make_engine(db_url)
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "TRUNCATE bots, strategy_configs, orders, fills, positions, paper_balances"
+                " RESTART IDENTITY"
+            )
+        )
+    yield engine
+    await engine.dispose()
+
+
+async def bot_count(db: AsyncEngine) -> int:
+    async with db.connect() as conn:
+        return (await conn.execute(select(func.count()).select_from(BotRow))).scalar_one()
+
+
+async def create(
+    db: AsyncEngine, adapter: ExchangeAdapter, symbol: str = "BTC/USDT", cash: str = "500"
+) -> int:
+    return await create_paper_bot(
+        db,
+        PaperDesk(db, NoQuotes(), adapter),
+        adapter,
+        name="btc-ema",
+        strategy=EMA,
+        symbol=symbol,
+        timeframe="1h",
+        cash=Decimal(cash),
+    )
+
+
+async def test_creates_a_running_funded_paper_bot(
+    db: AsyncEngine, adapter: ExchangeAdapter
+) -> None:
+    bot_id = await create(db, adapter)
+
+    (bot,) = await load_running_bots(db, "mexc")
+    assert (bot.id, bot.name, bot.symbol, bot.timeframe) == (bot_id, "btc-ema", "BTC/USDT", "1h")
+    assert bot.strategy.params == EMA.params
+    desk = PaperDesk(db, NoQuotes(), adapter)
+    cash = Decimal(500)
+    assert await desk.risk.balances(bot_id) == {
+        "USDT": Balance(currency="USDT", free=cash, used=Decimal(0), total=cash)
+    }
+
+
+async def test_a_symbol_the_exchange_doesnt_list_creates_nothing(
+    db: AsyncEngine, adapter: ExchangeAdapter
+) -> None:
+    with pytest.raises(ExchangeError):
+        await create(db, adapter, symbol="NOPE/USDT")
+
+    assert await bot_count(db) == 0
+
+
+@pytest.mark.parametrize("cash", ["0", "-5"])
+async def test_no_cash_creates_nothing(
+    db: AsyncEngine, adapter: ExchangeAdapter, cash: str
+) -> None:
+    with pytest.raises(ValueError, match="cash must be positive"):
+        await create(db, adapter, cash=cash)
+
+    assert await bot_count(db) == 0
+
+
+def test_arguments() -> None:
+    args = parse_args(["btc-ema", "ema_crossover", "BTC/USDT", "1h", "--params", '{"fast": 5}'])
+
+    assert (args.name, args.strategy, args.symbol, args.timeframe) == (
+        "btc-ema",
+        "ema_crossover",
+        "BTC/USDT",
+        "1h",
+    )
+    assert (args.params, args.cash, args.exchange) == ({"fast": 5}, Decimal(1000), "mexc")

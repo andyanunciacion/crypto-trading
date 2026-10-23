@@ -45,15 +45,11 @@ from engine.brokers.ledger import (
     settle,
 )
 from engine.brokers.matching import Match, Resting, match
-from engine.brokers.quotes import QuoteSource
 from engine.exchange.models import Balance, MarketRules, OrderRequest, OrderSide, order_problems
+from engine.marketdata.quotes import MAX_QUOTE_AGE, QuoteSource
 from engine.strategies.base import Position
 from shared.db.models import FillRow, OrderRow, PaperBalanceRow, PositionRow
 from shared.prices import PriceUpdate
-
-# MEXC's book ticker updates many times a second on a liquid pair, and the price stream
-# polls REST every 2 s while it reconnects, so a price this old means the feed is down.
-MAX_QUOTE_AGE = timedelta(seconds=10)
 
 log = structlog.get_logger()
 
