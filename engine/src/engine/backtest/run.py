@@ -24,6 +24,7 @@ from engine.backtest.models import (
     BacktestResult,
     default_slippage,
 )
+from engine.backtest.report import describe, report
 from engine.backtest.simulator import BACKTESTER_VERSION, BacktestError, run_backtest
 from engine.backtest.store import BacktestRunStore, candles_sha256
 from engine.exchange.adapter import ExchangeAdapter
@@ -53,6 +54,7 @@ async def backtest(
     history = await load_candles(candles, config, strategy.warmup_candles)
     result = run_backtest(strategy, history, config)
     run_id = await runs.save(config, strategy.warmup_candles, history, result)
+    metrics = report(config, result)
     log.info(
         "backtest.done",
         run_id=run_id,
@@ -62,6 +64,12 @@ async def backtest(
         skipped=len(result.skipped),
         final_equity=str(result.final_equity),
         total_fees=str(result.total_fees),
+        total_return=str(metrics.total_return),
+        max_drawdown=str(metrics.max_drawdown),
+        sharpe=None if metrics.sharpe is None else str(metrics.sharpe),
+        trades=metrics.trade_count,
+        win_rate=None if metrics.win_rate is None else str(metrics.win_rate),
+        profit_factor=None if metrics.profit_factor is None else str(metrics.profit_factor),
     )
     return run_id, result
 
@@ -87,23 +95,6 @@ async def reproduce(candles: CandleStore, runs: BacktestRunStore, run_id: int) -
             f"({len(history)} now, {stored.candle_count} then)"
         )
     return run_backtest(strategy, history, config)
-
-
-def describe(run_id: int, config: BacktestConfig, result: BacktestResult) -> str:
-    quote = config.symbol.split("/")[1]
-    change = (result.final_equity / config.initial_cash - 1) * 100
-    return "\n".join(
-        [
-            f"run {run_id}: {config.strategy} v{config.strategy_version}"
-            f" {json.dumps(config.params)} on {config.exchange} {config.symbol} {config.timeframe},"
-            f" {config.start:%Y-%m-%d %H:%M} to {config.end:%Y-%m-%d %H:%M} UTC",
-            f"  fee {config.fee_rate * 100:f}%, slippage {config.slippage_rate * 100:f}%",
-            f"  {config.initial_cash:f} {quote} -> {result.final_equity:.2f} {quote}"
-            f" ({change:+.2f}%), fees {result.total_fees:.2f} {quote}",
-            f"  {len(result.fills)} fills, {len(result.skipped)} skipped orders"
-            + (", still holding at the end" if result.final_amount else ""),
-        ]
-    )
 
 
 async def run(args: argparse.Namespace, settings: Settings) -> None:
