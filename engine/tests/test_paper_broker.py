@@ -142,7 +142,7 @@ def btc(free: str, used: str = "0") -> Balance:
 # --- Fills, fees and balances ----------------------------------------------------------
 
 
-async def test_a_buy_fills_in_parts_at_the_ask_then_at_its_limit(setup: Setup) -> None:
+async def test_a_buy_fills_in_parts_at_the_ask_then_at_the_later_ask(setup: Setup) -> None:
     # Only 0.5 BTC on offer at the 100 ask, 2 wanted with a 101 limit.
     setup.quotes.price = quote(ask="100", ask_size="0.5")
 
@@ -160,26 +160,63 @@ async def test_a_buy_fills_in_parts_at_the_ask_then_at_its_limit(setup: Setup) -
         "BTC": btc("0.5"),
     }
 
-    # Later the ask is 100.5 with plenty on offer: the resting rest fills at its 101 limit.
+    # Later the ask is 100.5 with plenty on offer. The order crossed when placed and
+    # still does, so the rest keeps taking: at the 100.5 ask, not its 101 limit.
     setup.clock.now = T0 + timedelta(seconds=5)
     fills = await setup.broker.on_price(quote(ask="100.5", ask_size="3", ts=setup.clock.now))
 
-    # 1.5 x 101 = 151.5 + 0.1515 fee, exactly what was still held.
     assert fills == [
         BrokerFill(
             ts=setup.clock.now,
-            price=d("101"),
+            price=d("100.5"),
             amount=d("1.5"),
-            fee=d("0.1515"),
+            fee=d("0.15075"),
             fee_currency="USDT",
         )
     ]
     done = await setup.broker.get_order(placed.client_order_id)
     assert done is not None
     assert (done.status, done.filled, len(done.fills)) == ("closed", d("2"), 2)
-    assert await setup.broker.balances(BOT) == {"USDT": usdt("798.2985"), "BTC": btc("2")}
-    # Entry (0.5 x 100 + 1.5 x 101) / 2 = 100.75.
-    assert await setup.broker.position(BOT, BTC) == Position(amount=d("2"), avg_entry=d("100.75"))
+    # The 151.6515 still held (at the limit) is released; 1.5 x 100.5 = 150.75 + 0.15075
+    # fee is paid. The 0.75075 left over comes back: 798.2985 + 0.75075 = 799.04925.
+    assert await setup.broker.balances(BOT) == {"USDT": usdt("799.04925"), "BTC": btc("2")}
+    # Entry (0.5 x 100 + 1.5 x 100.5) / 2 = 100.375.
+    assert await setup.broker.position(BOT, BTC) == Position(amount=d("2"), avg_entry=d("100.375"))
+
+
+async def test_an_unchanged_quote_does_not_fill_the_same_size_again(setup: Setup) -> None:
+    # MEXC re-sends an unchanged book ticker about every 100 ms. 0.5 at the ask, 2 wanted.
+    setup.quotes.price = quote(ask="100", ask_size="0.5")
+    placed = await setup.broker.place_order(BOT, order("buy", "2", "101"), REASON)
+    assert placed.filled == d("0.5")
+
+    # The same quote again (as the price channel delivers it): its 0.5 is already ours.
+    assert await setup.broker.on_price(quote(ask="100", ask_size="0.5")) == []
+    # 0.8 at the same price: only the 0.3 that's new.
+    grown = await setup.broker.on_price(quote(ask="100", ask_size="0.8"))
+    assert [(f.price, f.amount) for f in grown] == [(d("100"), d("0.3"))]
+    # A new best price: its whole 0.5.
+    moved = await setup.broker.on_price(quote(ask="100.2", ask_size="0.5"))
+    assert [(f.price, f.amount) for f in moved] == [(d("100.2"), d("0.5"))]
+
+    done = await setup.broker.get_order(placed.client_order_id)
+    assert done is not None
+    assert (done.status, done.filled) == ("open", d("1.3"))
+
+
+async def test_a_taker_that_stops_crossing_rests_at_its_limit(setup: Setup) -> None:
+    setup.quotes.price = quote(ask="100", ask_size="0.5")
+    placed = await setup.broker.place_order(BOT, order("buy", "2", "101"), REASON)
+
+    # The ask jumps past the 101 limit: live, the rest would now sit on the book at 101.
+    assert await setup.broker.on_price(quote(ask="101.5", ask_size="3")) == []
+    # So when the ask comes back, it fills at its limit like any resting order.
+    fills = await setup.broker.on_price(quote(ask="100.5", ask_size="3"))
+
+    assert [(f.price, f.amount) for f in fills] == [(d("101"), d("1.5"))]
+    done = await setup.broker.get_order(placed.client_order_id)
+    assert done is not None
+    assert done.status == "closed"
 
 
 async def test_a_round_trip_closes_the_position_with_pnl_net_of_fees(setup: Setup) -> None:
@@ -325,14 +362,17 @@ async def test_cancelling_an_unknown_order_is_an_error(setup: Setup) -> None:
 
 async def test_a_new_broker_carries_on_from_the_database(setup: Setup) -> None:
     setup.quotes.price = quote(ask_size="0.4")
-    placed = await setup.broker.place_order(BOT, order("buy", "1", "100"), REASON)
+    placed = await setup.broker.place_order(BOT, order("buy", "1", "101"), REASON)
 
     restarted = setup.fresh_broker()
 
     assert await restarted.get_order(placed.client_order_id) == placed
     assert await restarted.balances(BOT) == await setup.broker.balances(BOT)
     assert await restarted.position(BOT, BTC) == Position(amount=d("0.4"), avg_entry=d("100"))
-    assert len(await restarted.on_price(quote())) == 1  # the open rest still fills
+    # The open rest still fills. Which orders were taking isn't stored, so after a
+    # restart it rests and fills at its 101 limit, not the 100.5 ask: pessimistic.
+    fills = await restarted.on_price(quote(ask="100.5"))
+    assert [(f.price, f.amount) for f in fills] == [(d("101"), d("0.6"))]
 
 
 # --- Client order IDs ------------------------------------------------------------------
