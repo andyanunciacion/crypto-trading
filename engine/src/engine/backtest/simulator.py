@@ -28,7 +28,7 @@ from engine.backtest.models import (
     Fill,
     SkippedOrder,
 )
-from engine.exchange.models import Candle, MarketRules, OrderSide
+from engine.exchange.models import Candle, MarketRules, OrderSide, Timeframe
 from engine.marketdata.timeframes import STEP
 from engine.strategies.base import Position, Signal, Strategy, StrategyParams
 
@@ -197,17 +197,23 @@ def _check_strategy[P: StrategyParams](strategy: Strategy[P], config: BacktestCo
         raise BacktestError(f"config params {config.params} aren't the strategy's {params}")
 
 
-def _first_in_range(candles: Sequence[Candle], config: BacktestConfig, warmup: int) -> int:
-    """The index of the candle at `config.start`, after checking the candles fit the run."""
-    step = STEP[config.timeframe]
+def check_contiguous(candles: Sequence[Candle], timeframe: Timeframe) -> None:
+    """Refuse an empty list, or one with a candle missing anywhere."""
     if not candles:
         raise BacktestError("no candles")
+    step = STEP[timeframe]
     gaps = [(a.ts, b.ts) for a, b in pairwise(candles) if b.ts - a.ts != step]
     if gaps:
         # A fill can't jump a gap to an unrelated price later on, and missing candles
         # aren't made up (D25). Fill the gap or pick a range without it.
         listed = ", ".join(f"{a:%Y-%m-%d %H:%M} to {b:%Y-%m-%d %H:%M}" for a, b in gaps[:5])
         raise BacktestError(f"{len(gaps)} gap(s) in the candles (UTC): {listed}")
+
+
+def _first_in_range(candles: Sequence[Candle], config: BacktestConfig, warmup: int) -> int:
+    """The index of the candle at `config.start`, after checking the candles fit the run."""
+    check_contiguous(candles, config.timeframe)
+    step = STEP[config.timeframe]
     first = (config.start - candles[0].ts) // step
     needed = max(warmup, 1)
     if first < needed:

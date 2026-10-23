@@ -9,29 +9,20 @@ come from before that.
 
 import argparse
 import asyncio
-import json
 import sys
-from datetime import timedelta
-from decimal import Decimal, InvalidOperation
-from typing import Any, get_args
+from typing import Any
 
 import structlog
 
-from engine.backtest.models import (
-    DEFAULT_FEE_RATE,
-    DEFAULT_INITIAL_CASH,
-    BacktestConfig,
-    BacktestResult,
-    default_slippage,
-)
+from engine.backtest.cli import add_run_arguments, json_object_arg, run_settings
+from engine.backtest.models import BacktestConfig, BacktestResult
 from engine.backtest.report import describe, report
 from engine.backtest.simulator import BACKTESTER_VERSION, BacktestError, run_backtest
 from engine.backtest.store import BacktestRunStore, candles_sha256
-from engine.exchange.adapter import ExchangeAdapter
-from engine.exchange.models import Candle, Timeframe
+from engine.exchange.models import Candle
 from engine.main import configure_logging
 from engine.marketdata.store import CandleStore, Series
-from engine.marketdata.timeframes import STEP, floor
+from engine.marketdata.timeframes import STEP
 from engine.strategies.base import Strategy
 from engine.strategies.registry import STRATEGIES, build, strategy_class
 from shared.config import Settings, load_settings
@@ -102,75 +93,23 @@ async def run(args: argparse.Namespace, settings: Settings) -> None:
     db = make_engine(settings.database_url)
     candles = CandleStore(db)
     try:
-        series = Series(args.exchange, args.symbol, args.timeframe)
-        bounds = await candles.bounds(series)
-        if bounds is None:
-            raise BacktestError(f"no candles stored for {series}; run the backfill first")
-        end = bounds.last + STEP[args.timeframe]
-        # Public data only: no key, trading off (D22).
-        async with ExchangeAdapter(args.exchange) as exchange:
-            rules = await exchange.market_rules(args.symbol)
-        config = BacktestConfig(
-            strategy=strategy.name,
-            strategy_version=strategy.version,
-            params=strategy.params.model_dump(mode="json"),
-            exchange=args.exchange,
-            symbol=args.symbol,
-            timeframe=args.timeframe,
-            start=floor(end - timedelta(days=args.days), args.timeframe),
-            end=end,
-            initial_cash=args.cash,
-            fee_rate=args.fee_rate,
-            slippage_rate=default_slippage(args.symbol) if args.slippage is None else args.slippage,
-            market_rules=rules,
-        )
+        config = await run_settings(args, candles, strategy)
         run_id, result = await backtest(candles, BacktestRunStore(db), strategy, config)
         print(describe(run_id, config, result))
     finally:
         await db.dispose()
 
 
-def _decimal(text: str) -> Decimal:
-    try:
-        return Decimal(text)
-    except InvalidOperation:
-        raise argparse.ArgumentTypeError(f"not a number: {text!r}") from None
-
-
-def _json_object(text: str) -> dict[str, Any]:
-    try:
-        value = json.loads(text)
-    except json.JSONDecodeError as e:
-        raise argparse.ArgumentTypeError(f"not valid JSON: {e}") from None
-    if not isinstance(value, dict):
-        raise argparse.ArgumentTypeError("must be a JSON object, like '{\"fast\": 9}'")
-    return value
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("strategy", choices=sorted(STRATEGIES))
-    parser.add_argument("symbol", help="CCXT format, e.g. BTC/USDT")
-    parser.add_argument("timeframe", choices=get_args(Timeframe))
-    parser.add_argument("--days", type=int, default=365, help="how far back (default 365)")
+    add_run_arguments(parser)
     parser.add_argument(
-        "--params", type=_json_object, default={}, help="strategy params as JSON (default: its own)"
+        "--params",
+        type=json_object_arg,
+        default={},
+        help="strategy params as JSON (default: its own)",
     )
-    parser.add_argument(
-        "--cash", type=_decimal, default=DEFAULT_INITIAL_CASH, help="starting quote currency"
-    )
-    parser.add_argument(
-        "--fee-rate",
-        type=_decimal,
-        default=DEFAULT_FEE_RATE,
-        help=f"fee per fill, as a fraction (default {DEFAULT_FEE_RATE} = 0.1%%)",
-    )
-    parser.add_argument(
-        "--slippage",
-        type=_decimal,
-        help="slippage per fill, as a fraction (default 0.0005 for BTC/ETH, 0.003 otherwise)",
-    )
-    parser.add_argument("--exchange", default="mexc")
     args = parser.parse_args()
 
     settings = load_settings()
