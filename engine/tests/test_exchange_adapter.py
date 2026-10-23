@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from conftest import FIXTURES_DIR, ReplaySession, Reply, without_waits
@@ -118,10 +119,13 @@ def test_a_ticker_needs_at_least_one_price() -> None:
 class FakeStreamClient:
     """Stands in for CCXT's WebSocket client: hands back recorded, already-parsed updates."""
 
-    updates: list[dict[str, object]]
+    updates: list[Any]
     closed: bool = False
 
-    async def watch_ticker(self, symbol: str) -> dict[str, object]:
+    async def watch_ticker(self, symbol: str) -> Any:
+        return self.updates.pop(0)
+
+    async def watch_ohlcv(self, symbol: str, timeframe: str) -> Any:
         return self.updates.pop(0)
 
     async def close(self) -> None:
@@ -131,6 +135,13 @@ class FakeStreamClient:
 def recorded_stream_ticker() -> dict[str, object]:
     raw: dict[str, object] = json.loads(
         (FIXTURES_DIR / "mexc/ws_ticker_btcusdt.json").read_text(encoding="utf-8")
+    )
+    return raw
+
+
+def recorded_stream_candles() -> list[list[object]]:
+    raw: list[list[object]] = json.loads(
+        (FIXTURES_DIR / "mexc/ws_ohlcv_btcusdt_1m.json").read_text(encoding="utf-8")
     )
     return raw
 
@@ -154,6 +165,42 @@ async def test_streamed_ticker_without_prices_is_an_error(adapter: ExchangeAdapt
 
     with pytest.raises(ExchangeError, match="unexpected"):
         await adapter.watch_ticker(BTC)
+
+
+async def test_streamed_candles_are_exact_decimals_in_utc(adapter: ExchangeAdapter) -> None:
+    adapter._stream_clients[f"{BTC}@1m"] = FakeStreamClient([recorded_stream_candles()])
+
+    (candle,) = await adapter.watch_candles(BTC, "1m")
+
+    assert candle.ts == datetime(2026, 10, 23, 1, 37, tzinfo=UTC)
+    assert candle.open == Decimal("81267.66")
+    assert candle.high == Decimal("81267.67")
+    assert candle.low == Decimal("81235.45")
+    assert candle.close == Decimal("81235.45")
+    assert candle.volume == Decimal("2.78717981")
+
+
+async def test_streamed_candle_with_bad_prices_is_an_error(adapter: ExchangeAdapter) -> None:
+    (row,) = recorded_stream_candles()
+    adapter._stream_clients[f"{BTC}@1m"] = FakeStreamClient([[[row[0], None, *row[2:]]]])
+
+    with pytest.raises(ExchangeError, match="unexpected"):
+        await adapter.watch_candles(BTC, "1m")
+
+
+async def test_candle_and_ticker_streams_close_separately(adapter: ExchangeAdapter) -> None:
+    # A dead candle stream is dropped without cutting off the price stream, and back.
+    ticker, candles = FakeStreamClient([]), FakeStreamClient([])
+    adapter._stream_clients[BTC] = ticker
+    adapter._stream_clients[f"{BTC}@1m"] = candles
+
+    await adapter.close_stream(BTC, "1m")
+
+    assert candles.closed
+    assert not ticker.closed
+    await adapter.close_stream(BTC)
+    assert ticker.closed
+    assert adapter._stream_clients == {}
 
 
 async def test_stream_client_reuses_the_loaded_markets(

@@ -62,9 +62,10 @@ async def fetch_mexc_stream() -> dict[str, object]:
     _trust_os_certificates(exchange)
     try:
         ticker = await exchange.watch_ticker("BTC/USDT")
+        ohlcv = await exchange.watch_ohlcv("BTC/USDT", "1m")
     finally:
         await exchange.close()
-    return {"mexc/ws_ticker_btcusdt.json": ticker}
+    return {"mexc/ws_ticker_btcusdt.json": ticker, "mexc/ws_ohlcv_btcusdt_1m.json": ohlcv}
 
 
 async def fetch_binance_testnet() -> dict[str, object]:

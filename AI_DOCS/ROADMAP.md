@@ -36,7 +36,7 @@
 3. [x] **Report:** total return, max drawdown, Sharpe, win rate, profit factor, number of trades, equity curve.
 4. [x] **More strategies:** RSI mean reversion and Bollinger breakout.
 5. [x] **Overfitting checks:** parameter sweeps and walk-forward testing.
-6. [ ] **Parity test:** the same strategy gives the same signals in a backtest and in a replay of recorded live data.
+6. [x] **Parity test:** the same strategy gives the same signals in a backtest and in a replay of recorded live data.
 
 **Exit criteria:** the parity test passes; every report includes fees and slippage; walk-forward runs for at least one strategy.
 

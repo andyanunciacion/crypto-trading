@@ -1,7 +1,7 @@
 """The only gateway to the exchange: everything that talks to MEXC goes through here.
 
-Wraps CCXT's async client, plus its WebSocket clients (ccxt.pro) for live prices;
-this package is the only place that imports ccxt. On the
+Wraps CCXT's async client, plus its WebSocket clients (ccxt.pro) for live prices and
+candles; this package is the only place that imports ccxt. On the
 way out, CCXT's dicts become the validated models in models.py (Decimal money, UTC
 times) and CCXT's exceptions become the ones in errors.py.
 
@@ -120,8 +120,8 @@ class ExchangeAdapter:
             self._exchange.set_sandbox_mode(True)
 
     async def close(self) -> None:
-        for symbol in list(self._stream_clients):
-            await self.close_stream(symbol)
+        for key in list(self._stream_clients):
+            await self._close_stream(key)
         await self._exchange.close()
 
     async def __aenter__(self) -> Self:
@@ -155,20 +155,7 @@ class ExchangeAdapter:
             symbol=symbol,
             timeframe=timeframe,
         )
-        return [
-            _parse(
-                Candle,
-                {
-                    "ts": _from_ms(row[0]),
-                    "open": row[1],
-                    "high": row[2],
-                    "low": row[3],
-                    "close": row[4],
-                    "volume": row[5],
-                },
-            )
-            for row in rows
-        ]
+        return [_parse_candle(row) for row in rows]
 
     async def fetch_ticker(self, symbol: str) -> Ticker:
         raw = await self._read(
@@ -191,9 +178,26 @@ class ExchangeAdapter:
             raw = await client.watch_ticker(symbol)
         return _parse_ticker(raw)
 
-    async def close_stream(self, symbol: str) -> None:
-        """Close `symbol`'s WebSocket, if one is open. Never raises."""
-        client = self._stream_clients.pop(symbol, None)
+    async def watch_candles(self, symbol: str, timeframe: Timeframe) -> list[Candle]:
+        """Wait for the next kline updates of `symbol` over the exchange's WebSocket.
+
+        Each update is the current state of a candle, usually the open one (its prices
+        still move), sent many times a minute. Use them to tell when a candle closed, and
+        fetch the closed candle with `fetch_candles` (D33). Failures behave as in
+        `watch_ticker`: call `close_stream(symbol, timeframe)` after one.
+        """
+        client = await self._stream_client(_candle_stream_key(symbol, timeframe))
+        with _translated_errors():
+            rows = await client.watch_ohlcv(symbol, timeframe)
+        return [_parse_candle(row) for row in rows]
+
+    async def close_stream(self, symbol: str, timeframe: Timeframe | None = None) -> None:
+        """Close `symbol`'s ticker WebSocket, or its candle one for `timeframe`. Never raises."""
+        key = symbol if timeframe is None else _candle_stream_key(symbol, timeframe)
+        await self._close_stream(key)
+
+    async def _close_stream(self, key: str) -> None:
+        client = self._stream_clients.pop(key, None)
         if client is None:
             return
         try:
@@ -202,17 +206,17 @@ class ExchangeAdapter:
                 await client.close()
         except Exception as exc:
             # It's dropped either way; the next watch opens a new connection.
-            log.warning("exchange.stream.close_failed", symbol=symbol, error=type(exc).__name__)
+            log.warning("exchange.stream.close_failed", stream=key, error=type(exc).__name__)
 
-    async def _stream_client(self, symbol: str) -> Any:
-        """The WebSocket client for `symbol`, built on first use and after close_stream().
+    async def _stream_client(self, key: str) -> Any:
+        """The WebSocket client for one stream, built on first use and after close_stream().
 
-        One client (so one connection) per symbol: a quiet or broken stream for one
-        symbol can be dropped without cutting off the others. Each new client reuses
-        the REST client's markets instead of downloading them all again on every
-        reconnect.
+        One client (so one connection) per stream: a symbol's ticker, or its candles in
+        one timeframe. A quiet or broken stream can be dropped without cutting off the
+        others. Each new client reuses the REST client's markets instead of downloading
+        them all again on every reconnect.
         """
-        client = self._stream_clients.get(symbol)
+        client = self._stream_clients.get(key)
         if client is not None:
             return client
         if not hasattr(ccxt_pro, self.exchange_id):
@@ -224,7 +228,7 @@ class ExchangeAdapter:
             if self._sandbox:
                 client.set_sandbox_mode(True)
             client.set_markets_from_exchange(self._exchange)
-        self._stream_clients[symbol] = client
+        self._stream_clients[key] = client
         return client
 
     async def market_rules(self, symbol: str) -> MarketRules:
@@ -371,6 +375,25 @@ def _refuse_if_off_market(request: OrderRequest, rules: MarketRules) -> None:
     if problems:
         log.warning("exchange.order.refused", problems=problems, **request.model_dump(mode="json"))
         raise errors.OrderRejected("; ".join(problems))
+
+
+def _candle_stream_key(symbol: str, timeframe: Timeframe) -> str:
+    return f"{symbol}@{timeframe}"
+
+
+def _parse_candle(row: Any) -> Candle:
+    # REST and WebSocket candles arrive in the same CCXT shape: [ms, o, h, l, c, v].
+    return _parse(
+        Candle,
+        {
+            "ts": _from_ms(row[0]),
+            "open": row[1],
+            "high": row[2],
+            "low": row[3],
+            "close": row[4],
+            "volume": row[5],
+        },
+    )
 
 
 def _parse_ticker(raw: Any) -> Ticker:

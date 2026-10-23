@@ -19,13 +19,11 @@ import structlog
 from engine.exchange.adapter import ExchangeAdapter
 from engine.exchange.models import Candle, Timeframe
 from engine.main import configure_logging
+from engine.marketdata.candle_stream import PAGE_LIMIT
 from engine.marketdata.store import Bounds, CandleStore, Gap, Series
 from engine.marketdata.timeframes import STEP, floor, is_closed
 from shared.config import Settings, load_settings
 from shared.db.session import make_engine
-
-# MEXC returns at most 500 candles per request, however many are asked for.
-PAGE_LIMIT = 500
 
 log = structlog.get_logger()
 

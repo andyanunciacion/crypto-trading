@@ -14,7 +14,8 @@ import pytest
 from sqlalchemy import URL, text
 
 from engine.exchange.models import Candle, Timeframe
-from engine.marketdata.backfill import PAGE_LIMIT, download, sync
+from engine.marketdata.backfill import download, sync
+from engine.marketdata.candle_stream import PAGE_LIMIT
 from engine.marketdata.store import CandleStore, Series
 from engine.marketdata.timeframes import STEP, floor
 from shared.db.models import TIMEFRAMES
