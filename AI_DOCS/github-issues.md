@@ -134,8 +134,8 @@
 ### P2-5 · Parameter sweeps and walk-forward
 `strategy` · Depends on: P2-3
 **Goal:** catch overfitting before paper trading.
-- [ ] Grid sweep over params
-- [ ] Walk-forward: optimize on window N, test on N+1, roll forward
+- [x] Grid sweep over params
+- [x] Walk-forward: optimize on window N, test on N+1, roll forward
 
 **Done when:** a walk-forward report for one strategy shows in-sample vs. out-of-sample metrics side by side.
 
