@@ -127,7 +127,7 @@
 ### P2-4 · RSI mean reversion and Bollinger breakout
 `strategy` · Depends on: P2-1
 **Goal:** strategies for ranging and breakout markets.
-- [ ] Both strategies with typed params and tests
+- [x] Both strategies with typed params and tests
 
 **Done when:** both pass tests on known series and run through the backtester.
 

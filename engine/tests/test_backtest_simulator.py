@@ -23,7 +23,9 @@ from engine.backtest.simulator import (
 )
 from engine.exchange.models import Candle, MarketRules
 from engine.strategies.base import Position, Signal, Strategy, StrategyParams
+from engine.strategies.bollinger_breakout import BollingerBreakout, BollingerBreakoutParams
 from engine.strategies.ema_crossover import EmaCrossover, EmaCrossoverParams
+from engine.strategies.rsi_mean_reversion import RsiMeanReversion, RsiMeanReversionParams
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 HOUR = timedelta(hours=1)
@@ -324,6 +326,35 @@ def test_ema_crossover_trades_where_it_crosses() -> None:
     assert [(f.ts, f.side, f.price) for f in result.fills] == [
         (at(up + 1), "buy", D(110)),
         (at(down + 1), "sell", D(90)),
+    ]
+
+
+def test_rsi_mean_reversion_trades_where_it_signals() -> None:
+    # The V from test_rsi_mean_reversion: BUY on candle 17, SELL on 18.
+    strategy = RsiMeanReversion(RsiMeanReversionParams(period=2))
+    closes = ["10"] * 14 + ["9", "8", "7", "8", "9", "10"]
+    candles = [candle(h, close) for h, close in enumerate(closes)]
+
+    result = run_backtest(strategy, candles, config(strategy, 13, len(closes)))
+
+    assert [(f.ts, f.side, f.price) for f in result.fills] == [
+        (at(18), "buy", D(9)),
+        (at(19), "sell", D(10)),
+    ]
+
+
+def test_bollinger_breakout_trades_where_it_signals() -> None:
+    # The breakout from test_bollinger_breakout, with every candle's volume 1, so a
+    # volume factor of 1 lets it through: BUY on candle 5, SELL on 8.
+    strategy = BollingerBreakout(BollingerBreakoutParams(period=3, width=1.0, volume_factor=1.0))
+    closes = ["10"] * 5 + ["11", "12", "11.6", "11", "11"]
+    candles = [candle(h, close) for h, close in enumerate(closes)]
+
+    result = run_backtest(strategy, candles, config(strategy, 4, len(closes)))
+
+    assert [(f.ts, f.side, f.price) for f in result.fills] == [
+        (at(6), "buy", D(12)),
+        (at(9), "sell", D(11)),
     ]
 
 
