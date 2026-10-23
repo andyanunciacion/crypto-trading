@@ -45,6 +45,8 @@ class Ticker(_Frozen):
 
     MEXC's spot WebSocket sends only the best bid and ask (its "book ticker"), so a
     streamed ticker has no `last`. REST sends all three. Every ticker has at least one.
+    The sizes are how much is on offer at the best bid and ask, in the base currency;
+    the PaperBroker fills no more than that per update (D34).
     """
 
     symbol: str
@@ -52,6 +54,8 @@ class Ticker(_Frozen):
     bid: Decimal | None = Field(default=None, gt=0)  # None when the book side is empty
     ask: Decimal | None = Field(default=None, gt=0)
     last: Decimal | None = Field(default=None, gt=0)  # None from the WebSocket
+    bid_size: Decimal | None = Field(default=None, ge=0)
+    ask_size: Decimal | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def _has_a_price(self) -> Self:
@@ -79,6 +83,24 @@ class OrderRequest(_Frozen):
     amount: Decimal = Field(gt=0)
     price: Decimal = Field(gt=0)
     client_order_id: str = Field(pattern=CLIENT_ORDER_ID_PATTERN)
+
+
+def order_problems(request: OrderRequest, rules: MarketRules) -> list[str]:
+    """Why the exchange would refuse `request`, or [] if it fits the market's steps and minimums.
+
+    Shared by the adapter and the PaperBroker, so paper refuses exactly what live would.
+    """
+    problems = []
+    if request.amount % rules.amount_step != 0:
+        problems.append(f"amount {request.amount} is off the amount step {rules.amount_step}")
+    if request.price % rules.price_step != 0:
+        problems.append(f"price {request.price} is off the price step {rules.price_step}")
+    if rules.min_amount is not None and request.amount < rules.min_amount:
+        problems.append(f"amount {request.amount} is below the minimum amount {rules.min_amount}")
+    cost = request.amount * request.price
+    if rules.min_cost is not None and cost < rules.min_cost:
+        problems.append(f"cost {cost} is below the minimum cost {rules.min_cost}")
+    return problems
 
 
 class Order(_Frozen):

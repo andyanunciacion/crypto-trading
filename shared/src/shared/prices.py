@@ -25,6 +25,9 @@ class PriceUpdate(BaseModel):
     bid: Decimal | None = Field(default=None, gt=0)  # best price someone will buy at
     ask: Decimal | None = Field(default=None, gt=0)  # best price someone will sell at
     last: Decimal | None = Field(default=None, gt=0)  # last trade; the WebSocket doesn't send it
+    # How much is on offer at the best bid and ask, in the base currency (e.g. BTC).
+    bid_size: Decimal | None = Field(default=None, ge=0)
+    ask_size: Decimal | None = Field(default=None, ge=0)
     ts: AwareDatetime  # the exchange's time for this price: use it to judge staleness
     received_at: AwareDatetime  # when the engine received it
     source: PriceFeed

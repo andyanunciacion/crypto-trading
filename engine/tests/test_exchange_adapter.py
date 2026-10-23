@@ -104,6 +104,7 @@ async def test_ticker(adapter: ExchangeAdapter) -> None:
     assert ticker.bid == Decimal("81666.32")
     assert ticker.ask == Decimal("81666.33")
     assert ticker.last == Decimal("81670.41")
+    assert (ticker.bid_size, ticker.ask_size) == (Decimal("0.00191841"), Decimal("21.5561326"))
     assert ticker.ts.tzinfo is UTC
 
 
@@ -155,6 +156,7 @@ async def test_streamed_ticker_has_bid_and_ask_but_no_last(adapter: ExchangeAdap
     assert ticker.symbol == BTC
     assert ticker.bid == Decimal("81819.48")
     assert ticker.ask == Decimal("81819.49")
+    assert (ticker.bid_size, ticker.ask_size) == (Decimal("0.12200121"), Decimal("2.961881"))
     assert ticker.last is None
     assert ticker.ts == datetime(2026, 10, 22, 14, 40, 55, 344000, tzinfo=UTC)
 

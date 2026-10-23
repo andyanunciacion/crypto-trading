@@ -12,18 +12,24 @@ from sqlalchemy import (
     BigInteger,
     CheckConstraint,
     DateTime,
+    ForeignKey,
     Identity,
+    Index,
     Integer,
     MetaData,
     Numeric,
     Text,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # Must match engine.exchange.models.Timeframe (a test checks this).
 TIMEFRAMES = ("1m", "5m", "15m", "1h", "4h", "1d")
+# Must match engine.brokers.base.Mode and OrderStatus (a test checks these).
+TRADING_MODES = ("paper", "live")
+ORDER_STATUSES = ("open", "closed", "canceled", "rejected")
 
 
 class Base(DeclarativeBase):
@@ -90,3 +96,105 @@ class BacktestRunRow(Base):
     final_equity: Mapped[Decimal] = mapped_column(Numeric)
     total_fees: Mapped[Decimal] = mapped_column(Numeric)
     result: Mapped[dict[str, Any]] = mapped_column(JSONB)  # signals, fills, equity curve
+
+
+# --- Trading (P3): written by the brokers ---------------------------------------------
+# `bot_id` has no foreign key yet: the `bots` table arrives with the bot runner (P3-3),
+# whose migration adds them.
+
+
+class OrderRow(Base):
+    """One order, paper or live.
+
+    `client_order_id` is ours and unique, so a retry can't duplicate an order (D18).
+    """
+
+    __tablename__ = "orders"
+    __table_args__ = (
+        CheckConstraint(f"mode IN {TRADING_MODES!r}", name="mode"),
+        CheckConstraint("side IN ('buy', 'sell')", name="side"),
+        CheckConstraint("type IN ('limit')", name="type"),
+        CheckConstraint(f"status IN {ORDER_STATUSES!r}", name="status"),
+        CheckConstraint("price > 0 AND amount > 0", name="positive"),
+        CheckConstraint("filled >= 0 AND filled <= amount", name="filled"),
+        # The open orders of a symbol: what every price update checks in paper mode.
+        Index("ix_orders_open", "exchange", "symbol", postgresql_where=text("status = 'open'")),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    bot_id: Mapped[int] = mapped_column(BigInteger)
+    mode: Mapped[str] = mapped_column(Text)
+    exchange: Mapped[str] = mapped_column(Text)
+    symbol: Mapped[str] = mapped_column(Text)
+    client_order_id: Mapped[str] = mapped_column(Text, unique=True)
+    exchange_order_id: Mapped[str | None] = mapped_column(Text)  # None for paper orders
+    side: Mapped[str] = mapped_column(Text)
+    type: Mapped[str] = mapped_column(Text)
+    price: Mapped[Decimal] = mapped_column(Numeric)  # the limit
+    amount: Mapped[Decimal] = mapped_column(Numeric)  # in the base currency
+    filled: Mapped[Decimal] = mapped_column(Numeric)  # the sum of its fills
+    status: Mapped[str] = mapped_column(Text)
+    reject_reason: Mapped[str | None] = mapped_column(Text)  # why, when status is 'rejected'
+    reason: Mapped[dict[str, Any]] = mapped_column(JSONB)  # the signal and risk check behind it
+
+
+class FillRow(Base):
+    """One fill of an order. A partly filled order has several."""
+
+    __tablename__ = "fills"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    order_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("orders.id"), index=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    price: Mapped[Decimal] = mapped_column(Numeric)
+    amount: Mapped[Decimal] = mapped_column(Numeric)  # in the base currency
+    fee: Mapped[Decimal] = mapped_column(Numeric)
+    fee_currency: Mapped[str] = mapped_column(Text)
+
+
+class PositionRow(Base):
+    """A bot's holding in one symbol, from its first buy until it's sold off (`closed_at`)."""
+
+    __tablename__ = "positions"
+    __table_args__ = (
+        CheckConstraint(f"mode IN {TRADING_MODES!r}", name="mode"),
+        CheckConstraint("side IN ('long')", name="side"),  # spot only
+        CheckConstraint("amount >= 0", name="amount"),
+        # At most one open position per bot and symbol.
+        Index(
+            "uq_positions_open",
+            "bot_id",
+            "symbol",
+            unique=True,
+            postgresql_where=text("closed_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    bot_id: Mapped[int] = mapped_column(BigInteger)
+    mode: Mapped[str] = mapped_column(Text)
+    exchange: Mapped[str] = mapped_column(Text)
+    symbol: Mapped[str] = mapped_column(Text)
+    side: Mapped[str] = mapped_column(Text)
+    amount: Mapped[Decimal] = mapped_column(Numeric)  # 0 once closed
+    avg_entry: Mapped[Decimal] = mapped_column(Numeric)
+    fees_paid: Mapped[Decimal] = mapped_column(Numeric)  # every fill's fee, in the quote currency
+    stop: Mapped[Decimal | None] = mapped_column(Numeric)  # set by the RiskManager (P4)
+    take_profit: Mapped[Decimal | None] = mapped_column(Numeric)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    realized_pnl: Mapped[Decimal] = mapped_column(Numeric)  # net of fees (engine.brokers.ledger)
+
+
+class PaperBalanceRow(Base):
+    """A paper bot's virtual balance in one currency."""
+
+    __tablename__ = "paper_balances"
+    __table_args__ = (CheckConstraint("free >= 0 AND used >= 0", name="not_negative"),)
+
+    bot_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    currency: Mapped[str] = mapped_column(Text, primary_key=True)
+    free: Mapped[Decimal] = mapped_column(Numeric)
+    used: Mapped[Decimal] = mapped_column(Numeric)  # held by open orders
