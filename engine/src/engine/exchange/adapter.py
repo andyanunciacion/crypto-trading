@@ -36,6 +36,7 @@ from engine.exchange.models import (
     OrderRequest,
     Ticker,
     Timeframe,
+    order_problems,
 )
 from engine.exchange.retry import with_retries
 
@@ -362,16 +363,7 @@ def _translated_errors() -> Iterator[None]:
 
 
 def _refuse_if_off_market(request: OrderRequest, rules: MarketRules) -> None:
-    problems = []
-    if request.amount % rules.amount_step != 0:
-        problems.append(f"amount {request.amount} is off the amount step {rules.amount_step}")
-    if request.price % rules.price_step != 0:
-        problems.append(f"price {request.price} is off the price step {rules.price_step}")
-    if rules.min_amount is not None and request.amount < rules.min_amount:
-        problems.append(f"amount {request.amount} is below the minimum amount {rules.min_amount}")
-    cost = request.amount * request.price
-    if rules.min_cost is not None and cost < rules.min_cost:
-        problems.append(f"cost {cost} is below the minimum cost {rules.min_cost}")
+    problems = order_problems(request, rules)
     if problems:
         log.warning("exchange.order.refused", problems=problems, **request.model_dump(mode="json"))
         raise errors.OrderRejected("; ".join(problems))
@@ -406,6 +398,8 @@ def _parse_ticker(raw: Any) -> Ticker:
             "bid": raw.get("bid"),
             "ask": raw.get("ask"),
             "last": raw.get("last"),
+            "bid_size": raw.get("bidVolume"),
+            "ask_size": raw.get("askVolume"),
         },
     )
 

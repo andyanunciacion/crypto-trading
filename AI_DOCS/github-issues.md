@@ -153,9 +153,9 @@
 ### P3-1 · Broker interface + PaperBroker
 `engine` `money` · Depends on: P2-2
 **Goal:** simulated trading with realistic fills.
-- [ ] `Broker` interface; `PaperBroker` filling at live bid/ask with fees and partial fills
-- [ ] `orders`, `fills`, `positions`, `paper_balances` tables
-- [ ] Unique `client_order_id` on every order
+- [x] `Broker` interface; `PaperBroker` filling at live bid/ask with fees and partial fills
+- [x] `orders`, `fills`, `positions`, `paper_balances` tables
+- [x] Unique `client_order_id` on every order
 
 **Done when:** tests show fills, fees and balances are correct, and a retried order never creates a duplicate.
 

@@ -153,6 +153,8 @@ class PriceStream:
                 bid=ticker.bid,
                 ask=ticker.ask,
                 last=ticker.last,
+                bid_size=ticker.bid_size,
+                ask_size=ticker.ask_size,
                 ts=ticker.ts,
                 received_at=datetime.now(UTC),
                 source=source,

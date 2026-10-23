@@ -36,7 +36,12 @@ def test_money_is_sent_as_exact_strings() -> None:
 
 
 def test_round_trips_through_json() -> None:
-    original = update(last=Decimal("81820.01"), source="rest")
+    original = update(
+        last=Decimal("81820.01"),
+        bid_size=Decimal("0.12200121"),
+        ask_size=Decimal("2.961881"),
+        source="rest",
+    )
 
     assert PriceUpdate.model_validate_json(original.model_dump_json()) == original
 
@@ -46,10 +51,11 @@ def test_round_trips_through_json() -> None:
     [
         {"bid": Decimal("0")},
         {"ask": Decimal("NaN")},
+        {"ask_size": Decimal("-1")},
         {"ts": datetime(2026, 10, 22, 12)},  # noqa: DTZ001 (naive on purpose)
         {"source": "carrier-pigeon"},
     ],
-    ids=["zero-price", "nan", "naive-time", "unknown-source"],
+    ids=["zero-price", "nan", "negative-size", "naive-time", "unknown-source"],
 )
 def test_invalid_updates_are_refused(bad: dict[str, object]) -> None:
     with pytest.raises(ValidationError):

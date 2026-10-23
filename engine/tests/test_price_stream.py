@@ -36,6 +36,8 @@ def ticker(bid: str = "81819.48", ask: str = "81819.49", last: str | None = None
         bid=Decimal(bid),
         ask=Decimal(ask),
         last=None if last is None else Decimal(last),
+        bid_size=Decimal("0.122"),
+        ask_size=Decimal("2.9"),
     )
 
 
@@ -141,6 +143,7 @@ async def test_stream_updates_are_published() -> None:
     assert first.symbol == BTC
     assert first.source == "ws"
     assert (first.bid, first.ask, first.last) == (Decimal("81819.48"), Decimal("81819.49"), None)
+    assert (first.bid_size, first.ask_size) == (Decimal("0.122"), Decimal("2.9"))
     assert first.ts == T0
     assert first.received_at.tzinfo is not None
     assert second.bid == Decimal("81819.50")
