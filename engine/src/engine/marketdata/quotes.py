@@ -1,10 +1,16 @@
-"""The latest price, as the PaperBroker reads it: the `PriceUpdate` the stream keeps in Redis."""
+"""The latest price, as the PaperBroker and the bot runner read it: the `PriceUpdate` the
+stream keeps in Redis."""
 
+from datetime import timedelta
 from typing import Protocol
 
 from redis.asyncio import Redis
 
 from shared.prices import PriceUpdate, price_key
+
+# MEXC's book ticker updates many times a second on a liquid pair, and the price stream
+# polls REST every 2 s while it reconnects, so a price this old means the feed is down.
+MAX_QUOTE_AGE = timedelta(seconds=10)
 
 
 class QuoteSource(Protocol):

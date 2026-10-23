@@ -44,10 +44,11 @@
 
 1. [x] **Broker interface + PaperBroker:** fills at live bid/ask from Redis with fees and partial fills; orders, fills, positions and paper balances stored in Postgres; unique `client_order_id` on every order.
 2. [x] **RiskManager stub in the path:** strategy → RiskManager (pass-through for now, logs every order) → Broker, so the wiring never changes later (D8).
-3. [ ] **Bot runner:** loads active bots and strategy configs from the DB; runs them on each closed candle.
-4. [ ] **Restart recovery:** state rebuilt from the DB on startup; no lost or duplicated positions (tested by killing the engine mid-run).
+3. [x] **Bot runner:** loads active bots and strategy configs from the DB; runs them on each closed candle.
+   - [ ] **Paper fills for crossing orders** (P3-3b, before the 24-hour run): an order's remainder fills at the best price, not its limit, and an unchanged quote doesn't fill twice (D34, D36).
+4. [ ] **Restart recovery:** state rebuilt from the DB on startup; no lost or duplicated positions (tested by killing the engine mid-run). After a gap, bots act only on the newest candle, never on the ones they missed.
 
-**Exit criteria:** a paper bot runs for 72 hours with no crashes, and its trades check out against prices by hand.
+**Exit criteria:** a fast (1m) paper bot runs for 24 hours on the PC with no crashes, and its trades check out against prices by hand. Running for days is proven on the server in Phase 8 (D37).
 
 ## Phase 4 — Risk management
 

@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://redis:6379/0"
 
     # Symbols whose live price the engine streams into Redis: PRICE_SYMBOLS=BTC/USDT,ETH/USDT.
-    # Until bots exist (P3) this list is the whole choice; then the bots' symbols decide.
+    # The running bots' symbols are streamed too; this list adds any others.
     # NoDecode: read the env value as plain text (comma-separated), not as JSON.
     price_symbols: Annotated[list[Symbol], NoDecode, Field(min_length=1)] = Field(
         default_factory=lambda: ["BTC/USDT"]

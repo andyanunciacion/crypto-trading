@@ -68,7 +68,8 @@ def _side(signal: Signal) -> OrderSide:
     return "buy" if signal.action == "buy" else "sell"  # callers never pass a HOLD
 
 
-def _below_minimum(amount: Decimal, price: Decimal, rules: MarketRules) -> str | None:
+def below_minimum(amount: Decimal, price: Decimal, rules: MarketRules) -> str | None:
+    """Why an order of `amount` at `price` is too small for the market, or None if it isn't."""
     if amount == 0:
         return f"size rounds to 0 at amount step {rules.amount_step}"
     if rules.min_amount is not None and amount < rules.min_amount:
@@ -113,7 +114,7 @@ class _Account:
                 self.skip(signal, side, "nothing to sell")
                 return
             amount = self.position.amount
-        too_small = _below_minimum(amount, price, rules)
+        too_small = below_minimum(amount, price, rules)
         if too_small is not None:
             self.skip(signal, side, too_small)
             return
