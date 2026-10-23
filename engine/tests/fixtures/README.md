@@ -10,6 +10,8 @@ Raw exchange JSON that the adapter tests replay through CCXT, so no test touches
 | `contract_detail.json` | `GET /api/v1/contract/detail` | Written by the recorder: shape only, empty list (we trade spot only) |
 | `klines_btcusdt_60m.json` | `GET /api/v3/klines` | Recorded live (the last candle was still open) |
 | `ticker_24hr_btcusdt.json` | `GET /api/v3/ticker/24hr` | Recorded live |
+| `ws_ohlcv_btcusdt_1m.json` | WebSocket `spot@public.kline.v3.api.pb` (1m), after CCXT decoding | Recorded live: one update of the open candle |
+| `live_btcusdt_1m.json.gz` | A whole live candle session: kline updates, the live path's REST requests and replies, and a later re-fetch | Recorded live with `engine.marketdata.record_live` (180 candles); replayed by `test_live_parity.py` |
 | `account.json` | `GET /api/v3/account` | MEXC API docs example, values changed by hand |
 | `order_new.json` | `POST /api/v3/order` | MEXC API docs example, values changed by hand |
 | `order_cancel.json` | `DELETE /api/v3/order` | MEXC API docs example, values changed by hand |
@@ -26,4 +28,6 @@ Binance's spot testnet (`testnet.binance.vision`, fake money), the planned P9 te
 
 ## Re-recording
 
-`uv run python -m engine.exchange.record mexc` (or `binance_testnet`) re-records that exchange's live files. The tests check exact recorded values, so update them to match afterwards. Private endpoints need an API key, so their fixtures are kept by hand; if a real response ever differs, replace the docs example with it.
+`uv run python -m engine.exchange.record mexc` (or `binance_testnet`) re-records that exchange's live files. The tests check exact recorded values, so update them to match afterwards.
+
+`live_btcusdt_1m.json.gz` has its own recorder, which takes about 3 hours. Run it in Docker (see its docstring), and re-record when the live path's REST requests change: the parity test then fails with "re-record". Private endpoints need an API key, so their fixtures are kept by hand; if a real response ever differs, replace the docs example with it.

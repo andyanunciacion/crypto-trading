@@ -142,7 +142,7 @@
 ### P2-6 · Backtest/live parity test
 `strategy` · Depends on: P2-2, P1-3
 **Goal:** prove backtest signals equal live signals.
-- [ ] Record a live candle stream; replay it through the live path and the backtester
+- [x] Record a live candle stream; replay it through the live path and the backtester
 
 **Done when:** both paths produce identical signal lists in CI.
 
