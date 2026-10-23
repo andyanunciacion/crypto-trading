@@ -89,3 +89,34 @@ class BacktestResult(_Frozen):
     final_amount: Decimal  # coin still held at the end; 0 when flat
     final_equity: Decimal  # cash + coin at the last close
     total_fees: Decimal
+
+
+class Trade(_Frozen):
+    """A round trip: a buy fill and the sell fill that closed it."""
+
+    entry_ts: AwareDatetime
+    exit_ts: AwareDatetime
+    amount: Decimal = Field(gt=0)
+    entry_price: Decimal = Field(gt=0)
+    exit_price: Decimal = Field(gt=0)
+    fees: Decimal = Field(ge=0)  # both fills' fees
+    pnl: Decimal  # net of both fees, in the quote currency
+    return_: Decimal  # pnl as a fraction of what the buy cost, fee included
+
+
+class BacktestReport(_Frozen):
+    """The metrics for judging a run (D30). Derived from a result, never stored.
+
+    Ratios are fractions (0.05 = 5%). A metric that can't be computed is None.
+    """
+
+    total_return: Decimal
+    max_drawdown: Decimal  # largest fall from a peak, as a fraction of that peak
+    sharpe: Decimal | None  # annualized, risk-free rate 0
+    trades: list[Trade]  # closed round trips only
+    trade_count: int
+    win_rate: Decimal | None  # None with no trades
+    profit_factor: Decimal | None  # gross profit / gross loss; None with no losing trades
+    open_trade: bool  # still holding at the end: in total_return, not in the trade stats
+    final_equity: Decimal
+    total_fees: Decimal

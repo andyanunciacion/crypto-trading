@@ -120,7 +120,7 @@
 ### P2-3 · Backtest report
 `strategy` · Depends on: P2-2
 **Goal:** the metrics needed to judge a strategy.
-- [ ] Total return, max drawdown, Sharpe, win rate, profit factor, trade count, equity curve
+- [x] Total return, max drawdown, Sharpe, win rate, profit factor, trade count, equity curve
 
 **Done when:** each metric matches a hand-computed value on a small fixture.
 
