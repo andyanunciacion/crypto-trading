@@ -12,6 +12,7 @@ import structlog
 from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from engine.brokers.base import Mode
 from engine.exchange.models import Timeframe
 from engine.marketdata.store import Series
 from engine.strategies.base import Strategy
@@ -134,13 +135,18 @@ async def load_running_bots(db: AsyncEngine, exchange: str) -> list[Bot]:
     return bots
 
 
-async def open_orders(db: AsyncEngine, bot_id: int) -> list[str]:
-    """The client order IDs of the bot's open orders, oldest first."""
+async def open_orders(db: AsyncEngine, bot_id: int | None = None, *, mode: Mode) -> list[str]:
+    """The client order IDs of the bot's open orders in `mode`, oldest first.
+
+    With no `bot_id`, every bot's, stopped ones included: what a restart cancels (D38).
+    """
     query = (
         select(OrderRow.client_order_id)
-        .where(OrderRow.bot_id == bot_id, OrderRow.status == "open")
+        .where(OrderRow.mode == mode, OrderRow.status == "open")
         .order_by(OrderRow.id)
     )
+    if bot_id is not None:
+        query = query.where(OrderRow.bot_id == bot_id)
     async with db.connect() as conn:
         return list((await conn.scalars(query)).all())
 

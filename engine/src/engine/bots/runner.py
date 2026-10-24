@@ -16,13 +16,21 @@ An error stays with the bot and candle it happened on: it's logged (`bot.error`)
 the bot carries on at the next candle, so one bot can't stop the others or the engine.
 Each closed candle is also stored, keeping the database current, so trades can be
 checked against the candles they traded on.
+
+After the engine was down or offline (D38):
+- At startup, `recover()` cancels every open order left from before, before any price
+  can fill one, and logs each bot's position and balances as the database has them.
+  The newest closed candle only seeds the window: it may have been traded already.
+- A bot acts only on a candle that closed less than one timeframe step ago. Older ones
+  (all the candles missed in an outage arrive at once) just fill its window and cancel
+  its leftovers (`bot.caught_up`): their signals are stale, and the price is not theirs.
 """
 
 import asyncio
 from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Protocol
 
@@ -129,8 +137,38 @@ class BotRunner:
         )
         return last
 
+    async def recover(self) -> None:
+        """Cancel every open order left from before the engine started; log each bot's state.
+
+        Call it before prices are fed to the broker, so none of those orders fills first.
+        Orders of stopped bots are cancelled too: nothing else ever would.
+        """
+        canceled: dict[int, list[str]] = {}
+        for cid in await open_orders(self._db, mode=self._risk.mode):
+            order = await self._risk.cancel(cid)
+            canceled.setdefault(order.bot_id, []).append(cid)
+        for running in (r for bots in self._series.values() for r in bots):
+            bot = running.bot
+            position = await self._risk.position(bot.id, bot.symbol)
+            balances = await self._risk.balances(bot.id)
+            log.info(
+                "bot.recovered",
+                bot_id=bot.id,
+                name=bot.name,
+                symbol=bot.symbol,
+                position=None if position is None else position.model_dump(mode="json"),
+                # Fixed-point, as psql shows them: str() writes a stored 0 as "0E-13".
+                balances={
+                    c: {"free": f"{b.free:f}", "used": f"{b.used:f}"} for c, b in balances.items()
+                },
+                canceled=canceled.get(bot.id, []),
+            )
+
     async def on_closed(self, series: Series, candle: Candle) -> None:
-        """Run every bot on `series` on `candle`, which has just closed."""
+        """Run every bot on `series` on `candle`, which has closed.
+
+        A candle that closed a timeframe step or more ago only catches the bots up.
+        """
         try:
             await self._candles.upsert(series, [candle])
         except Exception as exc:
@@ -142,9 +180,14 @@ class BotRunner:
                 error=type(exc).__name__,
                 detail=str(exc),
             )
+        step = STEP[series.timeframe]
+        closed_ago = self._clock() - (candle.ts + step)
         for running in self._series[series]:
             try:
-                await self._step(running, candle)
+                if closed_ago < step:
+                    await self._step(running, candle)
+                else:
+                    await self._catch_up(running, candle, closed_ago)
             except Exception as exc:
                 log.error(
                     "bot.error",
@@ -186,10 +229,28 @@ class BotRunner:
     ) -> AsyncGenerator[Candle]:
         return CandleStream(self._market, symbol, timeframe, last_closed).closed()
 
+    async def _cancel_leftovers(self, bot: Bot) -> list[str]:
+        canceled = await open_orders(self._db, bot.id, mode=self._risk.mode)
+        for stale in canceled:
+            await self._risk.cancel(stale)
+        return canceled
+
+    async def _catch_up(self, running: _Running, candle: Candle, closed_ago: timedelta) -> None:
+        """A candle missed while the engine was down or offline: into the window, no signal."""
+        canceled = await self._cancel_leftovers(running.bot)
+        running.signals.seed([candle])
+        log.info(
+            "bot.caught_up",
+            bot_id=running.bot.id,
+            name=running.bot.name,
+            candle_ts=candle.ts.isoformat(),
+            closed_ago_s=round(closed_ago.total_seconds()),
+            canceled=canceled,
+        )
+
     async def _step(self, running: _Running, candle: Candle) -> None:
         bot = running.bot
-        for stale in await open_orders(self._db, bot.id):
-            await self._risk.cancel(stale)
+        await self._cancel_leftovers(bot)
         position = await self._risk.position(bot.id, bot.symbol)
         signal = running.signals.on_closed(candle, position)
         if signal.action == "hold":

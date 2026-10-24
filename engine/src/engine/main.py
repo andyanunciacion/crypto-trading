@@ -3,7 +3,8 @@
 Runs a heartbeat loop, so Docker can tell the worker is alive, and one live price
 stream per symbol (into Redis): PRICE_SYMBOLS plus the bots' symbols. Then it runs the
 bots that are "running" in the database, on paper (D36), and feeds live prices to the
-PaperBroker so resting orders fill. Bots are loaded once, at startup.
+PaperBroker so resting orders fill. Bots are loaded once, at startup, and orders left
+open from before the engine started are cancelled first (D38).
 """
 
 import asyncio
@@ -85,6 +86,11 @@ async def run(settings: Settings) -> None:
             sink = RedisPriceSink(redis)
             quotes = RedisQuotes(redis)
             desk = PaperDesk(db, quotes, exchange)
+            runner = None
+            if bots:
+                runner = BotRunner(bots, desk.risk, exchange, quotes, CandleStore(db), db)
+                # Before prices are fed, so no order left from before can fill first (D38).
+                await runner.recover()
             # A TaskGroup runs the tasks side by side and waits for all of them to end.
             async with asyncio.TaskGroup() as tasks:
                 tasks.create_task(heartbeat(stop))
@@ -92,8 +98,7 @@ async def run(settings: Settings) -> None:
                     tasks.create_task(PriceStream(exchange, sink, symbol).run())
                     for symbol in symbols
                 ]
-                if bots:
-                    runner = BotRunner(bots, desk.risk, exchange, quotes, CandleStore(db), db)
+                if runner is not None:
                     workers.append(tasks.create_task(runner.run()))
                     workers.append(
                         tasks.create_task(
