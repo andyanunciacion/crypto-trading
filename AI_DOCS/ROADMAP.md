@@ -52,7 +52,7 @@
 
 ## Phase 4 — Risk management
 
-1. [ ] **Position sizing:** fixed amount, percent of equity, ATR-based.
+1. [x] **Position sizing:** fixed amount, percent of equity, ATR-based.
 2. [ ] **Stops:** stop-loss, take-profit, trailing stops.
 3. [ ] **Limits:** max open positions, max exposure per coin, max daily loss, max drawdown (defaults in ARCHITECTURE §6), stored in `risk_settings`; every block recorded in `risk_events`.
 4. [ ] **Circuit breakers:** stale data (> 2 candles), repeated errors (3 in 10 min), price spikes.

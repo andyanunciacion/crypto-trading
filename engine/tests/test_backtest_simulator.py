@@ -16,12 +16,13 @@ from engine.backtest.models import (
 )
 from engine.backtest.simulator import (
     BacktestError,
-    buy_amount,
     fee,
     fill_price,
     run_backtest,
+    warmup_needed,
 )
 from engine.exchange.models import Candle, MarketRules
+from engine.risk.sizing import AtrRisk, FixedAmount, PercentOfEquity
 from engine.strategies.base import Position, Signal, Strategy, StrategyParams
 from engine.strategies.bollinger_breakout import BollingerBreakout, BollingerBreakoutParams
 from engine.strategies.ema_crossover import EmaCrossover, EmaCrossoverParams
@@ -117,14 +118,6 @@ def test_slippage_works_against_both_sides() -> None:
 
 def test_fee_is_a_rate_on_the_notional() -> None:
     assert fee(D(100), D("9.99"), D("0.001")) == D("0.999")
-
-
-def test_buy_amount_leaves_room_for_the_fee_and_rounds_down() -> None:
-    # 1000 / (100 x 1.001) = 9.99000999..., down to the 0.0001 step.
-    assert buy_amount(D(1000), D(100), D("0.001"), D(1), D("0.0001")) == D("9.9900")
-    # 1000 / 300 = 3.333..., down (never up) to the 0.01 step.
-    assert buy_amount(D(1000), D(300), D(0), D(1), D("0.01")) == D("3.33")
-    assert buy_amount(D(1000), D(100), D(0), D("0.5"), D("0.0001")) == D(5)
 
 
 def test_small_caps_get_more_slippage_by_default() -> None:
@@ -248,6 +241,62 @@ def test_orders_below_the_minimums_are_skipped(
     assert result.skipped[0].side == "buy"
     assert reason in result.skipped[0].reason
     assert result.final_cash == cash
+
+
+def test_a_fixed_size_buys_that_value() -> None:
+    candles = flat(range(4))
+    strategy = script(buys=(1,))
+
+    result = run_backtest(
+        strategy, candles, config(strategy, 1, 4, sizing=FixedAmount(amount=D(250)))
+    )
+
+    # 250 / 100 = 2.5 at candle 2's open; the rest stays cash.
+    assert [(f.ts, f.amount) for f in result.fills] == [(at(2), D("2.5"))]
+    assert result.final_cash == D(750)
+
+
+def test_percent_of_equity_grows_with_the_account() -> None:
+    # Half the equity each time. Buy at 100: 500 / 100 = 5. Sell at 120: cash 500 + 600 =
+    # 1100. Buy again at 100: 550 / 100 = 5.5.
+    candles = [*flat(range(3)), *flat(range(3, 5), "120"), *flat(range(5, 7))]
+    strategy = script(buys=(1, 4), sells=(2,))
+
+    result = run_backtest(
+        strategy, candles, config(strategy, 1, 7, sizing=PercentOfEquity(percent=D(50)))
+    )
+
+    assert [(f.side, f.price, f.amount) for f in result.fills] == [
+        ("buy", D(100), D(5)),
+        ("sell", D(120), D(5)),
+        ("buy", D(100), D("5.5")),
+    ]
+
+
+def ranged(hour: int) -> Candle:
+    # Opens and closes at 100, ranging 99 to 101: a true range of 2 every candle.
+    return Candle(ts=at(hour), open=D(100), high=D(101), low=D(99), close=D(100), volume=D(1))
+
+
+def test_atr_risk_sizes_from_the_candles_up_to_the_signal() -> None:
+    # ATR period 2 needs 13 candles (6 x 2 + 1): 0-12 are warm-up. BUY on candle 13, the
+    # ATR of candles 1-13 is 2: 1% of 1000 = 10 at risk / (2 x 2) = 2.5 at candle 14's open.
+    candles = [ranged(h) for h in range(16)]
+    strategy = script(buys=(13,))
+    sizing = AtrRisk(period=2)
+
+    result = run_backtest(strategy, candles, config(strategy, 13, 16, sizing=sizing))
+
+    assert [(f.ts, f.amount) for f in result.fills] == [(at(14), D("2.5"))]
+    assert warmup_needed(strategy, config(strategy, 13, 16, sizing=sizing)) == 13
+
+
+def test_atr_risk_needs_its_candles_before_the_start() -> None:
+    candles = [ranged(h) for h in range(16)]
+    strategy = script(buys=(13,))  # warm-up 1, but ATR period 2 needs 13 candles
+
+    with pytest.raises(BacktestError, match="needs 13 warm-up candles"):
+        run_backtest(strategy, candles, config(strategy, 5, 16, sizing=AtrRisk(period=2)))
 
 
 def test_buy_while_holding_and_sell_while_flat_are_skipped() -> None:

@@ -9,6 +9,8 @@ from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, get_args
 
+from pydantic import ValidationError
+
 from engine.backtest.models import (
     DEFAULT_FEE_RATE,
     DEFAULT_INITIAL_CASH,
@@ -20,6 +22,7 @@ from engine.exchange.adapter import ExchangeAdapter
 from engine.exchange.models import Timeframe
 from engine.marketdata.store import CandleStore, Series
 from engine.marketdata.timeframes import STEP, floor
+from engine.risk.sizing import ALL_IN, SIZING, Sizing
 from engine.strategies.base import Strategy
 
 
@@ -38,6 +41,25 @@ def json_object_arg(text: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise argparse.ArgumentTypeError("must be a JSON object, like '{\"fast\": 9}'")
     return value
+
+
+def sizing_arg(text: str) -> Sizing:
+    """A sizing mode as JSON, e.g. '{"mode": "percent_of_equity", "percent": 25}'."""
+    try:
+        return SIZING.validate_python(json_object_arg(text))
+    except ValidationError as e:
+        # One line per problem, without pydantic's links to its docs.
+        problems = "; ".join(
+            f"{'.'.join(map(str, err['loc']))}: {err['msg']}" for err in e.errors()
+        )
+        raise argparse.ArgumentTypeError(f"bad sizing: {problems}") from None
+
+
+SIZING_HELP = (
+    "how much each buy spends, as JSON (default all-in): "
+    '{"mode": "fixed", "amount": 100}, {"mode": "percent_of_equity", "percent": 25} or '
+    '{"mode": "atr_risk", "risk_percent": 1, "period": 14, "multiple": 2}'
+)
 
 
 def add_run_arguments(parser: argparse.ArgumentParser) -> None:
@@ -59,6 +81,7 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
         type=decimal_arg,
         help="slippage per fill, as a fraction (default 0.0005 for BTC/ETH, 0.003 otherwise)",
     )
+    parser.add_argument("--sizing", type=sizing_arg, default=ALL_IN, help=SIZING_HELP)
     parser.add_argument("--exchange", default="mexc")
 
 
@@ -90,4 +113,5 @@ async def run_settings(
         fee_rate=args.fee_rate,
         slippage_rate=default_slippage(args.symbol) if args.slippage is None else args.slippage,
         market_rules=rules,
+        sizing=args.sizing,
     )

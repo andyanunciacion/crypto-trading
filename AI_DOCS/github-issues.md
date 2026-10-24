@@ -196,7 +196,15 @@ Found on the first live paper buy (D36): 0.0122 BTC against 0.000612 BTC at the 
 - [x] Don't trade on missed candles. After the engine was down (PC asleep, network out, a restart), the candle stream delivers every candle it missed at once, and today each would place an order at the current price on a signal that may be hours old. Suggested rule: a bot acts only on a candle that closed less than one timeframe step ago; older ones just fill its warm-up window, logged as `bot.caught_up`. EMA crossover's event exit then misses a cross that happened while down, but the state exits still fire on the newest candle (D31). Record the rule in the decision log
 - [x] Test: the engine misses several candles and comes back; each bot acts on the newest only
 - [x] By hand: `docker compose kill engine` mid-run, snapshot before and after the restart, compare (bot 4, 2026-10-24: identical; the 2 candles missed while down weren't traded; the first live candle after it sold exactly the recovered position)
-- [ ] The 24-hour run
+- [ ] The 24-hour run: bot 4 `btc-ema-1m` (EMA 3/5, BTC/USDT 1m, 1000 paper USDT), from 2026-10-24 01:35 UTC (09:35 Manila) to 2026-10-25 01:35 UTC. Until it ends, no `docker compose up`, `build`, `restart` or `run` (`run` would apply P4-1's migration 0005 first)
+
+**After the 24-hour run**, in this order:
+1. Check it: `docker compose ps engine` still shows it up since the start, and the logs since then (`docker compose logs engine --since 2026-10-24T01:35:00Z`) have no `"level": "error"` lines and one `engine.starting` at most (the 01:35 start).
+2. Check the trades by hand: each `broker.order.filled` price is between the ask/bid in its logged `quote` and the order's `limit` (D34), and the snapshot query (CLAUDE.md) agrees with the fills.
+3. If both pass, tick the box above, tick P3-4 in ROADMAP, and mark Phase 3 done in CLAUDE.md's status. If not, note what failed here and fix that first.
+4. Apply P4-1's migration: `docker compose up --build -d`, then `docker compose exec db psql -U crypto -d crypto_trading -tAc "SELECT version_num FROM alembic_version"` shows `0005`. The engine's `bot.recovered` still lists bot 4, now with all-in sizing.
+5. Try sizing on real candles: `engine.backtest.run ema_crossover BTC/USDT 1h --days 360` with no `--sizing`, then `--sizing '{\"mode\": \"percent_of_equity\", \"percent\": 25}'`, then `--sizing '{\"mode\": \"atr_risk\"}'`. The first matches an earlier all-in run's numbers; the other two buy less per trade.
+6. Decide whether bot 4 keeps running (stop it as CLAUDE.md says, then restart the engine).
 
 **Done when:** both tests pass, and a 24-hour paper run (after P3-3b) of a fast 1m bot completes with no crashes and with trades that check out by hand (D37). Keep the PC from sleeping for the run; running for days is Phase 8's 2-week server run.
 
@@ -206,7 +214,7 @@ Found on the first live paper buy (D36): 0.0122 BTC against 0.000612 BTC at the 
 
 ### P4-1 · Position sizing
 `risk` `money` · Depends on: P3-2
-- [ ] Fixed amount, percent of equity, ATR-based; respect minimum order size
+- [x] Fixed amount, percent of equity, ATR-based; respect minimum order size (`risk/sizing.py`, shared by backtests and bots; all-in stays the default, D39)
 
 **Done when:** tests cover each mode, including rounding and minimum-size edge cases.
 

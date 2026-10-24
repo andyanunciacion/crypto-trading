@@ -7,6 +7,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, JsonValue, mod
 
 from engine.exchange.models import MarketRules, OrderSide, Timeframe
 from engine.marketdata.timeframes import floor
+from engine.risk.sizing import ALL_IN, Sizing
 from engine.strategies.base import Signal
 
 DEFAULT_INITIAL_CASH = Decimal(1000)  # in the quote currency (USDT)
@@ -47,6 +48,7 @@ class BacktestConfig(_Frozen):
     fee_rate: Decimal = Field(default=DEFAULT_FEE_RATE, ge=0, lt=1)  # of each fill's value
     slippage_rate: Decimal = Field(ge=0, lt=1)  # see default_slippage()
     market_rules: MarketRules
+    sizing: Sizing = ALL_IN  # how much each BUY spends (risk/sizing.py, D39)
 
     @model_validator(mode="after")
     def _range_is_whole_candles(self) -> Self:

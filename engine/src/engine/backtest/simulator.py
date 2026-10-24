@@ -6,8 +6,10 @@ The fill model:
   at a price that was gone by the time the signal existed.
 - Slippage moves every fill price against us; the fee is a rate on each fill's value,
   in the quote currency.
-- Spot, long only, one position at a time. Until the RiskManager sizes orders (P4), a
-  BUY spends all the cash (times the signal's `size_hint`) and a SELL sells everything.
+- Spot, long only, one position at a time. A BUY is sized by the run's sizing mode,
+  as a paper bot's is (risk/sizing.py, D39; all-in by default), and a SELL sells
+  everything. An ATR-sized BUY uses the ATR of the candles up to its signal's candle,
+  what a live bot knows when it decides.
 - Amounts round down to the market's step. Orders below its minimums are skipped,
   never rounded up (D22).
 
@@ -28,8 +30,9 @@ from engine.backtest.models import (
     Fill,
     SkippedOrder,
 )
-from engine.exchange.models import Candle, MarketRules, OrderSide, Timeframe
+from engine.exchange.models import Candle, OrderSide, Timeframe
 from engine.marketdata.timeframes import STEP
+from engine.risk.sizing import NotSized, atr_for, below_minimum, entry_amount, lookback
 from engine.strategies.base import Position, Signal, Strategy, StrategyParams
 
 # Stored with every run. Bump it when the fill model changes, so old runs aren't
@@ -54,29 +57,13 @@ def fee(price: Decimal, amount: Decimal, fee_rate: Decimal) -> Decimal:
     return price * amount * fee_rate
 
 
-def buy_amount(
-    cash: Decimal, price: Decimal, fee_rate: Decimal, fraction: Decimal, step: Decimal
-) -> Decimal:
-    """How much to buy with `fraction` of `cash`, leaving room for the fee.
-
-    Rounded down to the amount step, so cost + fee never exceeds the cash.
-    """
-    return cash * fraction / (price * (1 + fee_rate)) // step * step
-
-
 def _side(signal: Signal) -> OrderSide:
     return "buy" if signal.action == "buy" else "sell"  # callers never pass a HOLD
 
 
-def below_minimum(amount: Decimal, price: Decimal, rules: MarketRules) -> str | None:
-    """Why an order of `amount` at `price` is too small for the market, or None if it isn't."""
-    if amount == 0:
-        return f"size rounds to 0 at amount step {rules.amount_step}"
-    if rules.min_amount is not None and amount < rules.min_amount:
-        return f"amount {amount} below min_amount {rules.min_amount}"
-    if rules.min_cost is not None and amount * price < rules.min_cost:
-        return f"value {amount * price} below min_cost {rules.min_cost}"
-    return None
+def warmup_needed[P: StrategyParams](strategy: Strategy[P], config: BacktestConfig) -> int:
+    """Candles a run needs before its start: for the strategy, and for ATR sizing."""
+    return max(strategy.warmup_candles, lookback(config.sizing), 1)
 
 
 @dataclass
@@ -98,8 +85,11 @@ class _Account:
         self.skipped.append(SkippedOrder(signal_ts=signal.ts, side=side, reason=reason))
         log.debug("backtest.skipped", signal_ts=signal.ts.isoformat(), side=side, reason=reason)
 
-    def execute(self, signal: Signal, candle: Candle) -> None:
-        """Fill `signal` (from the previous candle) at `candle`'s open, if it can be."""
+    def execute(self, signal: Signal, candle: Candle, history: Sequence[Candle]) -> None:
+        """Fill `signal` (from the previous candle) at `candle`'s open, if it can be.
+
+        `history` is the closed candles up to the signal's, for ATR sizing.
+        """
         side = _side(signal)
         price = fill_price(side, candle.open, self.config.slippage_rate)
         rules = self.config.market_rules
@@ -107,17 +97,30 @@ class _Account:
             if self.position is not None:
                 self.skip(signal, side, "already holding")
                 return
-            fraction = Decimal(1) if signal.size_hint is None else signal.size_hint
-            amount = buy_amount(self.cash, price, self.config.fee_rate, fraction, rules.amount_step)
+            sizing = self.config.sizing
+            sized = entry_amount(
+                sizing,
+                cash=self.cash,
+                equity=self.cash,  # flat when buying: the cash is all there is
+                price=price,
+                fee_rate=self.config.fee_rate,
+                rules=rules,
+                size_hint=signal.size_hint,
+                atr=atr_for(sizing, history, self.config.timeframe),
+            )
+            if isinstance(sized, NotSized):
+                self.skip(signal, side, sized.reason)
+                return
+            amount = sized.amount
         else:
             if self.position is None:
                 self.skip(signal, side, "nothing to sell")
                 return
             amount = self.position.amount
-        too_small = below_minimum(amount, price, rules)
-        if too_small is not None:
-            self.skip(signal, side, too_small)
-            return
+            too_small = below_minimum(amount, price, rules)
+            if too_small is not None:
+                self.skip(signal, side, too_small)
+                return
 
         paid = fee(price, amount, self.config.fee_rate)
         if side == "buy":
@@ -143,8 +146,9 @@ def run_backtest[P: StrategyParams](
     `config.start` and the last one opening one step before `config.end`.
     """
     _check_strategy(strategy, config)
-    first = _first_in_range(candles, config, strategy.warmup_candles)
+    first = _first_in_range(candles, config, warmup_needed(strategy, config))
     window = strategy.warmup_candles
+    sizing_window = lookback(config.sizing)
     account = _Account(config=config, cash=config.initial_cash)
     signals: list[Signal] = []
     equity_curve: list[EquityPoint] = []
@@ -155,7 +159,9 @@ def run_backtest[P: StrategyParams](
         candle = candles[i]
         if i >= first:
             if pending is not None:
-                account.execute(pending, candle)
+                # Up to the signal's candle (i - 1): a live bot doesn't know candle i yet.
+                history = candles[max(0, i - sizing_window) : i] if sizing_window else ()
+                account.execute(pending, candle, history)
                 pending = None
             equity_curve.append(
                 EquityPoint(ts=candle.ts, equity=account.cash + account.amount * candle.close)

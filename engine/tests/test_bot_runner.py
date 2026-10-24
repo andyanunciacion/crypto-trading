@@ -24,6 +24,7 @@ from engine.bots.store import Bot, create_bot, load_running_bots
 from engine.exchange.models import Balance, Candle, MarketRules, Timeframe
 from engine.marketdata.store import CandleStore, Series
 from engine.risk.paper import PaperDesk
+from engine.risk.sizing import ALL_IN, AtrRisk, PercentOfEquity, Sizing
 from engine.strategies.base import Action, Position, Signal, Strategy, StrategyParams
 from engine.strategies.ema_crossover import EmaCrossover, EmaCrossoverParams
 from shared.db.models import BotRow, OrderRow
@@ -136,7 +137,9 @@ class Setup:
             **options,
         )
 
-    async def ema_bot(self, name: str = "btc-ema", cash: str = "1000") -> Bot:
+    async def ema_bot(
+        self, name: str = "btc-ema", cash: str = "1000", sizing: Sizing = ALL_IN
+    ) -> Bot:
         strategy = EmaCrossover(EmaCrossoverParams(fast=3, slow=5))
         bot_id = await create_bot(
             self.db,
@@ -146,6 +149,7 @@ class Setup:
             timeframe="1m",
             strategy=strategy,
             created_by="test",
+            sizing=sizing,
         )
         await self.desk.fund(bot_id, "USDT", d(cash))
         (bot,) = [b for b in await load_running_bots(self.db, "mexc") if b.id == bot_id]
@@ -249,6 +253,49 @@ async def test_a_bot_buys_on_a_cross_up_and_sells_on_the_cross_down(setup: Setup
     assert await risk.position(bot.id, BTC) is None
     # 1000 - 998.448 - 0.998448 + 816.912 - 0.816912 = 816.64864
     assert await risk.balances(bot.id) == {"USDT": usdt("816.64864")}
+
+
+async def test_a_bot_buys_what_its_sizing_says(setup: Setup) -> None:
+    bot = await setup.ema_bot(sizing=PercentOfEquity(percent=d("25")))
+    runner = setup.runner([bot])
+    await runner.warm_up(SERIES)
+
+    setup.tick()
+    setup.quotes.set(ask="110", bid="109.9")
+    await runner.on_closed(SERIES, candle(30, "110"))
+
+    # 25% of 1000 = 250 at the 110.06 limit: 250 / 110.06 = 2.27148... -> 2.2714.
+    buy = await setup.desk.risk.get_order("b1-202610221230-b")
+    assert buy is not None and (buy.amount, buy.status) == (d("2.2714"), "closed")
+    assert buy.reason["sizing"] == {
+        "settings": {"mode": "percent_of_equity", "percent": "25"},
+        "detail": "percent_of_equity: 25% of 1000 equity = 250 at 110.06 = 2.2714",
+    }
+
+
+def ranged(i: int, close: str = "100") -> Candle:
+    # A candle spanning 1 either side of its close: a true range of 2 in a flat market.
+    price = d(close)
+    return Candle(
+        ts=T0 + i * MINUTE, open=price, high=price + 1, low=price - 1, close=price, volume=d("1")
+    )
+
+
+async def test_an_atr_bot_warms_up_enough_candles_for_its_atr(setup: Setup) -> None:
+    # ATR over 3 candles needs 6 x 3 + 1 = 19, more than EMA's 16: warm-up fetches 11-29.
+    setup.market.rest = [ranged(i) for i in range(30)]
+    bot = await setup.ema_bot(sizing=AtrRisk(period=3))
+    runner = setup.runner([bot])
+    await runner.warm_up(SERIES)
+
+    setup.tick()
+    setup.quotes.set(ask="110", bid="109.9")
+    await runner.on_closed(SERIES, ranged(30, "110"))
+
+    # True ranges are 2 until candle 30 jumps from 100 to 110: max(2, 111 - 100, ...) = 11.
+    # ATR: 2, then 2 + (11 - 2) / 3 = 5. 1% of 1000 = 10 at risk / (2 x 5) = 1 BTC.
+    buy = await setup.desk.risk.get_order("b1-202610221230-b")
+    assert buy is not None and buy.amount == d("1")
 
 
 async def test_whats_left_of_an_order_is_cancelled_at_the_next_candle(setup: Setup) -> None:

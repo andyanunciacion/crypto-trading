@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from engine.strategies.indicators import Bands, bollinger, ema, rsi
+from engine.strategies.indicators import Bands, atr, bollinger, ema, rsi
 
 
 def test_ema_matches_a_hand_calculation() -> None:
@@ -86,3 +86,36 @@ def test_bollinger_has_one_value_per_full_period() -> None:
 def test_bollinger_period_must_be_positive() -> None:
     with pytest.raises(ValueError, match="period"):
         bollinger([1.0, 2.0], 0, 2.0)
+
+
+def test_atr_matches_a_hand_calculation() -> None:
+    # (high, low, close). True ranges from the second candle on:
+    #   max(11 - 9, |11 - 9|,  |9 - 9|)     = 2
+    #   max(12 - 9, |12 - 10|, |9 - 10|)    = 3
+    #   max(11 - 10, |11 - 11|, |10 - 11|)  = 1
+    #   max(15 - 12, |15 - 10.5|, ...)      = 4.5  a gap up: the high minus the last close
+    #   max(10 - 8, ..., |8 - 14|)          = 6    a gap down: the last close minus the low
+    # Period 3: seed (2 + 3 + 1) / 3 = 2; then 2 + (4.5 - 2) / 3 = 17/6;
+    # then 17/6 + (6 - 17/6) / 3 = 35/9.
+    candles = [(10, 8, 9), (11, 9, 10), (12, 9, 11), (11, 10, 10.5), (15, 12, 14), (10, 8, 9)]
+    highs, lows, closes = ([float(c[i]) for c in candles] for i in range(3))
+
+    assert atr(highs, lows, closes, 3) == pytest.approx([2.0, 17 / 6, 35 / 9])
+
+
+def test_atr_of_a_flat_market_is_zero() -> None:
+    assert atr([5.0] * 4, [5.0] * 4, [5.0] * 4, 2) == [0.0, 0.0]
+
+
+def test_atr_has_one_value_per_full_period_of_true_ranges() -> None:
+    flat = [1.0] * 10
+    assert len(atr(flat, flat, flat, 1)) == 9
+    assert len(atr(flat, flat, flat, 9)) == 1
+    assert atr(flat[:4], flat[:4], flat[:4], 4) == []
+
+
+def test_atr_needs_equal_series_and_a_positive_period() -> None:
+    with pytest.raises(ValueError, match="period"):
+        atr([1.0, 2.0], [1.0, 2.0], [1.0, 2.0], 0)
+    with pytest.raises(ValueError, match="same length"):
+        atr([1.0, 2.0], [1.0], [1.0, 2.0], 1)

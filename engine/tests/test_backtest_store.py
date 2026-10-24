@@ -11,10 +11,11 @@ from sqlalchemy import URL, text
 
 from engine.backtest.models import BacktestConfig
 from engine.backtest.run import backtest, reproduce
-from engine.backtest.simulator import BacktestError
+from engine.backtest.simulator import BacktestError, run_backtest
 from engine.backtest.store import BacktestRunStore, candles_sha256
 from engine.exchange.models import Candle, MarketRules
 from engine.marketdata.store import CandleStore, Series
+from engine.risk.sizing import AtrRisk
 from engine.strategies.ema_crossover import EmaCrossover, EmaCrossoverParams
 from shared.db.session import make_engine
 
@@ -96,6 +97,25 @@ async def test_save_and_load_round_trip_exactly(stores: Stores) -> None:
     assert stored.candle_count == HOURS
     assert stored.candles_sha256 == candles_sha256([wave(h) for h in range(HOURS)])
     assert stored.created_at.tzinfo is not None
+
+
+async def test_an_atr_sized_run_stores_its_sizing_and_reproduces(stores: Stores) -> None:
+    # ATR over 14 candles needs 6 x 14 + 1 = 85 before the start, more than the
+    # strategy's own 25: the run loads and stores the larger warm-up.
+    sizing = AtrRisk(risk_percent=Decimal("0.5"))
+    config = CONFIG.model_copy(update={"start": T0 + 85 * HOUR, "sizing": sizing})
+    run_id, result = await backtest(stores.candles, stores.runs, STRATEGY, config)
+    # Half a percent at risk buys less than all the cash would, on the same range.
+    all_in = CONFIG.model_copy(update={"start": config.start})
+    first_all_in = run_backtest(STRATEGY, [wave(h) for h in range(HOURS)], all_in).fills[0]
+    assert result.fills and result.fills[0].ts == first_all_in.ts
+    assert result.fills[0].amount < first_all_in.amount
+
+    stored = await stores.runs.load(run_id)
+
+    assert stored.config.sizing == sizing
+    assert stored.warmup_candles == 85
+    assert await reproduce(stores.candles, stores.runs, run_id) == result
 
 
 async def test_changed_candles_refuse_to_reproduce(stores: Stores) -> None:

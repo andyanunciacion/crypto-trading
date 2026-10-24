@@ -1,16 +1,19 @@
-"""Signal → order, as the bot runner sizes it until P4: all-in buys, whole-position sells,
-priced as a marketable limit. Each expected number is worked out by hand beside it.
+"""Signal → order: buys sized by the bot's sizing mode (all-in unless a test says
+otherwise), whole-position sells, priced as a marketable limit. Each expected number is
+worked out by hand beside it.
 
 Fee 0.1%, slippage 0.05%, amount step 0.0001 BTC, price step 0.01 USDT.
 """
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
-from engine.bots.orders import Skip, order_for
+from engine.bots.orders import Planned, Skip, order_for
 from engine.exchange.models import MarketRules, OrderRequest
+from engine.risk.sizing import ALL_IN, AtrRisk, FixedAmount, PercentOfEquity, Sizing
 from engine.strategies.base import Action, Position, Signal
 from shared.prices import PriceUpdate
 
@@ -56,12 +59,16 @@ def quote(ask: str | None = "100", bid: str | None = "99.9", ts: datetime = NOW)
     )
 
 
-def order(
+def plan(
     sig: Signal,
     position: Position | None = None,
     cash: str = "1000",
     price: PriceUpdate | None = None,
-) -> OrderRequest | Skip:
+    *,
+    sizing: Sizing = ALL_IN,
+    equity: str | None = None,  # the cash, unless given
+    atr: str | None = None,
+) -> Planned | Skip:
     side = "b" if sig.action == "buy" else "s"
     return order_for(
         sig,
@@ -69,11 +76,25 @@ def order(
         d(cash),
         quote() if price is None else price,
         RULES,
+        sizing=sizing,
+        equity=d(cash if equity is None else equity),
+        atr=None if atr is None else d(atr),
         client_order_id=f"b1-202610231200-{side}",
         now=NOW,
         fee_rate=FEE,
         slippage=SLIPPAGE,
     )
+
+
+def order(
+    sig: Signal,
+    position: Position | None = None,
+    cash: str = "1000",
+    price: PriceUpdate | None = None,
+    **sizing: Any,
+) -> OrderRequest | Skip:
+    planned = plan(sig, position, cash, price, **sizing)
+    return planned if isinstance(planned, Skip) else planned.request
 
 
 def request(side: str, amount: str, price: str) -> OrderRequest:
@@ -135,6 +156,36 @@ def test_a_buy_too_small_for_one_step_is_skipped() -> None:
     assert order(signal("buy"), cash="0.001") == Skip("size rounds to 0 at amount step 0.0001")
 
 
+# --- Sizing ----------------------------------------------------------------------------
+
+
+def test_a_percent_of_equity_buy_is_sized_at_the_limit() -> None:
+    # 25% of 2000 equity = 500, at the 100.05 limit: 500 / 100.05 = 4.99750... -> 4.9975.
+    placed = plan(signal("buy"), equity="2000", sizing=PercentOfEquity(percent=Decimal(25)))
+
+    assert isinstance(placed, Planned)
+    assert placed.request == request("buy", "4.9975", "100.05")
+    # What the order's reason will say about it.
+    assert placed.sizing == "percent_of_equity: 25% of 2000 equity = 500 at 100.05 = 4.9975"
+
+
+def test_an_atr_risk_buy_risks_its_share_of_equity() -> None:
+    # 1% of 1000 = 10 at risk, stop 2 x ATR 5 = 10 below: 10 / 10 = 1 BTC.
+    assert order(signal("buy"), sizing=AtrRisk(), atr="5") == request("buy", "1", "100.05")
+
+
+def test_an_atr_risk_buy_without_an_atr_is_skipped() -> None:
+    assert order(signal("buy"), sizing=AtrRisk()) == Skip("no ATR: needs 85 candles in a row")
+
+
+def test_a_sell_isnt_sized() -> None:
+    # A sell sells the whole position, whatever the sizing says.
+    placed = plan(signal("sell"), position=HOLDING, sizing=FixedAmount(amount=Decimal(1)))
+
+    assert isinstance(placed, Planned)
+    assert (placed.request.amount, placed.sizing) == (d("0.5"), None)
+
+
 # --- Sells -----------------------------------------------------------------------------
 
 
@@ -176,6 +227,9 @@ def test_no_order_without_a_price() -> None:
         d("1000"),
         None,
         RULES,
+        sizing=ALL_IN,
+        equity=d("1000"),
+        atr=None,
         client_order_id="b1-202610231200-b",
         now=NOW,
         fee_rate=FEE,
