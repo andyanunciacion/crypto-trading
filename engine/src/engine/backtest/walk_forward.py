@@ -256,7 +256,7 @@ async def run_walk_forward(
     Returns the results and, per window, the in-sample and out-of-sample run ids.
     """
     span = _over(base, wins[0].train_start, wins[-1].test_end)
-    history = await load_candles(candles, span, max_warmup(strategies))
+    history = await load_candles(candles, span, max_warmup(strategies, base))
     results = walk_forward(strategies, history, base, wins)
     run_ids: list[tuple[int, int]] = []
     for r in results:

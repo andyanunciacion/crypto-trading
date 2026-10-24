@@ -291,6 +291,7 @@ def test_describe_shows_the_metrics() -> None:
     text = describe(7, config(), TWO_TRADES)
 
     assert "run 7: script v1" in text
+    assert 'sizing {"mode":"all_in"}' in text
     assert "1000 USDT -> 1075.92 USDT (+7.59%), fees 4.08 USDT" in text
     assert "max drawdown 8.67%" in text
     assert "2 trades, 50.0% won, profit factor 1.74" in text

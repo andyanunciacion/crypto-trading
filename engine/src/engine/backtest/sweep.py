@@ -25,7 +25,12 @@ from engine.backtest.cli import add_run_arguments, json_object_arg, run_settings
 from engine.backtest.models import BacktestConfig, BacktestReport, BacktestResult
 from engine.backtest.report import report
 from engine.backtest.run import load_candles
-from engine.backtest.simulator import BacktestError, check_contiguous, run_backtest
+from engine.backtest.simulator import (
+    BacktestError,
+    check_contiguous,
+    run_backtest,
+    warmup_needed,
+)
 from engine.backtest.store import BacktestRunStore
 from engine.exchange.models import Candle, Timeframe
 from engine.main import configure_logging
@@ -153,7 +158,8 @@ def sweep(
     entries: list[SweepEntry] = []
     for strategy in strategies:
         config = configure(base, strategy, base.start, base.end)
-        own = candles_for(candles, base.start, base.end, strategy.warmup_candles, base.timeframe)
+        warmup = warmup_needed(strategy, config)
+        own = candles_for(candles, base.start, base.end, warmup, base.timeframe)
         result = run_backtest(strategy, own, config)
         entries.append(SweepEntry(strategy, config, own, result, report(config, result)))
     return sorted(entries, key=_by_sharpe)  # sorted() is stable: ties keep grid order
@@ -227,12 +233,13 @@ def describe(entries: Sequence[SweepEntry], invalid: Sequence[InvalidParams], ru
 # --- CLI --------------------------------------------------------------------------------
 
 
-def max_warmup(strategies: Sequence[Strategy[Any]]) -> int:
-    return max(s.warmup_candles for s in strategies)
+def max_warmup(strategies: Sequence[Strategy[Any]], base: BacktestConfig) -> int:
+    return max(warmup_needed(s, base) for s in strategies)
 
 
 async def save(runs: BacktestRunStore, entry: SweepEntry) -> int:
-    return await runs.save(entry.config, entry.strategy.warmup_candles, entry.candles, entry.result)
+    warmup = warmup_needed(entry.strategy, entry.config)
+    return await runs.save(entry.config, warmup, entry.candles, entry.result)
 
 
 async def run(args: argparse.Namespace, settings: Settings) -> None:
@@ -243,7 +250,7 @@ async def run(args: argparse.Namespace, settings: Settings) -> None:
     try:
         candles = CandleStore(db)
         base = await run_settings(args, candles, grid.strategies[0])
-        history = await load_candles(candles, base, max_warmup(grid.strategies))
+        history = await load_candles(candles, base, max_warmup(grid.strategies, base))
         entries = sweep(grid.strategies, history, base)
         run_id = await save(BacktestRunStore(db), entries[0])
         best = entries[0].report

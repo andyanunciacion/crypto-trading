@@ -29,6 +29,7 @@ from engine.backtest.store import BacktestRunStore, StoredRun
 from engine.exchange.models import Timeframe
 from engine.main import configure_logging
 from engine.marketdata.timeframes import STEP
+from engine.risk.sizing import SIZING
 from shared.config import Settings, load_settings
 from shared.db.session import make_engine
 
@@ -136,7 +137,8 @@ def describe(run_id: int, config: BacktestConfig, result: BacktestResult) -> str
             f"run {run_id}: {config.strategy} v{config.strategy_version}"
             f" {json.dumps(config.params)} on {config.exchange} {config.symbol} {config.timeframe},"
             f" {config.start:%Y-%m-%d %H:%M} to {config.end:%Y-%m-%d %H:%M} UTC",
-            f"  fee {config.fee_rate * 100:f}%, slippage {config.slippage_rate * 100:f}%",
+            f"  fee {config.fee_rate * 100:f}%, slippage {config.slippage_rate * 100:f}%,"
+            f" sizing {SIZING.dump_json(config.sizing).decode()}",
             f"  {config.initial_cash:f} {quote} -> {r.final_equity:.2f} {quote}"
             f" ({r.total_return * 100:+.2f}%), fees {r.total_fees:.2f} {quote}",
             f"  max drawdown {r.max_drawdown * 100:.2f}%, Sharpe {sharpe_text} (annualized)",

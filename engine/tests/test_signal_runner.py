@@ -48,6 +48,32 @@ def test_keeps_only_the_warmup_window() -> None:
     assert runner.window[-1].ts == T0 + 99 * MINUTE
 
 
+def test_can_keep_more_than_the_warmup_for_sizing() -> None:
+    # ATR sizing may need more history than the strategy (D39): kept, but the strategy
+    # still decides on its own 16 candles, so its signal is the same.
+    strategy = ema()
+    history = [candle(i) for i in range(100)] + [candle(100, 110.0)]
+    runner = SignalRunner(strategy, BTC, "1m", keep=85)
+    runner.seed(history[:-1])
+    assert len(runner.window) == 85
+
+    signal = runner.on_closed(history[-1], None)
+
+    assert signal.action == "buy"
+    assert signal == strategy.on_candle(history[-16:], None)
+    assert len(runner.window) == 85 and runner.window[-1] == history[-1]
+
+
+def test_a_gap_older_than_the_strategys_window_doesnt_hold_it() -> None:
+    # A gap only sizing's longer history sees: the strategy's own 16 candles are whole.
+    runner = SignalRunner(ema(), BTC, "1m", keep=85)
+    runner.seed([candle(i) for i in range(30)] + [candle(i) for i in range(31, 60)])
+
+    signal = runner.on_closed(candle(60, 110.0), None)
+
+    assert "gap" not in signal.reason
+
+
 def test_warms_up_from_nothing() -> None:
     runner = SignalRunner(ema(), BTC, "1m")
 

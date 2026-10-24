@@ -61,6 +61,36 @@ def _rsi(gain: float, loss: float) -> float:
     return 50.0 if total == 0 else 100 * gain / total
 
 
+def atr(
+    highs: Sequence[float], lows: Sequence[float], closes: Sequence[float], period: int
+) -> list[float]:
+    """Average True Range, Wilder's: how far the price typically moves in one candle.
+
+    A candle's true range is its high minus its low, widened to the previous close when
+    the price gapped past it: max(high - low, |high - prev close|, |low - prev close|).
+    The first ATR is the simple average of the first `period` true ranges; each later
+    one moves 1 / period of the way toward the next, as in `rsi`. True ranges start at
+    the second candle, so `result[i]` belongs to candle `i + period`: there are
+    `len(closes) - period` results, or none with `period` candles or fewer.
+    """
+    if period < 1:
+        raise ValueError(f"ATR period must be at least 1, got {period}")
+    if not len(highs) == len(lows) == len(closes):
+        raise ValueError("ATR needs highs, lows and closes of the same length")
+    if len(closes) <= period:
+        return []
+    ranges = [
+        max(high - low, abs(high - prev_close), abs(low - prev_close))
+        for high, low, prev_close in zip(highs[1:], lows[1:], closes[:-1], strict=True)
+    ]
+    current = sum(ranges[:period]) / period
+    result = [current]
+    for true_range in ranges[period:]:
+        current += (true_range - current) / period
+        result.append(current)
+    return result
+
+
 class Bands(NamedTuple):
     lower: float
     middle: float

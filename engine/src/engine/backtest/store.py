@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from engine.backtest.models import BacktestConfig, BacktestResult
 from engine.backtest.simulator import BACKTESTER_VERSION
 from engine.exchange.models import Candle, MarketRules
+from engine.risk.sizing import SIZING
 from shared.db.models import BacktestRunRow
 
 
@@ -67,6 +68,7 @@ class BacktestRunStore:
                 fee_rate=config.fee_rate,
                 slippage_rate=config.slippage_rate,
                 market_rules=config.market_rules.model_dump(mode="json"),
+                sizing=SIZING.dump_python(config.sizing, mode="json"),
                 candle_count=len(candles),
                 candles_sha256=candles_sha256(candles),
                 backtester_version=BACKTESTER_VERSION,
@@ -99,6 +101,7 @@ class BacktestRunStore:
             fee_rate=row["fee_rate"],
             slippage_rate=row["slippage_rate"],
             market_rules=MarketRules.model_validate(row["market_rules"]),
+            sizing=SIZING.validate_python(row["sizing"]),
         )
         return StoredRun(
             id=row["id"],

@@ -22,15 +22,20 @@ log = structlog.get_logger()
 
 
 class SignalRunner[P: StrategyParams]:
-    def __init__(self, strategy: Strategy[P], symbol: str, timeframe: Timeframe) -> None:
+    def __init__(
+        self, strategy: Strategy[P], symbol: str, timeframe: Timeframe, *, keep: int = 0
+    ) -> None:
+        """`keep`: hold at least this many candles, for whoever needs more history than
+        the strategy (ATR sizing, D39). The strategy still sees only its own window."""
         self.strategy = strategy
         self.symbol = symbol
         self.timeframe = timeframe
-        self._window: deque[Candle] = deque(maxlen=max(strategy.warmup_candles, 1))
+        self._size = max(strategy.warmup_candles, 1)  # what the strategy decides on
+        self._window: deque[Candle] = deque(maxlen=max(self._size, keep))
 
     @property
     def window(self) -> list[Candle]:
-        """The candles the next signal will be based on, oldest first."""
+        """The candles kept, oldest first: the strategy's window, or more with `keep`."""
         return list(self._window)
 
     def seed(self, history: Sequence[Candle]) -> None:
@@ -41,7 +46,7 @@ class SignalRunner[P: StrategyParams]:
     def on_closed(self, candle: Candle, position: Position | None) -> Signal:
         """The signal for `candle`, which has just closed."""
         self._append(candle)
-        window = list(self._window)
+        window = list(self._window)[-self._size :]
         step = STEP[self.timeframe]
         if any(b.ts - a.ts != step for a, b in pairwise(window)):
             # A candle the exchange never had (D25). Indicators across the hole would

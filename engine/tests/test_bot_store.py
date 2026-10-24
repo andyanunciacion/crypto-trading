@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from structlog.testing import capture_logs
 
 from engine.bots.store import create_bot, load_running_bots, open_orders
+from engine.risk.sizing import AllIn
 from engine.strategies.ema_crossover import EmaCrossover, EmaCrossoverParams
 from engine.strategies.rsi_mean_reversion import RsiMeanReversion, RsiMeanReversionParams
 from shared.db.models import BotRow, OrderRow, StrategyConfigRow
@@ -81,6 +82,16 @@ async def test_a_created_bot_loads_with_its_strategy(db: AsyncEngine) -> None:
         "test",
     )
     assert (row["mode"], row["status"], row["switch_policy"]) == ("paper", "running", "keep")
+    assert (bot.sizing, row["sizing"]) == (AllIn(), {"mode": "all_in"})
+
+
+async def test_a_bot_with_bad_sizing_is_refused(db: AsyncEngine) -> None:
+    bot_id = await ema_bot(db)
+    # Edited by hand, say: a percentage over 100 never reaches an order.
+    await set_bot(db, bot_id, sizing={"mode": "percent_of_equity", "percent": "150"})
+
+    ((refused, reason),) = await refusals(db)
+    assert refused == bot_id and "less than or equal to 100" in reason
 
 
 async def test_names_are_unique(db: AsyncEngine) -> None:

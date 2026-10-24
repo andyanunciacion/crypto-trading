@@ -3,8 +3,9 @@
 Run inside the stack (Postgres has no host port):
     docker compose run --rm engine python -m engine.bots.create btc-ema ema_crossover BTC/USDT 1h
 Add `--params '{"fast": 9, "slow": 21}'` to change the strategy's settings, `--cash` for
-the starting quote currency. The engine loads running bots when it starts, so restart
-it afterwards: `docker compose restart engine`.
+the starting quote currency, `--sizing '{"mode": "percent_of_equity", "percent": 25}'`
+for how much each buy spends (default all-in). The engine loads running bots when it
+starts, so restart it afterwards: `docker compose restart engine`.
 """
 
 import argparse
@@ -19,7 +20,7 @@ from redis.asyncio import Redis
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from engine.backtest.cli import decimal_arg, json_object_arg
+from engine.backtest.cli import SIZING_HELP, decimal_arg, json_object_arg, sizing_arg
 from engine.backtest.models import DEFAULT_INITIAL_CASH
 from engine.bots.store import create_bot
 from engine.exchange.adapter import ExchangeAdapter
@@ -28,6 +29,7 @@ from engine.exchange.models import Timeframe
 from engine.main import configure_logging
 from engine.marketdata.quotes import RedisQuotes
 from engine.risk.paper import PaperDesk
+from engine.risk.sizing import ALL_IN, SIZING, Sizing
 from engine.strategies.base import Strategy
 from engine.strategies.registry import STRATEGIES, build, strategy_class
 from shared.config import Settings, load_settings
@@ -46,6 +48,7 @@ async def create_paper_bot(
     symbol: str,
     timeframe: Timeframe,
     cash: Decimal,
+    sizing: Sizing = ALL_IN,
 ) -> int:
     """Add a running paper bot and fund it with `cash` of the quote currency. Returns its id."""
     if cash <= 0:
@@ -58,6 +61,7 @@ async def create_paper_bot(
         symbol=symbol,
         timeframe=timeframe,
         strategy=strategy,
+        sizing=sizing,
         created_by="cli",
     )
     _, currency = symbol.split("/")
@@ -72,6 +76,7 @@ async def create_paper_bot(
         strategy=strategy.name,
         version=strategy.version,
         params=strategy.params.model_dump(mode="json"),
+        sizing=SIZING.dump_python(sizing, mode="json"),
         cash=str(cash),
         currency=currency,
     )
@@ -95,6 +100,7 @@ async def run(args: argparse.Namespace, settings: Settings) -> None:
                 symbol=args.symbol,
                 timeframe=args.timeframe,
                 cash=args.cash,
+                sizing=args.sizing,
             )
     finally:
         await redis.aclose()
@@ -121,6 +127,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_INITIAL_CASH,
         help=f"starting paper cash in the quote currency (default {DEFAULT_INITIAL_CASH})",
     )
+    parser.add_argument("--sizing", type=sizing_arg, default=ALL_IN, help=SIZING_HELP)
     parser.add_argument("--exchange", default="mexc")
     return parser.parse_args(argv)
 

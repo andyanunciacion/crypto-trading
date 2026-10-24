@@ -33,6 +33,8 @@ ORDER_STATUSES = ("open", "closed", "canceled", "rejected")
 BOT_STATUSES = ("running", "paused", "stopped")
 # What a strategy switch (P6) does with an open position.
 SWITCH_POLICIES = ("keep", "close_first", "hand_over")
+# The default sizing (engine.risk.sizing.AllIn): spend all the free cash, as before P4.
+ALL_IN_SIZING = '{"mode": "all_in"}'
 
 
 class Base(DeclarativeBase):
@@ -92,6 +94,8 @@ class BacktestRunRow(Base):
     fee_rate: Mapped[Decimal] = mapped_column(Numeric)
     slippage_rate: Mapped[Decimal] = mapped_column(Numeric)
     market_rules: Mapped[dict[str, Any]] = mapped_column(JSONB)  # step sizes and minimums
+    # How each buy was sized (engine/risk/sizing.py); runs before P4-1 were all-in.
+    sizing: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=ALL_IN_SIZING)
     candle_count: Mapped[int] = mapped_column(Integer)  # warm-up included
     candles_sha256: Mapped[str] = mapped_column(Text)  # proves a re-run uses the same candles
     backtester_version: Mapped[int] = mapped_column(Integer)
@@ -133,6 +137,8 @@ class BotRow(Base):
         BigInteger, ForeignKey("strategy_configs.id", use_alter=True)
     )
     switch_policy: Mapped[str] = mapped_column(Text, server_default="keep")  # used from P6
+    # How much each buy spends (engine/risk/sizing.py, D39), validated when loaded.
+    sizing: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=ALL_IN_SIZING)
 
 
 class StrategyConfigRow(Base):

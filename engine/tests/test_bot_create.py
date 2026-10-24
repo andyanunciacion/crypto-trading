@@ -17,6 +17,7 @@ from engine.exchange.adapter import ExchangeAdapter
 from engine.exchange.errors import ExchangeError
 from engine.exchange.models import Balance
 from engine.risk.paper import PaperDesk
+from engine.risk.sizing import ALL_IN, FixedAmount, PercentOfEquity, Sizing
 from engine.strategies.ema_crossover import EmaCrossover, EmaCrossoverParams
 from shared.db.models import BotRow
 from shared.db.session import make_engine
@@ -50,7 +51,11 @@ async def bot_count(db: AsyncEngine) -> int:
 
 
 async def create(
-    db: AsyncEngine, adapter: ExchangeAdapter, symbol: str = "BTC/USDT", cash: str = "500"
+    db: AsyncEngine,
+    adapter: ExchangeAdapter,
+    symbol: str = "BTC/USDT",
+    cash: str = "500",
+    sizing: Sizing = ALL_IN,
 ) -> int:
     return await create_paper_bot(
         db,
@@ -61,6 +66,7 @@ async def create(
         symbol=symbol,
         timeframe="1h",
         cash=Decimal(cash),
+        sizing=sizing,
     )
 
 
@@ -72,11 +78,19 @@ async def test_creates_a_running_funded_paper_bot(
     (bot,) = await load_running_bots(db, "mexc")
     assert (bot.id, bot.name, bot.symbol, bot.timeframe) == (bot_id, "btc-ema", "BTC/USDT", "1h")
     assert bot.strategy.params == EMA.params
+    assert bot.sizing == ALL_IN  # the default: as before P4
     desk = PaperDesk(db, NoQuotes(), adapter)
     cash = Decimal(500)
     assert await desk.risk.balances(bot_id) == {
         "USDT": Balance(currency="USDT", free=cash, used=Decimal(0), total=cash)
     }
+
+
+async def test_a_bot_keeps_its_sizing(db: AsyncEngine, adapter: ExchangeAdapter) -> None:
+    await create(db, adapter, sizing=PercentOfEquity(percent=Decimal(25)))
+
+    (bot,) = await load_running_bots(db, "mexc")
+    assert bot.sizing == PercentOfEquity(percent=Decimal(25))
 
 
 async def test_a_symbol_the_exchange_doesnt_list_creates_nothing(
@@ -108,3 +122,15 @@ def test_arguments() -> None:
         "1h",
     )
     assert (args.params, args.cash, args.exchange) == ({"fast": 5}, Decimal(1000), "mexc")
+    assert args.sizing == ALL_IN
+
+
+def test_the_sizing_argument_is_checked() -> None:
+    sized = ["btc-ema", "ema_crossover", "BTC/USDT", "1h", "--sizing"]
+    assert parse_args([*sized, '{"mode": "fixed", "amount": "50"}']).sizing == FixedAmount(
+        amount=Decimal(50)
+    )
+    # argparse exits 2 on a bad argument, before anything is created.
+    for bad in ('{"mode": "fixed"}', '{"mode": "yolo"}', "not json"):
+        with pytest.raises(SystemExit):
+            parse_args([*sized, bad])

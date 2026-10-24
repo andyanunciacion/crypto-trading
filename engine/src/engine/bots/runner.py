@@ -8,8 +8,9 @@ closed candle, each bot in turn:
    backtest signal that fills at the next open or not at all, so a stale order never
    sits on reserved cash;
 2. asks its strategy for a signal, given its position (SignalRunner logs it);
-3. on BUY or SELL, sizes and prices an order (orders.py) and hands it to the
-   RiskManager, which decides on it and places it. The client order ID comes from the
+3. on BUY or SELL, sizes and prices an order (orders.py; a buy by the bot's sizing
+   mode, risk/sizing.py) and hands it to the RiskManager, which decides on it and
+   places it. The client order ID comes from the
    bot, the candle and the side, so a retried candle returns the first order (D18).
 
 An error stays with the bot and candle it happened on: it's logged (`bot.error`) and
@@ -27,7 +28,7 @@ After the engine was down or offline (D38):
 """
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable, Sequence
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -43,14 +44,16 @@ from engine.backtest.models import DEFAULT_FEE_RATE, default_slippage
 from engine.bots.orders import Skip, order_for
 from engine.bots.store import Bot, open_orders
 from engine.brokers.base import client_order_id
-from engine.exchange.models import Candle, MarketRules, OrderSide, Timeframe
+from engine.exchange.models import Balance, Candle, MarketRules, OrderSide, Timeframe
 from engine.marketdata.candle_stream import CandleSource, CandleStream, fetch_range
 from engine.marketdata.quotes import QuoteSource
 from engine.marketdata.store import CandleStore, Series
 from engine.marketdata.timeframes import STEP, floor
 from engine.risk.manager import RiskManager
+from engine.risk.sizing import SIZING, atr_for, lookback
 from engine.strategies.base import Signal
 from engine.strategies.runner import SignalRunner
+from shared.prices import PriceUpdate
 
 log = structlog.get_logger()
 
@@ -98,8 +101,11 @@ class BotRunner:
         self._fee_rate = fee_rate  # the fee the PaperBroker charges, left room for when buying
         self._series: dict[Series, list[_Running]] = {}
         for bot in bots:
-            running = _Running(bot, SignalRunner(bot.strategy, bot.symbol, bot.timeframe))
-            self._series.setdefault(bot.series, []).append(running)
+            # ATR sizing may need more candles than the strategy: the runner keeps them.
+            signals = SignalRunner(
+                bot.strategy, bot.symbol, bot.timeframe, keep=lookback(bot.sizing)
+            )
+            self._series.setdefault(bot.series, []).append(_Running(bot, signals))
 
     async def run(self) -> None:
         """Run every bot until cancelled."""
@@ -115,7 +121,9 @@ class BotRunner:
         bots = self._series[series]
         step = STEP[series.timeframe]
         last_closed = floor(self._clock(), series.timeframe) - step
-        needed = max(max(b.signals.strategy.warmup_candles, 1) for b in bots)
+        needed = max(
+            max(b.signals.strategy.warmup_candles, lookback(b.bot.sizing), 1) for b in bots
+        )
         history = await fetch_range(
             self._market,
             series.symbol,
@@ -256,15 +264,19 @@ class BotRunner:
         if signal.action == "hold":
             return
         side: OrderSide = "buy" if signal.action == "buy" else "sell"
-        _, quote_currency = bot.symbol.split("/")
+        base, quote_currency = bot.symbol.split("/")
         balances = await self._risk.balances(bot.id)
+        quote = await self._quotes.latest(bot.exchange, bot.symbol)
         cash = balances[quote_currency].free if quote_currency in balances else Decimal(0)
         planned = order_for(
             signal,
             position,
             cash,
-            await self._quotes.latest(bot.exchange, bot.symbol),
+            quote,
             await self._market.market_rules(bot.symbol),
+            sizing=bot.sizing,
+            equity=_equity(balances, base, quote_currency, quote),
+            atr=atr_for(bot.sizing, running.signals.window, bot.timeframe),
             client_order_id=client_order_id(bot.id, signal.ts, side),
             now=self._clock(),
             fee_rate=self._fee_rate,
@@ -280,21 +292,35 @@ class BotRunner:
         if isinstance(planned, Skip):
             log.info("bot.skipped", **fields, reason=planned.reason)
             return
-        outcome = await self._risk.submit(bot.id, planned, _reason(bot, signal))
+        outcome = await self._risk.submit(
+            bot.id, planned.request, _reason(bot, signal, planned.sizing)
+        )
         order = outcome.order
         log.info(
             "bot.order",
             **fields,
-            client_order_id=planned.client_order_id,
+            client_order_id=planned.request.client_order_id,
             decision=outcome.decision.decision,
             status=None if order is None else order.status,
             filled=None if order is None else str(order.filled),
         )
 
 
-def _reason(bot: Bot, signal: Signal) -> dict[str, JsonValue]:
-    """What an order records about why it was placed: the signal, the bot and its config."""
-    return {
+def _equity(
+    balances: Mapping[str, Balance], base: str, quote_currency: str, quote: PriceUpdate | None
+) -> Decimal:
+    """What the bot is worth: its quote currency, plus its coins at the bid (what they'd
+    sell for). With no bid, the coins count as nothing; the order is skipped anyway."""
+    cash = balances[quote_currency].total if quote_currency in balances else Decimal(0)
+    coins = balances[base].total if base in balances else Decimal(0)
+    bid = None if quote is None else quote.bid
+    return cash if bid is None else cash + coins * bid
+
+
+def _reason(bot: Bot, signal: Signal, sizing: str | None) -> dict[str, JsonValue]:
+    """What an order records about why it was placed: the signal, the bot and its config,
+    and for a buy how it was sized."""
+    reason: dict[str, JsonValue] = {
         "signal": signal.model_dump(mode="json"),
         "bot": {"id": bot.id, "name": bot.name},
         "strategy_config": {
@@ -304,3 +330,9 @@ def _reason(bot: Bot, signal: Signal) -> dict[str, JsonValue]:
             "params": bot.strategy.params.model_dump(mode="json"),
         },
     }
+    if sizing is not None:
+        reason["sizing"] = {
+            "settings": SIZING.dump_python(bot.sizing, mode="json"),
+            "detail": sizing,
+        }
+    return reason

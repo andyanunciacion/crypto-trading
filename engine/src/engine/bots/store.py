@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from engine.brokers.base import Mode
 from engine.exchange.models import Timeframe
 from engine.marketdata.store import Series
+from engine.risk.sizing import ALL_IN, SIZING, Sizing
 from engine.strategies.base import Strategy
 from engine.strategies.registry import build
 from shared.db.models import BotRow, OrderRow, StrategyConfigRow
@@ -33,6 +34,7 @@ class Bot:
     timeframe: Timeframe
     strategy_config_id: int
     strategy: Strategy[Any]
+    sizing: Sizing = ALL_IN  # how much each buy spends (D39)
 
     @property
     def series(self) -> Series:
@@ -48,6 +50,7 @@ async def create_bot(
     timeframe: Timeframe,
     strategy: Strategy[Any],
     created_by: str,
+    sizing: Sizing = ALL_IN,
 ) -> int:
     """Add a running paper bot with `strategy` as its first config. Returns the bot's id.
 
@@ -64,6 +67,7 @@ async def create_bot(
                     timeframe=timeframe,
                     mode="paper",
                     status="running",
+                    sizing=SIZING.dump_python(sizing, mode="json"),
                 )
                 .returning(BotRow.id)
             )
@@ -99,6 +103,7 @@ async def load_running_bots(db: AsyncEngine, exchange: str) -> list[Bot]:
             BotRow.symbol,
             BotRow.timeframe,
             BotRow.mode,
+            BotRow.sizing,
             StrategyConfigRow.id.label("config_id"),
             StrategyConfigRow.bot_id.label("config_bot_id"),
             StrategyConfigRow.strategy,
@@ -171,4 +176,5 @@ def _bot(row: Any, exchange: str) -> Bot:
         timeframe=cast(Timeframe, row.timeframe),  # the table's check constraint allows no other
         strategy_config_id=row.config_id,
         strategy=build(row.strategy, row.version, row.params),
+        sizing=SIZING.validate_python(row.sizing),
     )

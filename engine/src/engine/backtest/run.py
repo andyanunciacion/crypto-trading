@@ -17,7 +17,12 @@ import structlog
 from engine.backtest.cli import add_run_arguments, json_object_arg, run_settings
 from engine.backtest.models import BacktestConfig, BacktestResult
 from engine.backtest.report import describe, report
-from engine.backtest.simulator import BACKTESTER_VERSION, BacktestError, run_backtest
+from engine.backtest.simulator import (
+    BACKTESTER_VERSION,
+    BacktestError,
+    run_backtest,
+    warmup_needed,
+)
 from engine.backtest.store import BacktestRunStore, candles_sha256
 from engine.exchange.models import Candle
 from engine.main import configure_logging
@@ -42,9 +47,10 @@ async def backtest(
     candles: CandleStore, runs: BacktestRunStore, strategy: Strategy[Any], config: BacktestConfig
 ) -> tuple[int, BacktestResult]:
     """Run `strategy` as `config` says and store the run. Returns the run's id and result."""
-    history = await load_candles(candles, config, strategy.warmup_candles)
+    warmup = warmup_needed(strategy, config)
+    history = await load_candles(candles, config, warmup)
     result = run_backtest(strategy, history, config)
-    run_id = await runs.save(config, strategy.warmup_candles, history, result)
+    run_id = await runs.save(config, warmup, history, result)
     metrics = report(config, result)
     log.info(
         "backtest.done",
