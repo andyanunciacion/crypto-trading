@@ -9,13 +9,13 @@ crosses it back below (SELL). Fee 0.1%, slippage 0.05% (BTC/USDT).
 """
 
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 import pytest
-from sqlalchemy import URL, text
+from sqlalchemy import URL, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 from structlog.testing import capture_logs
 
@@ -24,8 +24,9 @@ from engine.bots.store import Bot, create_bot, load_running_bots
 from engine.exchange.models import Balance, Candle, MarketRules, Timeframe
 from engine.marketdata.store import CandleStore, Series
 from engine.risk.paper import PaperDesk
-from engine.strategies.base import Position, Signal, Strategy, StrategyParams
+from engine.strategies.base import Action, Position, Signal, Strategy, StrategyParams
 from engine.strategies.ema_crossover import EmaCrossover, EmaCrossoverParams
+from shared.db.models import BotRow, OrderRow
 from shared.db.session import make_engine
 from shared.prices import PriceUpdate
 
@@ -153,6 +154,18 @@ class Setup:
     def tick(self) -> None:
         """One minute on: the next candle has just closed."""
         self.clock.now += MINUTE
+
+    async def restart(self) -> BotRunner:
+        """A new desk and runner on the same database, as after the engine was killed.
+
+        Nothing of the old ones is cleaned up or carried over: only the database is.
+        """
+        self.desk = PaperDesk(self.db, self.quotes, self.market, clock=self.clock)
+        return self.runner(await load_running_bots(self.db, "mexc"))
+
+    async def order_rows(self) -> int:
+        async with self.db.connect() as conn:
+            return (await conn.execute(select(func.count()).select_from(OrderRow))).scalar_one()
 
 
 @pytest.fixture
@@ -367,3 +380,184 @@ async def test_run_follows_the_stream(setup: Setup) -> None:
     assert asked == [(BTC, "1m", candle(29).ts)]
     buy = await setup.desk.risk.get_order("b1-202610221230-b")
     assert buy is not None and buy.status == "closed"
+
+
+# --- Restart -----------------------------------------------------------------------------
+
+
+async def test_a_killed_engine_carries_on_from_the_database(setup: Setup) -> None:
+    bot = await setup.ema_bot()
+    runner = setup.runner([bot])
+    await runner.warm_up(SERIES)
+    setup.tick()
+    setup.quotes.set(ask="110", bid="109.9", size="4")  # 4 of the 9.0768 BTC wanted
+    await runner.on_closed(SERIES, candle(30, "110"))
+    risk = setup.desk.risk
+    leftover = await risk.get_order("b1-202610221230-b")
+    assert leftover is not None and (leftover.status, leftover.filled) == ("open", d("4"))
+    position = await risk.position(bot.id, BTC)
+    before = await risk.balances(bot.id)
+
+    # Killed mid-candle; back 30 s later, when REST has candle 30 too.
+    setup.market.rest.append(candle(30, "110"))
+    setup.clock.now += timedelta(seconds=30)
+    restarted = await setup.restart()
+    with capture_logs() as logs:
+        await restarted.recover()
+
+    # The leftover is cancelled before any price can fill it, and its cash released.
+    risk = setup.desk.risk
+    canceled = await risk.get_order("b1-202610221230-b")
+    assert canceled is not None and (canceled.status, canceled.filled) == ("canceled", d("4"))
+    assert (
+        await risk.position(bot.id, BTC) == position == Position(amount=d("4"), avg_entry=d("110"))
+    )
+    # 1000 - 440 - 0.44 fee = 559.56, nothing held any more; totals as before the kill.
+    after = await risk.balances(bot.id)
+    assert after == {
+        "USDT": usdt("559.56"),
+        "BTC": Balance(currency="BTC", free=d("4"), used=d("0"), total=d("4")),
+    }
+    assert {c: b.total for c, b in after.items()} == {c: b.total for c, b in before.items()}
+    (recovered,) = [log for log in logs if log["event"] == "bot.recovered"]
+    assert (recovered["bot_id"], recovered["canceled"]) == (bot.id, ["b1-202610221230-b"])
+    # As psql shows them, so they compare with a snapshot by eye: no "0E-7" for nothing held.
+    logged = recovered["balances"]
+    assert all("E" not in v for b in logged.values() for v in b.values()), logged
+    assert {c: {k: d(v) for k, v in b.items()} for c, b in logged.items()} == {
+        "USDT": {"free": d("559.56"), "used": d("0")},
+        "BTC": {"free": d("4"), "used": d("0")},
+    }
+
+    # Candle 30 only seeds the window: it was traded before the kill, not again now.
+    assert await restarted.warm_up(SERIES) == candle(30).ts
+    assert await setup.order_rows() == 1
+
+    # The next candle crosses down: it sells exactly the 4 BTC the database holds.
+    setup.tick()
+    setup.quotes.set(ask="90.1", bid="90")
+    await restarted.on_closed(SERIES, candle(31, "90"))
+    sell = await risk.get_order("b1-202610221231-s")
+    assert sell is not None and (sell.amount, sell.status) == (d("4"), "closed")
+    assert await risk.position(bot.id, BTC) is None
+    # 559.56 + 4 x 90 = 360, less the 0.36 fee: 919.2.
+    assert await risk.balances(bot.id) == {"USDT": usdt("919.2")}
+
+
+async def test_a_stopped_bots_open_order_is_cancelled_at_startup(setup: Setup) -> None:
+    stopped = await setup.ema_bot()
+    runner = setup.runner([stopped])
+    await runner.warm_up(SERIES)
+    setup.tick()
+    setup.quotes.set(ask="110", bid="109.9", size="4")
+    await runner.on_closed(SERIES, candle(30, "110"))
+    # Stopped as CLAUDE.md says (no stop command until P5), with another bot running.
+    other = await setup.ema_bot("other")
+    async with setup.db.begin() as conn:
+        await conn.execute(update(BotRow).where(BotRow.id == stopped.id).values(status="stopped"))
+
+    restarted = await setup.restart()
+    await restarted.recover()
+
+    order = await setup.desk.risk.get_order("b1-202610221230-b")
+    assert order is not None and order.status == "canceled"
+    assert (await setup.desk.risk.balances(stopped.id))["USDT"] == usdt("559.56")
+    assert await setup.desk.risk.balances(other.id) == {"USDT": usdt("1000")}
+
+
+# --- Catch-up ----------------------------------------------------------------------------
+
+
+class BuysWhenFlat(Strategy[StrategyParams]):
+    """Buys on every candle while flat, and remembers each window it decided on."""
+
+    name = "buys_when_flat"
+    version = 1
+    params_model = StrategyParams
+
+    def __init__(self, params: StrategyParams) -> None:
+        super().__init__(params)
+        self.windows: list[list[datetime]] = []
+
+    @property
+    def warmup_candles(self) -> int:
+        return 3
+
+    def decide(self, window: Sequence[Candle], position: Position | None) -> Signal:
+        self.windows.append([c.ts for c in window])
+        action: Action = "buy" if position is None else "hold"
+        return Signal(action=action, ts=window[-1].ts, reason="test")
+
+
+async def test_after_an_outage_a_bot_acts_on_the_newest_candle_only(setup: Setup) -> None:
+    strategy = BuysWhenFlat(StrategyParams())
+    bot = replace(await setup.ema_bot(), strategy=strategy)
+
+    async def stream(symbol: str, timeframe: Timeframe, last: datetime) -> AsyncGenerator[Candle]:
+        # The network was out for 5 minutes: candles 30-34 arrive at once, just after
+        # candle 34 closed. Only 34 closed less than a minute ago.
+        setup.clock.now = T0 + 35 * MINUTE + timedelta(seconds=2)
+        setup.quotes.set(ask="110", bid="109.9")
+        for i in range(30, 35):
+            yield candle(i, "110")
+
+    with capture_logs() as logs:
+        await setup.runner([bot], stream=stream).run()
+
+    caught_up = [log for log in logs if log["event"] == "bot.caught_up"]
+    assert [log["candle_ts"] for log in caught_up] == [
+        candle(i).ts.isoformat() for i in range(30, 34)
+    ]
+    # The missed candles filled the window; the strategy decided once, on the newest.
+    assert strategy.windows == [[candle(i).ts for i in (32, 33, 34)]]
+    assert await setup.order_rows() == 1
+    buy = await setup.desk.risk.get_order("b1-202610221234-b")
+    assert buy is not None and buy.status == "closed"
+    # Every candle is still stored.
+    stored = await CandleStore(setup.db).candles(SERIES, T0 + 30 * MINUTE, T0 + 35 * MINUTE)
+    assert [c.ts for c in stored] == [candle(i).ts for i in range(30, 35)]
+
+
+async def test_a_leftover_order_is_cancelled_at_the_first_missed_candle(setup: Setup) -> None:
+    bot = await setup.ema_bot()
+    runner = setup.runner([bot])
+    await runner.warm_up(SERIES)
+    setup.tick()
+    setup.quotes.set(ask="110", bid="109.9", size="4")
+    await runner.on_closed(SERIES, candle(30, "110"))  # BUY, 4 BTC filled, the rest open
+
+    setup.clock.now = T0 + 35 * MINUTE + timedelta(seconds=2)  # back after 4 minutes
+    with capture_logs() as logs:
+        for i in range(31, 35):
+            await runner.on_closed(SERIES, candle(i, "110"))
+
+    caught_up = [
+        (log["candle_ts"], log["canceled"]) for log in logs if log["event"] == "bot.caught_up"
+    ]
+    assert caught_up == [
+        (candle(31).ts.isoformat(), ["b1-202610221230-b"]),
+        (candle(32).ts.isoformat(), []),
+        (candle(33).ts.isoformat(), []),
+    ]
+    leftover = await setup.desk.risk.get_order("b1-202610221230-b")
+    assert leftover is not None and (leftover.status, leftover.filled) == ("canceled", d("4"))
+    assert await setup.order_rows() == 1  # candle 34 is acted on: no cross, so HOLD
+
+
+async def test_a_candle_rest_had_late_is_not_traded(setup: Setup) -> None:
+    bot = await setup.ema_bot()
+    runner = setup.runner([bot])
+    await runner.warm_up(SERIES)
+
+    # REST lacked candle 30 at its close (candles.live.late), so it comes at the next
+    # one with candle 31: a minute late, after the backtest would have filled it.
+    setup.clock.now = T0 + 32 * MINUTE + timedelta(seconds=2)
+    setup.quotes.set(ask="110", bid="109.9")
+    with capture_logs() as logs:
+        await runner.on_closed(SERIES, candle(30, "110"))  # the cross up: BUY if traded
+        await runner.on_closed(SERIES, candle(31, "110"))  # no new cross: HOLD
+
+    assert [log["candle_ts"] for log in logs if log["event"] == "bot.caught_up"] == [
+        candle(30).ts.isoformat()
+    ]
+    assert await setup.order_rows() == 0

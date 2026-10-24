@@ -158,14 +158,14 @@ async def test_one_bad_bot_doesnt_stop_the_others(db: AsyncEngine) -> None:
     assert [log["bot_id"] for log in logs if log["event"] == "bot.refused"] == [bad]
 
 
-async def test_open_orders_lists_only_the_bots_open_ones(db: AsyncEngine) -> None:
+async def test_open_orders_lists_the_open_ones_in_one_mode(db: AsyncEngine) -> None:
     bot_id = await ema_bot(db)
     other = await ema_bot(db, "other")
 
-    def row(cid: str, status: str, bot: int = bot_id) -> dict[str, object]:
+    def row(cid: str, status: str, bot: int = bot_id, mode: str = "paper") -> dict[str, object]:
         return {
             "bot_id": bot,
-            "mode": "paper",
+            "mode": mode,
             "exchange": "mexc",
             "symbol": BTC,
             "client_order_id": cid,
@@ -186,7 +186,18 @@ async def test_open_orders_lists_only_the_bots_open_ones(db: AsyncEngine) -> Non
                 row("b1-202610231100-b", "closed"),
                 row("b1-202610231300-b", "open"),
                 row("b2-202610231200-b", "open", other),
+                row("b1-202610231400-b", "open", mode="live"),
             ],
         )
 
-    assert await open_orders(db, bot_id) == ["b1-202610231200-b", "b1-202610231300-b"]
+    assert await open_orders(db, bot_id, mode="paper") == [
+        "b1-202610231200-b",
+        "b1-202610231300-b",
+    ]
+    # Every bot's, as restart recovery cancels them.
+    assert await open_orders(db, mode="paper") == [
+        "b1-202610231200-b",
+        "b1-202610231300-b",
+        "b2-202610231200-b",
+    ]
+    assert await open_orders(db, mode="live") == ["b1-202610231400-b"]

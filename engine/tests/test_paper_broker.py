@@ -375,6 +375,31 @@ async def test_a_new_broker_carries_on_from_the_database(setup: Setup) -> None:
     assert [(f.price, f.amount) for f in fills] == [(d("101"), d("0.6"))]
 
 
+async def test_a_crash_in_the_middle_of_a_fill_writes_none_of_it(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    setup.quotes.price = quote(ask_size="0.4")
+    placed = await setup.broker.place_order(BOT, order("buy", "1", "101"), REASON)
+    balances = await setup.broker.balances(BOT)
+
+    # The engine dies after the fill row and balances are written, before the position.
+    async def killed(*args: object) -> None:
+        raise RuntimeError("killed")
+
+    monkeypatch.setattr(setup.broker, "_update_position", killed)
+    with pytest.raises(RuntimeError, match="killed"):
+        await setup.broker.on_price(quote(ask="100.5"))
+
+    # One transaction: the fill, the order's progress and the balances are all undone.
+    restarted = setup.fresh_broker()
+    assert await restarted.get_order(placed.client_order_id) == placed
+    assert await restarted.balances(BOT) == balances
+    assert await restarted.position(BOT, BTC) == Position(amount=d("0.4"), avg_entry=d("100"))
+    # So the restarted engine fills the rest once, not on top of a half-written fill.
+    fills = await restarted.on_price(quote(ask="100.5"))
+    assert [(f.price, f.amount) for f in fills] == [(d("101"), d("0.6"))]
+
+
 # --- Client order IDs ------------------------------------------------------------------
 
 

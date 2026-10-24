@@ -191,10 +191,12 @@ Found on the first live paper buy (D36): 0.0122 BTC against 0.000612 BTC at the 
 ### P3-4 · Restart recovery
 `engine` `money` · Depends on: P3-3
 **Goal:** no lost or duplicated positions after a restart.
-- [ ] Rebuild state from DB on startup
-- [ ] Test: kill the engine mid-run, restart, compare state
-- [ ] Don't trade on missed candles. After the engine was down (PC asleep, network out, a restart), the candle stream delivers every candle it missed at once, and today each would place an order at the current price on a signal that may be hours old. Suggested rule: a bot acts only on a candle that closed less than one timeframe step ago; older ones just fill its warm-up window, logged as `bot.caught_up`. EMA crossover's event exit then misses a cross that happened while down, but the state exits still fire on the newest candle (D31). Record the rule in the decision log
-- [ ] Test: the engine misses several candles and comes back; each bot acts on the newest only
+- [x] Rebuild state from DB on startup (open orders cancelled before prices are fed, `bot.recovered` logs each bot's state, D38)
+- [x] Test: kill the engine mid-run, restart, compare state (`test_bot_runner.py`; plus a crash mid-fill in `test_paper_broker.py`)
+- [x] Don't trade on missed candles. After the engine was down (PC asleep, network out, a restart), the candle stream delivers every candle it missed at once, and today each would place an order at the current price on a signal that may be hours old. Suggested rule: a bot acts only on a candle that closed less than one timeframe step ago; older ones just fill its warm-up window, logged as `bot.caught_up`. EMA crossover's event exit then misses a cross that happened while down, but the state exits still fire on the newest candle (D31). Record the rule in the decision log
+- [x] Test: the engine misses several candles and comes back; each bot acts on the newest only
+- [x] By hand: `docker compose kill engine` mid-run, snapshot before and after the restart, compare (bot 4, 2026-10-24: identical; the 2 candles missed while down weren't traded; the first live candle after it sold exactly the recovered position)
+- [ ] The 24-hour run
 
 **Done when:** both tests pass, and a 24-hour paper run (after P3-3b) of a fast 1m bot completes with no crashes and with trades that check out by hand (D37). Keep the PC from sleeping for the run; running for days is Phase 8's 2-week server run.
 
