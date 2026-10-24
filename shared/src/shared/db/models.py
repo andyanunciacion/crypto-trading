@@ -96,6 +96,8 @@ class BacktestRunRow(Base):
     market_rules: Mapped[dict[str, Any]] = mapped_column(JSONB)  # step sizes and minimums
     # How each buy was sized (engine/risk/sizing.py); runs before P4-1 were all-in.
     sizing: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=ALL_IN_SIZING)
+    # Its stops (engine/risk/stops.py); {} is none, as for every run before P4-2.
+    stops: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default="{}")
     candle_count: Mapped[int] = mapped_column(Integer)  # warm-up included
     candles_sha256: Mapped[str] = mapped_column(Text)  # proves a re-run uses the same candles
     backtester_version: Mapped[int] = mapped_column(Integer)

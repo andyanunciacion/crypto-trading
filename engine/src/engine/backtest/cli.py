@@ -23,6 +23,7 @@ from engine.exchange.models import Timeframe
 from engine.marketdata.store import CandleStore, Series
 from engine.marketdata.timeframes import STEP, floor
 from engine.risk.sizing import ALL_IN, SIZING, Sizing
+from engine.risk.stops import NO_STOPS, STOPS, Stops
 from engine.strategies.base import Strategy
 
 
@@ -48,17 +49,33 @@ def sizing_arg(text: str) -> Sizing:
     try:
         return SIZING.validate_python(json_object_arg(text))
     except ValidationError as e:
-        # One line per problem, without pydantic's links to its docs.
-        problems = "; ".join(
-            f"{'.'.join(map(str, err['loc']))}: {err['msg']}" for err in e.errors()
-        )
-        raise argparse.ArgumentTypeError(f"bad sizing: {problems}") from None
+        raise argparse.ArgumentTypeError(f"bad sizing: {_problems(e)}") from None
+
+
+def stops_arg(text: str) -> Stops:
+    """Stops as JSON, e.g. '{"stop_loss": {"kind": "percent", "percent": 3}}'."""
+    try:
+        return STOPS.validate_python(json_object_arg(text))
+    except ValidationError as e:
+        raise argparse.ArgumentTypeError(f"bad stops: {_problems(e)}") from None
+
+
+def _problems(e: ValidationError) -> str:
+    # One line per problem, without pydantic's links to its docs.
+    return "; ".join(f"{'.'.join(map(str, err['loc']))}: {err['msg']}" for err in e.errors())
 
 
 SIZING_HELP = (
     "how much each buy spends, as JSON (default all-in): "
     '{"mode": "fixed", "amount": 100}, {"mode": "percent_of_equity", "percent": 25} or '
     '{"mode": "atr_risk", "risk_percent": 1, "period": 14, "multiple": 2}'
+)
+STOPS_HELP = (
+    "stops, as JSON (default none): any of stop_loss and trailing "
+    '({"kind": "percent", "percent": 3} or {"kind": "atr", "multiple": 2}) and take_profit '
+    '({"kind": "percent", "percent": 6} or {"kind": "r", "multiple": 2}), plus atr_period '
+    '(default 14), e.g. {"stop_loss": {"kind": "atr", "multiple": 2}, '
+    '"take_profit": {"kind": "r", "multiple": 2}}'
 )
 
 
@@ -82,6 +99,7 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
         help="slippage per fill, as a fraction (default 0.0005 for BTC/ETH, 0.003 otherwise)",
     )
     parser.add_argument("--sizing", type=sizing_arg, default=ALL_IN, help=SIZING_HELP)
+    parser.add_argument("--stops", type=stops_arg, default=NO_STOPS, help=STOPS_HELP)
     parser.add_argument("--exchange", default="mexc")
 
 
@@ -114,4 +132,5 @@ async def run_settings(
         slippage_rate=default_slippage(args.symbol) if args.slippage is None else args.slippage,
         market_rules=rules,
         sizing=args.sizing,
+        stops=args.stops,
     )

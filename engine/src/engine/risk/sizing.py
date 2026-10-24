@@ -138,22 +138,33 @@ def entry_amount(
 
 
 def lookback(sizing: Sizing) -> int:
-    """How many closed candles the mode needs: 0 unless it uses ATR.
+    """How many closed candles the mode needs: 0 unless it uses ATR."""
+    return atr_lookback(sizing.period) if isinstance(sizing, AtrRisk) else 0
+
+
+def atr_for(sizing: Sizing, candles: Sequence[Candle], timeframe: Timeframe) -> Decimal | None:
+    """The ATR the mode sizes by (`atr_of`), or None when the mode doesn't use ATR."""
+    if not isinstance(sizing, AtrRisk):
+        return None
+    return atr_of(candles, sizing.period, timeframe)
+
+
+def atr_lookback(period: int) -> int:
+    """The closed candles an ATR over `period` is taken from.
 
     Six periods, like RSI's warm-up (D28): Wilder's smoothing starts from a seed that
     fades by 1 - 1/period per candle, ~0.2% of it left after six periods.
     """
-    return 6 * sizing.period + 1 if isinstance(sizing, AtrRisk) else 0
+    return 6 * period + 1
 
 
-def atr_for(sizing: Sizing, candles: Sequence[Candle], timeframe: Timeframe) -> Decimal | None:
-    """The ATR the mode sizes by, from exactly the last `lookback` closed candles.
+def atr_of(candles: Sequence[Candle], period: int, timeframe: Timeframe) -> Decimal | None:
+    """Wilder's ATR on exactly the last `atr_lookback(period)` closed candles.
 
-    None when the mode doesn't use ATR, or with too few candles or a gap among them.
+    The same candles in a backtest and a live bot give the same value. None with too few
+    candles or a gap among them.
     """
-    if not isinstance(sizing, AtrRisk):
-        return None
-    needed = lookback(sizing)
+    needed = atr_lookback(period)
     window = candles[-needed:]
     step = STEP[timeframe]
     if len(window) < needed or any(b.ts - a.ts != step for a, b in pairwise(window)):
@@ -162,7 +173,7 @@ def atr_for(sizing: Sizing, candles: Sequence[Candle], timeframe: Timeframe) -> 
         [float(c.high) for c in window],
         [float(c.low) for c in window],
         [float(c.close) for c in window],
-        sizing.period,
+        period,
     )
     # Indicator math is float (D9); back to Decimal for the money math.
     return Decimal(str(values[-1]))

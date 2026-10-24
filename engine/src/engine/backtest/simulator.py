@@ -12,12 +12,17 @@ The fill model:
   what a live bot knows when it decides.
 - Amounts round down to the market's step. Orders below its minimums are skipped,
   never rounded up (D22).
+- Stops (risk/stops.py, D40), if the run has any, are placed from a BUY's fill price
+  and checked on every candle from that one on, after its open: a hit sells the whole
+  position at the stop's price, with slippage and the fee like any fill. A BUY whose
+  stops can't be placed (no ATR) is skipped.
 
 Pure and synchronous: no database, no exchange, no clock. Same inputs, same result.
 """
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from itertools import pairwise
 
@@ -32,7 +37,24 @@ from engine.backtest.models import (
 )
 from engine.exchange.models import Candle, OrderSide, Timeframe
 from engine.marketdata.timeframes import STEP
-from engine.risk.sizing import NotSized, atr_for, below_minimum, entry_amount, lookback
+from engine.risk.sizing import (
+    NotSized,
+    atr_for,
+    atr_of,
+    below_minimum,
+    entry_amount,
+    lookback,
+)
+from engine.risk.stops import (
+    NO_STOPS,
+    ExitKind,
+    ExitState,
+    NoLevels,
+    after_candle,
+    exit_on_candle,
+    levels_at_entry,
+)
+from engine.risk.stops import lookback as stops_lookback
 from engine.strategies.base import Position, Signal, Strategy, StrategyParams
 
 # Stored with every run. Bump it when the fill model changes, so old runs aren't
@@ -62,8 +84,12 @@ def _side(signal: Signal) -> OrderSide:
 
 
 def warmup_needed[P: StrategyParams](strategy: Strategy[P], config: BacktestConfig) -> int:
-    """Candles a run needs before its start: for the strategy, and for ATR sizing."""
-    return max(strategy.warmup_candles, lookback(config.sizing), 1)
+    """Candles a run needs before its start: for the strategy, and for ATR sizing or stops."""
+    return max(strategy.warmup_candles, _atr_window(config), 1)
+
+
+def _atr_window(config: BacktestConfig) -> int:
+    return max(lookback(config.sizing), stops_lookback(config.stops))
 
 
 @dataclass
@@ -73,6 +99,7 @@ class _Account:
     config: BacktestConfig
     cash: Decimal
     position: Position | None = None
+    exits: ExitState | None = None  # the open position's stops, if the run has any
     fills: list[Fill] = field(default_factory=list)
     skipped: list[SkippedOrder] = field(default_factory=list)
     total_fees: Decimal = Decimal(0)
@@ -88,11 +115,12 @@ class _Account:
     def execute(self, signal: Signal, candle: Candle, history: Sequence[Candle]) -> None:
         """Fill `signal` (from the previous candle) at `candle`'s open, if it can be.
 
-        `history` is the closed candles up to the signal's, for ATR sizing.
+        `history` is the closed candles up to the signal's, for ATR sizing and stops.
         """
         side = _side(signal)
         price = fill_price(side, candle.open, self.config.slippage_rate)
         rules = self.config.market_rules
+        exits: ExitState | None = None
         if side == "buy":
             if self.position is not None:
                 self.skip(signal, side, "already holding")
@@ -112,6 +140,15 @@ class _Account:
                 self.skip(signal, side, sized.reason)
                 return
             amount = sized.amount
+            stops = self.config.stops
+            if stops != NO_STOPS:
+                atr = atr_of(history, stops.atr_period, self.config.timeframe)
+                levels = levels_at_entry(stops, price, atr if stops.uses_atr else None)
+                if isinstance(levels, NoLevels):
+                    # Not opened without the stop it was told to have.
+                    self.skip(signal, side, levels.reason)
+                    return
+                exits = levels
         else:
             if self.position is None:
                 self.skip(signal, side, "nothing to sell")
@@ -121,7 +158,36 @@ class _Account:
             if too_small is not None:
                 self.skip(signal, side, too_small)
                 return
+        self._fill(candle.ts, side, price, amount)
+        self.exits = exits  # a buy's levels; a sell leaves none
 
+    def watch(self, candle: Candle) -> None:
+        """After `candle`'s open: sell if it hits a stop, or else let the trailing stop follow."""
+        if self.position is None or self.exits is None:
+            return
+        hit = exit_on_candle(self.exits, candle)
+        if hit is None:
+            self.exits = after_candle(self.exits, self.config.stops, candle)
+            return
+        price = fill_price("sell", hit.price, self.config.slippage_rate)
+        amount = self.position.amount
+        self.exits = None
+        too_small = below_minimum(amount, price, self.config.market_rules)
+        if too_small is not None:
+            # It can't be sold, by a stop or otherwise; this is the one time it's said.
+            reason = f"{hit.kind}: {too_small}"
+            self.skipped.append(SkippedOrder(signal_ts=candle.ts, side="sell", reason=reason))
+            return
+        self._fill(candle.ts, "sell", price, amount, exit=hit.kind)
+
+    def _fill(
+        self,
+        ts: datetime,
+        side: OrderSide,
+        price: Decimal,
+        amount: Decimal,
+        exit: ExitKind | None = None,
+    ) -> None:
         paid = fee(price, amount, self.config.fee_rate)
         if side == "buy":
             self.cash -= price * amount + paid
@@ -131,7 +197,13 @@ class _Account:
             self.position = None
         self.total_fees += paid
         fill = Fill(
-            ts=candle.ts, side=side, price=price, amount=amount, fee=paid, cash_after=self.cash
+            ts=ts,
+            side=side,
+            price=price,
+            amount=amount,
+            fee=paid,
+            cash_after=self.cash,
+            exit=exit,
         )
         self.fills.append(fill)
         log.debug("backtest.fill", **fill.model_dump(mode="json"))
@@ -148,7 +220,7 @@ def run_backtest[P: StrategyParams](
     _check_strategy(strategy, config)
     first = _first_in_range(candles, config, warmup_needed(strategy, config))
     window = strategy.warmup_candles
-    sizing_window = lookback(config.sizing)
+    atr_window = _atr_window(config)
     account = _Account(config=config, cash=config.initial_cash)
     signals: list[Signal] = []
     equity_curve: list[EquityPoint] = []
@@ -160,9 +232,10 @@ def run_backtest[P: StrategyParams](
         if i >= first:
             if pending is not None:
                 # Up to the signal's candle (i - 1): a live bot doesn't know candle i yet.
-                history = candles[max(0, i - sizing_window) : i] if sizing_window else ()
+                history = candles[max(0, i - atr_window) : i] if atr_window else ()
                 account.execute(pending, candle, history)
                 pending = None
+            account.watch(candle)  # stops, from the open on, including a buy's own candle
             equity_curve.append(
                 EquityPoint(ts=candle.ts, equity=account.cash + account.amount * candle.close)
             )
