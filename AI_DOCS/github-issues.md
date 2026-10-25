@@ -196,15 +196,51 @@ Found on the first live paper buy (D36): 0.0122 BTC against 0.000612 BTC at the 
 - [x] Don't trade on missed candles. After the engine was down (PC asleep, network out, a restart), the candle stream delivers every candle it missed at once, and today each would place an order at the current price on a signal that may be hours old. Suggested rule: a bot acts only on a candle that closed less than one timeframe step ago; older ones just fill its warm-up window, logged as `bot.caught_up`. EMA crossover's event exit then misses a cross that happened while down, but the state exits still fire on the newest candle (D31). Record the rule in the decision log
 - [x] Test: the engine misses several candles and comes back; each bot acts on the newest only
 - [x] By hand: `docker compose kill engine` mid-run, snapshot before and after the restart, compare (bot 4, 2026-10-24: identical; the 2 candles missed while down weren't traded; the first live candle after it sold exactly the recovered position)
-- [ ] The 24-hour run: bot 4 `btc-ema-1m` (EMA 3/5, BTC/USDT 1m, 1000 paper USDT), from 2026-10-24 01:35 UTC (09:35 Manila) to 2026-10-25 01:35 UTC. Until it ends, no `docker compose up`, `build`, `restart` or `run` (`run` would apply the waiting migrations 0005 and 0006 first)
+- [x] The 24-hour run: bot 4 `btc-ema-1m` (EMA 3/5, BTC/USDT 1m, 1000 paper USDT), from 2026-10-24 01:35 UTC (09:35 Manila) to 2026-10-25 01:35 UTC. Passed:
+  - The engine stayed up for the whole run: 0 restarts and one `engine.starting`.
+  - There was 1 error, the known race below. Counted anyway: it didn't crash the engine and left the database consistent.
+  - 5 WebSocket drops on MEXC's side were each recovered on the first attempt.
+  - 1,440 of 1,440 candles were stored and none were missed.
+  - 219 orders and 269 fills, every fill at the best price in its quote, inside its limit and size, with a 0.1% fee.
+  - Bot 4's fills add up exactly to its balance: 804.2509094530745 USDT and 0 BTC. 109 trades: −190.98 net, of which 194.74 was fees.
+
+**Found during the run:** one `bot.error`, `KeyError: 'buy'`, at 2026-10-24 14:30:02 UTC on bot 4's buy `b4-202610241429-b`. It's a race in `PaperBroker` (`brokers/paper.py`):
+- `_open` matched the new order against the quote and stored the result in `self._taken`.
+- While `_fill` was waiting on the database, `on_price` handled a new quote whose ask had moved.
+- `forget_moved` dropped the buy side from `_taken`. It was right to, because the ask had moved, and `on_price` couldn't see the order, which wasn't committed yet.
+- `_fill` then read `self._taken[symbol][side]` for its `taken_at_best` log field and raised.
+- The whole placing transaction rolled back: order id 138 never existed, and balances and the position stayed consistent. The bot missed that one buy, its error was logged, and the engine carried on (D36). The only wrong record left is a `broker.order.placed` log line for an order that doesn't exist.
 
 **After the 24-hour run**, in this order:
-1. Check it: `docker compose ps engine` still shows it up since the start, and the logs since then (`docker compose logs engine --since 2026-10-24T01:35:00Z`) have no `"level": "error"` lines and one `engine.starting` at most (the 01:35 start).
+All steps done 2026-10-25 (the run counts).
+1. Check it: `docker compose ps engine` still shows it up since the start, and the logs since then (`docker compose logs engine --since 2026-10-24T01:35:00Z`) have one `engine.starting` at most (the 01:35 start) and no `"level": "error"` lines besides the known one above.
 2. Check the trades by hand: each `broker.order.filled` price is between the ask/bid in its logged `quote` and the order's `limit` (D34), and the snapshot query (CLAUDE.md) agrees with the fills.
-3. If both pass, tick the box above, tick P3-4 in ROADMAP, and mark Phase 3 done in CLAUDE.md's status. If not, note what failed here and fix that first.
-4. Apply the waiting migrations (0005 from P4-1, 0006 from P4-2a): `docker compose up --build -d`, then `docker compose exec db psql -U crypto -d crypto_trading -tAc "SELECT version_num FROM alembic_version"` shows `0006`. The engine's `bot.recovered` still lists bot 4, now with all-in sizing.
-5. Try sizing on real candles: `engine.backtest.run ema_crossover BTC/USDT 1h --days 360` with no `--sizing`, then `--sizing '{\"mode\": \"percent_of_equity\", \"percent\": 25}'`, then `--sizing '{\"mode\": \"atr_risk\"}'`. The first matches an earlier all-in run's numbers; the other two buy less per trade. Then try stops: the same run with `--stops '{\"stop_loss\": {\"kind\": \"percent\", \"percent\": 3}}'` prints an `exits:` line, and no trade loses much more than 3% plus fees and slippage, unless a candle gapped through the stop.
-6. Decide whether bot 4 keeps running (stop it as CLAUDE.md says, then restart the engine).
+3. Decide whether the run counts with that error. It didn't crash the engine, and the trades checked out; the stricter option is a shorter re-run after step 4. If it counts, tick the box above, tick P3-4 in ROADMAP, and mark Phase 3 done in CLAUDE.md's status. If anything else failed, note it here and fix that first.
+4. [x] Fix the race (2026-10-25). Two tests in `test_paper_broker.py` (Concurrency) both failed before the fix:
+   - an `on_price` with a moved ask runs while `_open`'s fill is waiting on the database; this reproduced the `KeyError`;
+   - a rolled-back order leaves no order, balance, record or taking state behind.
+
+   What changed:
+   - `_fill` now gets `taken` from its own match's result instead of reading `self._taken` after an `await`.
+   - `place_order` logs `broker.order.rolled_back` and drops the ID from `_taking` when its transaction fails, so a retry of that ID doesn't inherit the failed try's taking.
+   - `_open` still claims its size in `self._taken` before the commit, not after as first suggested: claiming it after would let `on_price` spend the same size in between (the double fill P3-3b fixed). A rollback then undercounts fills until the price moves, which is the safe side (D34).
+5. [x] Apply the waiting migrations (0005 from P4-1, 0006 from P4-2a): `docker compose up --build -d`, then `docker compose exec db psql -U crypto -d crypto_trading -tAc "SELECT version_num FROM alembic_version"` shows `0006`. The engine's `bot.recovered` still lists bot 4, now with all-in sizing. (2026-10-25: 0004 → 0005 → 0006 ran; all services healthy; bot 4 `{"mode": "all_in"}`, recovered flat at 803.11 USDT with nothing to cancel.)
+6. [x] Try sizing on real candles: `engine.backtest.run ema_crossover BTC/USDT 1h --days 360` with no `--sizing`, then `--sizing '{\"mode\": \"percent_of_equity\", \"percent\": 25}'`, then `--sizing '{\"mode\": \"atr_risk\"}'`. The first matches an earlier all-in run's numbers; the other two buy less per trade. Then try stops: the same run with `--stops '{\"stop_loss\": {\"kind\": \"percent\", \"percent\": 3}}'` prints an `exits:` line, and no trade loses much more than 3% plus fees and slippage, unless a candle gapped through the stop.
+
+   Done 2026-10-25 with EMA 9/21, BTC/USDT 1h, 360 days:
+   - Stored run 2 (from before sizing existed) reproduces identically: 386 fills, 435.4473 USDT.
+   - The four new runs:
+
+     | Run | Settings | Result | Fees | Notes |
+     |---|---|---|---|---|
+     | 41 | all-in | 435.45 USDT | 220.23 | the same as run 2 |
+     | 42 | 25% of equity | 818.81 USDT | 83.69 | average buy 217 vs 571 |
+     | 43 | `atr_risk` | 551.74 USDT | 207.71 | average buy 539 |
+     | 44 | 3% stop-loss | 453.38 USDT | 223.87 | `exits: 4 stop_loss` |
+
+   - Run 43 is often capped at the free cash: 1% risk at a 2×ATR stop asks for about all of the equity on 1h.
+   - In run 44 every stop exit lost exactly 3.05% (3% plus 0.05% slippage). The worst trade went from −5.89% to −3.05%, and no candle gapped through a stop.
+7. [x] Decide whether bot 4 keeps running (stop it as CLAUDE.md says, then restart the engine). Stopped 2026-10-25 at 803.11 USDT, flat, no open orders; the engine now logs `bots.loaded` with `[]`.
 
 **Done when:** both tests pass, and a 24-hour paper run (after P3-3b) of a fast 1m bot completes with no crashes and with trades that check out by hand (D37). Keep the PC from sleeping for the run; running for days is Phase 8's 2-week server run.
 
