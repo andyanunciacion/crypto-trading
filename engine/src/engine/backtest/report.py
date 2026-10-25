@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import json
 import sys
+from collections import Counter
 from collections.abc import Sequence
 from datetime import UTC, timedelta
 from decimal import Decimal
@@ -30,6 +31,7 @@ from engine.exchange.models import Timeframe
 from engine.main import configure_logging
 from engine.marketdata.timeframes import STEP
 from engine.risk.sizing import SIZING
+from engine.risk.stops import NO_STOPS, STOPS
 from shared.config import Settings, load_settings
 from shared.db.session import make_engine
 
@@ -132,19 +134,28 @@ def describe(run_id: int, config: BacktestConfig, result: BacktestResult) -> str
         noun = "trade" if r.trade_count == 1 else "trades"
         factor = "n/a (no losing trades)" if r.profit_factor is None else f"{r.profit_factor:.2f}"
         trades_text = f"{r.trade_count} {noun}, {r.win_rate * 100:.1f}% won, profit factor {factor}"
+    stops_text = (
+        ""
+        if config.stops == NO_STOPS
+        else f", stops {STOPS.dump_json(config.stops, exclude_none=True).decode()}"
+    )
+    # How many sells each kind of stop made, in the order they first happened.
+    exits = Counter(f.exit for f in result.fills if f.exit is not None)
+    exits_text = [f"  exits: {', '.join(f'{n} {kind}' for kind, n in exits.items())}"]
     return "\n".join(
         [
             f"run {run_id}: {config.strategy} v{config.strategy_version}"
             f" {json.dumps(config.params)} on {config.exchange} {config.symbol} {config.timeframe},"
             f" {config.start:%Y-%m-%d %H:%M} to {config.end:%Y-%m-%d %H:%M} UTC",
             f"  fee {config.fee_rate * 100:f}%, slippage {config.slippage_rate * 100:f}%,"
-            f" sizing {SIZING.dump_json(config.sizing).decode()}",
+            f" sizing {SIZING.dump_json(config.sizing).decode()}{stops_text}",
             f"  {config.initial_cash:f} {quote} -> {r.final_equity:.2f} {quote}"
             f" ({r.total_return * 100:+.2f}%), fees {r.total_fees:.2f} {quote}",
             f"  max drawdown {r.max_drawdown * 100:.2f}%, Sharpe {sharpe_text} (annualized)",
             f"  {trades_text}",
             f"  {len(result.fills)} fills, {len(result.skipped)} skipped orders"
             + (", still holding at the end" if r.open_trade else ""),
+            *(exits_text if exits else []),
         ]
     )
 

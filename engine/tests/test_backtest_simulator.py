@@ -23,6 +23,7 @@ from engine.backtest.simulator import (
 )
 from engine.exchange.models import Candle, MarketRules
 from engine.risk.sizing import AtrRisk, FixedAmount, PercentOfEquity
+from engine.risk.stops import AtrMultiple, Percent, Stops
 from engine.strategies.base import Position, Signal, Strategy, StrategyParams
 from engine.strategies.bollinger_breakout import BollingerBreakout, BollingerBreakoutParams
 from engine.strategies.ema_crossover import EmaCrossover, EmaCrossoverParams
@@ -297,6 +298,135 @@ def test_atr_risk_needs_its_candles_before_the_start() -> None:
 
     with pytest.raises(BacktestError, match="needs 13 warm-up candles"):
         run_backtest(strategy, candles, config(strategy, 5, 16, sizing=AtrRisk(period=2)))
+
+
+def hl(hour: int, open_: str, high: str, low: str, close: str) -> Candle:
+    return Candle(ts=at(hour), open=D(open_), high=D(high), low=D(low), close=D(close), volume=D(1))
+
+
+def stopped(stops: Stops, *later: Candle, **overrides: Any) -> BacktestResult:
+    """BUY on candle 1, filled at candle 2's open of 100; then `later` from candle 2 on."""
+    candles = [*flat(range(2)), *later]
+    strategy = script(buys=(1,), sells=(len(candles) - 2,))
+    end = len(candles)
+    return run_backtest(strategy, candles, config(strategy, 1, end, stops=stops, **overrides))
+
+
+def test_a_stop_loss_sells_at_the_stop() -> None:
+    # 5% below the 100 entry: 95. Candle 3's low of 94 reaches it. Fee 0.1%:
+    #   buy 9.99 at 100 (as above), cash 0.001
+    #   sell 9.99 at 95 = 949.05, fee 0.94905: cash 0.001 + 949.05 - 0.94905 = 948.10195
+    result = stopped(
+        Stops(stop_loss=Percent(percent=D(5))),
+        hl(2, "100", "101", "99", "100"),
+        hl(3, "98", "99", "94", "96"),
+        hl(4, "96", "96", "96", "96"),
+        hl(5, "96", "96", "96", "96"),
+        fee_rate=D("0.001"),
+    )
+
+    assert result.fills[1] == Fill(
+        ts=at(3),
+        side="sell",
+        price=D(95),
+        amount=D("9.99"),
+        fee=D("0.94905"),
+        cash_after=D("948.10195"),
+        exit="stop_loss",
+    )
+    assert result.fills[0].exit is None  # the strategy's buy
+    # The strategy's own SELL (candle 4) finds nothing left to sell.
+    assert [(s.signal_ts, s.reason) for s in result.skipped] == [(at(4), "nothing to sell")]
+
+
+def test_a_stop_exit_pays_slippage_like_any_fill() -> None:
+    # Bought at 100 x 1.01 = 101: the 5% stop sits at 95.95. Sold at 95.95 x 0.99 = 94.9905.
+    result = stopped(
+        Stops(stop_loss=Percent(percent=D(5))),
+        hl(2, "100", "100", "100", "100"),
+        hl(3, "98", "99", "94", "96"),
+        hl(4, "96", "96", "96", "96"),
+        slippage_rate=D("0.01"),
+    )
+
+    assert [(f.side, f.price, f.exit) for f in result.fills] == [
+        ("buy", D(101), None),
+        ("sell", D("94.9905"), "stop_loss"),
+    ]
+
+
+def test_a_stop_can_fire_on_the_candle_the_buy_filled() -> None:
+    # Filled at candle 2's open of 100; its low of 94 is through the 95 stop already.
+    result = stopped(
+        Stops(stop_loss=Percent(percent=D(5))),
+        hl(2, "100", "100", "94", "96"),
+        hl(3, "96", "96", "96", "96"),
+    )
+
+    assert [(f.ts, f.side, f.price) for f in result.fills] == [
+        (at(2), "buy", D(100)),
+        (at(2), "sell", D(95)),
+    ]
+
+
+def test_a_take_profit_sells_at_its_level() -> None:
+    # 10% above 100: 110, reached by candle 3's high of 111.
+    result = stopped(
+        Stops(take_profit=Percent(percent=D(10))),
+        hl(2, "100", "102", "99", "101"),
+        hl(3, "105", "111", "104", "108"),
+        hl(4, "108", "108", "108", "108"),
+    )
+
+    assert [(f.side, f.price, f.exit) for f in result.fills][1] == ("sell", D(110), "take_profit")
+    assert result.final_cash == D(1100)  # 10 x 110, no fees or slippage here
+
+
+def test_a_trailing_stop_follows_the_price_up_then_sells() -> None:
+    # 10% trail. Candle 2 fills at 100, high 110: stop 99 after it. Candle 3's high of 120:
+    # 108 after it (its low of 107 is checked against 99). Candle 4's low of 106: out at 108.
+    result = stopped(
+        Stops(trailing=Percent(percent=D(10))),
+        hl(2, "100", "110", "100", "108"),
+        hl(3, "108", "120", "107", "118"),
+        hl(4, "115", "116", "106", "107"),
+        hl(5, "107", "107", "107", "107"),
+    )
+
+    assert [(f.ts, f.side, f.price, f.exit) for f in result.fills] == [
+        (at(2), "buy", D(100), None),
+        (at(4), "sell", D(108), "trailing_stop"),
+    ]
+
+
+def test_without_an_atr_there_is_no_buy() -> None:
+    # Flat candles have an ATR of 0: an ATR stop can't be placed, so the buy is skipped
+    # rather than opened without the stop it was told to have.
+    candles = flat(range(16))
+    strategy = script(buys=(13,))
+    stops = Stops(stop_loss=AtrMultiple(multiple=D(2)), atr_period=2)  # needs 13 candles
+
+    result = run_backtest(strategy, candles, config(strategy, 13, 16, stops=stops))
+
+    assert result.fills == []
+    assert [(s.side, s.reason) for s in result.skipped] == [
+        ("buy", "ATR is 0: no price movement to set a stop by")
+    ]
+
+
+def test_an_atr_stop_uses_the_atr_up_to_the_signal() -> None:
+    # Ranged candles (true range 2): ATR 2. 2 x 2 = 4 below the 100 entry: 96.
+    candles = [*(ranged(h) for h in range(15)), hl(15, "97", "98", "95", "96")]
+    strategy = script(buys=(13,))
+    stops = Stops(stop_loss=AtrMultiple(multiple=D(2)), atr_period=2)
+
+    result = run_backtest(strategy, candles, config(strategy, 13, 16, stops=stops))
+
+    assert [(f.ts, f.side, f.price, f.exit) for f in result.fills] == [
+        (at(14), "buy", D(100), None),
+        (at(15), "sell", D(96), "stop_loss"),
+    ]
+    assert warmup_needed(strategy, config(strategy, 13, 16, stops=stops)) == 13
 
 
 def test_buy_while_holding_and_sell_while_flat_are_skipped() -> None:

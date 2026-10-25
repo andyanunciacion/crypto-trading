@@ -10,6 +10,7 @@ from engine.backtest.models import BacktestConfig, BacktestResult, EquityPoint, 
 from engine.backtest.report import describe, drawdowns, equity_csv, report, sharpe, trades
 from engine.backtest.simulator import run_backtest
 from engine.exchange.models import Candle, MarketRules, OrderSide, Timeframe
+from engine.risk.stops import Percent, Stops
 from engine.strategies.ema_crossover import EmaCrossover, EmaCrossoverParams
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
@@ -296,6 +297,23 @@ def test_describe_shows_the_metrics() -> None:
     assert "max drawdown 8.67%" in text
     assert "2 trades, 50.0% won, profit factor 1.74" in text
     assert "still holding" not in text
+    assert "stops" not in text and "exits" not in text  # none in this run
+
+
+def test_describe_shows_the_stops_and_what_they_sold() -> None:
+    stops = Stops(stop_loss=Percent(percent=D(5)))
+    first, second, third, fourth = TWO_TRADES.fills
+    fills = [
+        first,
+        second.model_copy(update={"exit": "stop_loss"}),
+        third,
+        fourth.model_copy(update={"exit": "take_profit"}),
+    ]
+
+    text = describe(7, config(stops=stops), TWO_TRADES.model_copy(update={"fills": fills}))
+
+    assert 'stops {"stop_loss":{"kind":"percent","percent":"5"}' in text
+    assert "exits: 1 stop_loss, 1 take_profit" in text
 
 
 @pytest.mark.parametrize(

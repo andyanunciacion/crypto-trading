@@ -16,6 +16,7 @@ from engine.backtest.store import BacktestRunStore, candles_sha256
 from engine.exchange.models import Candle, MarketRules
 from engine.marketdata.store import CandleStore, Series
 from engine.risk.sizing import AtrRisk
+from engine.risk.stops import Percent, Stops
 from engine.strategies.ema_crossover import EmaCrossover, EmaCrossoverParams
 from shared.db.session import make_engine
 
@@ -115,6 +116,20 @@ async def test_an_atr_sized_run_stores_its_sizing_and_reproduces(stores: Stores)
 
     assert stored.config.sizing == sizing
     assert stored.warmup_candles == 85
+    assert await reproduce(stores.candles, stores.runs, run_id) == result
+
+
+async def test_a_run_with_stops_stores_them_and_reproduces(stores: Stores) -> None:
+    # A tight trailing stop on the wave: some trades end at a stop, not the strategy's sell.
+    stops = Stops(stop_loss=Percent(percent=Decimal(2)), trailing=Percent(percent=Decimal(1)))
+    config = CONFIG.model_copy(update={"stops": stops})
+    run_id, result = await backtest(stores.candles, stores.runs, STRATEGY, config)
+    assert any(f.exit is not None for f in result.fills)
+
+    stored = await stores.runs.load(run_id)
+
+    assert stored.config.stops == stops
+    assert stored.result == result
     assert await reproduce(stores.candles, stores.runs, run_id) == result
 
 

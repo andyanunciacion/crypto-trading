@@ -8,6 +8,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, JsonValue, mod
 from engine.exchange.models import MarketRules, OrderSide, Timeframe
 from engine.marketdata.timeframes import floor
 from engine.risk.sizing import ALL_IN, Sizing
+from engine.risk.stops import NO_STOPS, ExitKind, Stops
 from engine.strategies.base import Signal
 
 DEFAULT_INITIAL_CASH = Decimal(1000)  # in the quote currency (USDT)
@@ -49,6 +50,7 @@ class BacktestConfig(_Frozen):
     slippage_rate: Decimal = Field(ge=0, lt=1)  # see default_slippage()
     market_rules: MarketRules
     sizing: Sizing = ALL_IN  # how much each BUY spends (risk/sizing.py, D39)
+    stops: Stops = NO_STOPS  # when a position is sold regardless (risk/stops.py, D40)
 
     @model_validator(mode="after")
     def _range_is_whole_candles(self) -> Self:
@@ -67,6 +69,9 @@ class Fill(_Frozen):
     amount: Decimal = Field(gt=0)  # in the base currency
     fee: Decimal = Field(ge=0)  # in the quote currency
     cash_after: Decimal = Field(ge=0)
+    # The stop that sold it; None for a fill from a signal. Runs stored before stops
+    # existed have no such field and load as None.
+    exit: ExitKind | None = None
 
 
 class SkippedOrder(_Frozen):
