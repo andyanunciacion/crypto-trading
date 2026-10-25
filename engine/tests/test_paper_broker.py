@@ -9,12 +9,13 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import get_args
+from typing import Any, get_args
 
 import pytest
 from pydantic import JsonValue
 from sqlalchemy import URL, func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine
+from structlog.testing import capture_logs
 
 from engine.brokers.base import (
     BrokerFill,
@@ -398,6 +399,64 @@ async def test_a_crash_in_the_middle_of_a_fill_writes_none_of_it(
     # So the restarted engine fills the rest once, not on top of a half-written fill.
     fills = await restarted.on_price(quote(ask="100.5"))
     assert [(f.price, f.amount) for f in fills] == [(d("101"), d("0.6"))]
+
+
+# --- Concurrency -----------------------------------------------------------------------
+
+
+async def test_a_quote_that_moves_while_a_new_order_fills_doesnt_break_it(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The 24-hour run's race: while a new order's first fill waits on the database, the
+    # price feed handles a quote whose ask moved. It can't see the uncommitted order.
+    setup.quotes.price = quote(ask="100", ask_size="0.4")
+    real = setup.broker._update_position
+    meanwhile: list[list[BrokerFill]] = []
+
+    async def interleaved(*args: Any) -> None:
+        meanwhile.append(await setup.broker.on_price(quote(ask="100.5", ask_size="3")))
+        await real(*args)
+
+    monkeypatch.setattr(setup.broker, "_update_position", interleaved)
+    with capture_logs() as logs:
+        placed = await setup.broker.place_order(BOT, order("buy", "1", "101"), REASON)
+    monkeypatch.undo()
+
+    assert meanwhile == [[]]
+    assert (placed.status, placed.filled) == ("open", d("0.4"))
+    filled = [e for e in logs if e["event"] == "broker.order.filled"]
+    assert [d(e["taken_at_best"]) for e in filled] == [d("0.4")]
+    # Still taking, and nothing counted at 100.5 yet: the rest fills there.
+    fills = await setup.broker.on_price(quote(ask="100.5", ask_size="3"))
+    assert [(f.price, f.amount) for f in fills] == [(d("100.5"), d("0.6"))]
+    # Paid 0.4 x 100 + 0.04 fee + 0.6 x 100.5 + 0.0603 fee = 100.4003; 1000 - 100.4003.
+    assert await setup.broker.balances(BOT) == {"USDT": usdt("899.5997"), "BTC": btc("1")}
+
+
+async def test_a_rolled_back_order_leaves_nothing_behind(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    setup.quotes.price = quote(ask="100", ask_size="0.4")
+
+    async def killed(*args: object) -> None:
+        raise RuntimeError("killed")
+
+    monkeypatch.setattr(setup.broker, "_update_position", killed)
+    with capture_logs() as logs, pytest.raises(RuntimeError, match="killed"):
+        await setup.broker.place_order(BOT, order("buy", "1", "101"), REASON)
+    monkeypatch.undo()
+
+    assert await setup.order_rows() == 0
+    assert await setup.broker.balances(BOT) == {"USDT": usdt("1000")}
+    rolled_back = [e for e in logs if e["event"] == "broker.order.rolled_back"]
+    assert [e["client_order_id"] for e in rolled_back] == ["b1-202610231200-b"]
+    # The same ID again, now below the 102 ask: it rests. The failed try crossed, but
+    # that mustn't make this one a taker, so it fills at its 101 limit, not the ask.
+    setup.quotes.price = quote(ask="102")
+    placed = await setup.broker.place_order(BOT, order("buy", "1", "101"), REASON)
+    assert (placed.status, placed.filled) == ("open", d("0"))
+    fills = await setup.broker.on_price(quote(ask="100.5"))
+    assert [(f.price, f.amount) for f in fills] == [(d("101"), d("1"))]
 
 
 # --- Client order IDs ------------------------------------------------------------------

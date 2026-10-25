@@ -7,7 +7,9 @@ so a restarted engine carries on from where it was. Two things only matching nee
 in memory: which open orders are still taking (they crossed when placed), and how much
 of each side's best price our fills took. A restart forgets both, which is safe: a
 taking order then rests at its limit (pessimistic), and the size at the best price
-counts once more, on one quote at most.
+counts once more, on one quote at most. A match claims its size before its transaction
+commits, so a rolled-back fill leaves that size counted as taken until the best price
+moves: fewer fills for a moment, never more. A rolled-back order stops taking.
 
 Each operation is one database transaction: an order, its reservation and its first
 fills are written together or not at all. Balance and order rows are locked
@@ -18,7 +20,7 @@ the position, so concurrent operations queue up instead of deadlocking.
 A price older than `max_quote_age` doesn't fill anything: the order waits for a fresh one.
 """
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -125,8 +127,10 @@ class PaperBroker(Broker):
         self._fee_rate = fee_rate
         self._max_quote_age = max_quote_age
         self._clock = clock
-        # Matching state (module docstring). It's read and replaced with no `await` in
-        # between, so place_order and on_price can't both spend the same quote.
+        # Matching state (module docstring). Each match reads and replaces it with no
+        # `await` in between, so place_order and on_price can't both spend the same
+        # quote; that's also why it changes before the transaction commits. Anything
+        # after an `await` uses its own match's result, never these.
         self._taking: set[str] = set()  # client order IDs
         self._taken: dict[str, dict[OrderSide, Taken]] = {}  # by symbol
 
@@ -179,10 +183,26 @@ class PaperBroker(Broker):
             .on_conflict_do_nothing(index_elements=["client_order_id"])
             .returning(OrderRow.id)
         )
-        async with self._db.begin() as conn:
-            order_id = await conn.scalar(insert_order)
+        order_id = None
+        try:
+            async with self._db.begin() as conn:
+                order_id = await conn.scalar(insert_order)
+                if order_id is not None:
+                    await self._open(conn, order_id, bot_id, request, problems, quote, rules, now)
+        except Exception as exc:
             if order_id is not None:
-                await self._open(conn, order_id, bot_id, request, problems, quote, rules, now)
+                # Nothing of it was stored. A retry of the same ID is a new order, and
+                # must not inherit this try's taking.
+                self._taking.discard(request.client_order_id)
+                log.error(
+                    "broker.order.rolled_back",
+                    mode=self.mode,
+                    bot_id=bot_id,
+                    client_order_id=request.client_order_id,
+                    error=type(exc).__name__,
+                    detail=str(exc),
+                )
+            raise
         if order_id is None:
             return await self._duplicate(bot_id, request)
         return await self._get(request.client_order_id)
@@ -226,7 +246,9 @@ class PaperBroker(Broker):
             # Amounts are settled by now; applying them bot by bot locks balances in one
             # order everywhere, so concurrent updates for two symbols can't deadlock.
             for m in sorted(matched.matches, key=lambda m: orders[m.key].bot_id):
-                fills.append(await self._fill(conn, orders[m.key], m, now, quote=update))
+                fills.append(
+                    await self._fill(conn, orders[m.key], m, now, quote=update, taken=matched.taken)
+                )
         return fills
 
     async def cancel_order(self, client_order_id: str) -> BrokerOrder:
@@ -350,7 +372,7 @@ class PaperBroker(Broker):
         )
         self._taken[order.symbol] = matched.taken
         for m in matched.matches:
-            await self._fill(conn, order, m, now, quote=quote)
+            await self._fill(conn, order, m, now, quote=quote, taken=matched.taken)
 
     async def _fill(
         self,
@@ -360,8 +382,13 @@ class PaperBroker(Broker):
         now: datetime,
         *,
         quote: PriceUpdate,
+        taken: Mapping[OrderSide, Taken],
     ) -> BrokerFill:
-        """Record one fill: the fill row, the order's progress, balances and position."""
+        """Record one fill: the fill row, the order's progress, balances and position.
+
+        `taken` is the `Matched.taken` of the match that gave `m`. `self._taken` can't
+        stand in for it: another update may replace it while this awaits the database.
+        """
         base, quote_ccy = _currencies(order.symbol)
         funds = await self._lock_funds(conn, order.bot_id, [base, quote_ccy])
         settled = settle(
@@ -408,7 +435,7 @@ class PaperBroker(Broker):
             taking=taking,
             # All our orders have taken at this side's best price so far, this fill
             # included; it never exceeds the size the quote shows there.
-            taken_at_best=str(self._taken[order.symbol][order.side].amount),
+            taken_at_best=str(taken[order.side].amount),
             quote=quote.model_dump(mode="json"),
         )
         return fill
