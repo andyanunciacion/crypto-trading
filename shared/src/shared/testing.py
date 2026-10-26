@@ -15,7 +15,7 @@ import subprocess
 from collections.abc import Iterator
 
 import pytest
-from sqlalchemy import URL
+from sqlalchemy import URL, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncEngine
 from testcontainers.community.postgres import PostgresContainer
@@ -23,7 +23,7 @@ from testcontainers.core.container import DockerContainer
 from testcontainers.core.wait_strategies import LogMessageWaitStrategy
 
 from shared.db.migrate import upgrade
-from shared.db.models import BotRow
+from shared.db.models import BotRow, RiskSettingsRow
 
 # Keep both in step with compose.yaml.
 TIMESCALE_IMAGE = "timescale/timescaledb:2.31.0-pg16"
@@ -88,6 +88,24 @@ async def insert_bot(db: AsyncEngine, bot_id: int = 1) -> None:
     }
     async with db.begin() as conn:
         await conn.execute(insert(BotRow).values(row).on_conflict_do_nothing())
+
+
+async def set_limits(db: AsyncEngine, mode: str = "paper", **limits: object) -> None:
+    """Set `mode`'s row in `risk_settings` to exactly `limits`; any left out are off.
+
+    The test database is shared by the whole run, so tests whose orders go through a
+    RiskManager set the limits they need instead of relying on what's there. With no
+    `limits`, every limit is off: for tests that aren't about them.
+    """
+    row = {
+        "max_open_positions": None,
+        "max_coin_exposure_pct": None,
+        "max_daily_loss_pct": None,
+        "max_drawdown_pct": None,
+        **limits,
+    }
+    async with db.begin() as conn:
+        await conn.execute(update(RiskSettingsRow).where(RiskSettingsRow.mode == mode).values(row))
 
 
 @pytest.fixture(scope="session")

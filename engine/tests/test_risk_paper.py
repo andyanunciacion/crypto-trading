@@ -23,7 +23,7 @@ from engine.marketdata.prices import RedisPriceSink
 from engine.risk.paper import PaperDesk
 from shared.db.session import make_engine
 from shared.prices import PriceUpdate, price_channel
-from shared.testing import insert_bot
+from shared.testing import insert_bot, set_limits
 
 T0 = datetime(2026, 10, 23, 12, 0, tzinfo=UTC)
 BTC = "BTC/USDT"
@@ -73,8 +73,9 @@ class Rules:
 async def db(db_url: URL) -> AsyncIterator[AsyncEngine]:
     engine = make_engine(db_url)
     async with engine.begin() as conn:
-        await conn.execute(text("TRUNCATE orders, fills, positions, paper_balances"))
+        await conn.execute(text("TRUNCATE orders, fills, positions, paper_balances, risk_events"))
     await insert_bot(engine, BOT)
+    await set_limits(engine)
     yield engine
     await engine.dispose()
 

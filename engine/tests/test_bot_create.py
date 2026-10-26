@@ -38,8 +38,8 @@ async def db(db_url: URL) -> AsyncIterator[AsyncEngine]:
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "TRUNCATE bots, strategy_configs, orders, fills, positions, paper_balances"
-                " RESTART IDENTITY"
+                "TRUNCATE bots, strategy_configs, orders, fills, positions, paper_balances,"
+                " risk_events RESTART IDENTITY"
             )
         )
     yield engine

@@ -33,9 +33,10 @@ from engine.risk.sizing import ALL_IN, AtrRisk, PercentOfEquity, Sizing
 from engine.risk.stops import NO_STOPS, AtrMultiple, Percent, Stops
 from engine.strategies.base import Action, Position, Signal, Strategy, StrategyParams
 from engine.strategies.ema_crossover import EmaCrossover, EmaCrossoverParams
-from shared.db.models import BotRow, OrderRow
+from shared.db.models import BotRow, OrderRow, RiskEventRow
 from shared.db.session import make_engine
 from shared.prices import PriceUpdate
+from shared.testing import set_limits
 
 BTC = "BTC/USDT"
 T0 = datetime(2026, 10, 22, 12, 0, tzinfo=UTC)
@@ -218,9 +219,10 @@ async def setup(db_url: URL) -> AsyncIterator[Setup]:
         await conn.execute(
             text(
                 "TRUNCATE bots, strategy_configs, orders, fills, positions, paper_balances,"
-                " candles RESTART IDENTITY"
+                " risk_events, candles RESTART IDENTITY"
             )
         )
+    await set_limits(db)  # off, unless a test is about them
     clock = Clock()
     quotes = FakeQuotes(clock)
     market = FakeMarket()
@@ -265,8 +267,8 @@ async def test_a_bot_buys_on_a_cross_up_and_sells_on_the_cross_down(setup: Setup
     assert signal["ts"] == "2026-10-22T12:30:00Z"
     assert buy.reason["risk"] == {
         "decision": "allowed",
-        "rule": "pass_through",
-        "detail": "stub: every order is allowed until P4",
+        "rule": "within_limits",
+        "detail": "within every limit",
     }
     assert buy.reason["bot"] == {"id": bot.id, "name": "btc-ema"}
     assert buy.reason["strategy_config"] == {
@@ -708,6 +710,41 @@ async def test_a_stop_loss_sells_the_position(setup: Setup) -> None:
     # Flat again: later prices do nothing.
     await setup.price(runner, bid="90")
     assert await setup.order_rows() == 2
+
+
+async def test_a_limit_blocks_the_next_buy_but_never_the_stops_exit(setup: Setup) -> None:
+    bot, runner = await bought(setup, STOP5)
+    await set_limits(setup.db, max_daily_loss_pct=d("3"))
+
+    # Down 5% today at the 104.5 bid, past the 3% limit: the stop still sells.
+    await setup.price(runner, bid="104.5")
+    assert (await sold(setup, "b1-202610221230-x1"))[0] == "closed"
+
+    # Fast EMA crosses below at 90, then back above at 130: a BUY, blocked.
+    setup.tick()
+    setup.quotes.set(ask="90.1", bid="90")
+    await runner.on_closed(SERIES, candle(31, "90"))
+    setup.tick()
+    setup.quotes.set(ask="130", bid="129.9")
+    with capture_logs() as logs:
+        await runner.on_closed(SERIES, candle(32, "130"))
+
+    assert await setup.desk.risk.get_order("b1-202610221232-b") is None
+    (logged,) = [log for log in logs if log["event"] == "bot.order"]
+    assert (logged["decision"], logged["status"]) == ("blocked", None)
+    async with setup.db.connect() as conn:
+        events = (await conn.execute(select(RiskEventRow))).all()
+    # 1000 deposited, 948.1306264 left after the stop: down 51.8693736.
+    assert [(e.bot_id, e.client_order_id, e.rule, e.decision, e.detail) for e in events] == [
+        (
+            bot.id,
+            "b1-202610221232-b",
+            "daily_loss",
+            "blocked",
+            "down 51.8693736 today, 5.19% of 1000 at midnight Asia/Manila: the limit is 3%;"
+            " no buys until the next midnight",
+        )
+    ]
 
 
 async def test_a_trailing_stop_follows_the_bid_and_sells_on_the_turn(setup: Setup) -> None:

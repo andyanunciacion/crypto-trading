@@ -316,11 +316,13 @@ Tests: `test_stops.py` (`exit_at_price`, `after_price`, `reentry`), `test_bot_ex
 
 ### P4-3 · Limits
 `risk` `money` · Depends on: P4-1
-- [ ] Max open positions, max exposure per coin, max daily loss (resets at Asia/Manila midnight), max drawdown
-- [ ] `risk_settings` and `risk_events` tables
-- [ ] Never block a sell or a stop's exit (`reason.exit`): they only lower exposure (D40)
+- [x] Max open positions, max exposure per coin, max daily loss (resets at Asia/Manila midnight), max drawdown
+- [x] `risk_settings` and `risk_events` tables
+- [x] Never block a sell or a stop's exit (`reason.exit`): they only lower exposure (D40)
 
 **Done when:** a test per limit shows it blocks orders, and every block is written to `risk_events`.
+
+Done (D41): `test_each_limit_blocks_a_buy_and_records_it` (test_risk_manager.py) blocks a buy with each limit and checks its `risk_events` row. `test_limits.py` covers each rule's boundary, the resize and the daily-loss latch, and `test_a_limit_blocks_the_next_buy_but_never_the_stops_exit` (test_bot_runner.py) runs it end to end. The limits are account-wide and a buy over the coin cap is shrunk to fit. A retried client order ID gets its first answer (D35's open question).
 
 ### P4-4 · Circuit breakers
 `risk` · Depends on: P4-3

@@ -367,6 +367,7 @@ class BotRunner:
             **fields,
             client_order_id=planned.request.client_order_id,
             decision=outcome.decision.decision,
+            amount=None if order is None else str(order.amount),  # smaller if a limit shrank it
             status=None if order is None else order.status,
             filled=None if order is None else str(order.filled),
         )

@@ -1,4 +1,4 @@
-"""Paper trading for the bot runner: one PaperBroker behind one RiskManager (D35, D36).
+"""Paper trading for the bot runner: one PaperBroker behind one RiskManager (D35, D36, D41).
 
 Only engine/brokers/ and engine/risk/ may name a broker (test_broker_boundary.py), so
 the code that builds the PaperBroker, funds paper bots and feeds it live prices lives
@@ -21,6 +21,7 @@ from engine.backoff import Backoff
 from engine.brokers.paper import PaperBroker, RulesSource
 from engine.exchange.models import Balance
 from engine.marketdata.quotes import QuoteSource
+from engine.risk.account import PaperAccounts
 from engine.risk.manager import RiskManager
 from shared.prices import PriceUpdate, price_channel
 
@@ -38,9 +39,12 @@ class PaperDesk:
     ) -> None:
         if clock is None:
             self._broker = PaperBroker(db, quotes, rules)
+            accounts = PaperAccounts(db, quotes)
         else:
             self._broker = PaperBroker(db, quotes, rules, clock=clock)
-        self.risk = RiskManager(self._broker)
+            accounts = PaperAccounts(db, quotes, clock=clock)
+        # The limits count every paper bot together, as one account (D41).
+        self.risk = RiskManager(self._broker, accounts, rules)
 
     async def fund(self, bot_id: int, currency: str, amount: Decimal) -> Balance:
         """Give a paper bot virtual money."""
