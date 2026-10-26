@@ -26,7 +26,6 @@ from structlog.testing import capture_logs
 from engine.bots.runner import BotRunner
 from engine.bots.store import Bot, create_bot, load_bots, open_orders
 from engine.control.kill import run as run_cli
-from engine.control.kill import send
 from engine.control.listener import CommandListener
 from engine.exchange.models import Candle, MarketRules, OrderRequest, Timeframe
 from engine.marketdata.store import CandleStore, Series
@@ -35,7 +34,15 @@ from engine.risk.paper import PaperDesk
 from engine.risk.stops import NO_STOPS, Percent, Stops
 from engine.strategies.base import Position
 from engine.strategies.ema_crossover import EmaCrossover, EmaCrossoverParams
-from shared.commands import COMMANDS_KEY, Closing, KillCommand, KillReply, NotClosed, reply_key
+from shared.commands import (
+    COMMANDS_KEY,
+    Closing,
+    KillCommand,
+    KillReply,
+    NotClosed,
+    reply_key,
+    send,
+)
 from shared.db.models import BotRow, OrderRow, PositionRow, RiskEventRow
 from shared.db.session import make_engine
 from shared.prices import PriceUpdate

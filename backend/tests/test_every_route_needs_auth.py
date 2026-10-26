@@ -7,16 +7,14 @@ answers without a session fails here unless someone deliberately makes it public
 import re
 
 import pytest
-from fastapi import APIRouter, Depends, FastAPI, WebSocket
+from fastapi import FastAPI
 from fastapi.routing import APIWebSocketRoute, iter_route_contexts
 from fastapi.testclient import TestClient
-from sqlalchemy import URL
 from starlette.routing import WebSocketRoute
 from starlette.websockets import WebSocketDisconnect
 
-from backend.app import PUBLIC, create_app
-from backend.auth.deps import current_user
-from backend.testing import Api, api_settings
+from backend.app import PUBLIC
+from backend.testing import Api
 
 
 def test_only_health_and_sign_in_are_public() -> None:
@@ -54,21 +52,15 @@ async def test_every_other_route_refuses_a_caller_without_a_session(api: Api) ->
             checked.append(f"{method} {route.path}")
 
     # The routes there are today, so the walk can't silently check nothing.
-    assert {"GET /auth/me", "POST /auth/logout", "GET /docs", "GET /openapi.json"} <= set(checked)
-
-
-def test_a_websocket_on_a_guarded_router_is_closed_without_a_session(db_url: URL) -> None:
-    # There's no WebSocket route yet (P5-2 adds the feed): this one shows the guard works.
-    app = create_app(api_settings(), database_url=db_url)
-    guarded = APIRouter(dependencies=[Depends(current_user)])
-
-    @guarded.websocket("/ws/test")
-    async def feed(websocket: WebSocket) -> None:
-        await websocket.accept()
-        await websocket.send_text("hello")
-
-    app.include_router(guarded)
-    assert_websocket_refused(app, "/ws/test")
+    assert {
+        "GET /auth/me",
+        "POST /auth/logout",
+        "GET /docs",
+        "GET /openapi.json",
+        "GET /overview",
+        "WS /ws/overview",
+        "POST /engine/kill",
+    } <= set(checked)
 
 
 async def test_the_public_routes_answer_without_a_session(api: Api) -> None:

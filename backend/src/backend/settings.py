@@ -17,6 +17,11 @@ class ApiSettings(Settings):
     session_hours: int = Field(default=12, ge=1, le=24 * 7)
     # Browsers accept Secure cookies on http://localhost, so this stays on locally too.
     cookie_secure: bool = True
+    # How often the Overview WebSocket sends a fresh snapshot (D45). DESIGN §9 wants a
+    # price change on screen within 1 s.
+    feed_seconds: float = Field(default=1, gt=0, le=60)
+    # How long the kill switch waits for the engine's reply (as the CLI's default).
+    kill_reply_seconds: float = Field(default=10, gt=0, le=60)
 
     @field_validator("jwt_secret")
     @classmethod

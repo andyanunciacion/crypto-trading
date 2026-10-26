@@ -63,7 +63,7 @@
 ## Phase 5 — API and dashboard
 
 1. [x] **Auth:** single user, password + TOTP, JWT in an httpOnly cookie; Next.js login page. The user is made by a CLI on the server; every API route is protected unless listed as public; Tailwind + shadcn/ui set up; Playwright runs against a throwaway stack (D44).
-2. [ ] **Shell + Overview + kill switch:** header with mode badge, freshness and kill switch (UX1, UX2, UX5); Overview with equity, today's P&L, positions and bot status over WebSocket.
+2. [x] **Shell + Overview + kill switch:** header with mode badge, freshness and kill switch (UX1, UX2, UX5); Overview with equity, today's P&L, positions and bot status over WebSocket. The API builds the Overview from the database and Redis every second, with the RiskManager's own account math (moved to `shared/account.py`); the engine's heartbeat is in Redis; the kill switch sends the CLI's command (D45).
 3. [ ] **Market:** Lightweight Charts candles with indicators and trade markers; trade explanation panel (UX9).
 4. [ ] **Bots:** create, start, pause, stop; edit strategy params via a form generated from the schema; commands go to the engine via Redis.
 5. [ ] **Backtests:** run a backtest from the UI; view metrics, equity curve and trades.

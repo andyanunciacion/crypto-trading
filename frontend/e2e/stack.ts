@@ -1,7 +1,8 @@
 /**
  * The throwaway stack the end-to-end tests run against (D44): a separate Docker Compose
  * project with its own empty volumes and its own ports, so it never touches the real
- * database or user, and can run beside the dev stack. No engine: nothing trades.
+ * database or user, and can run beside the dev stack. Its engine runs one paper bot,
+ * for the kill switch test (D45), on live MEXC prices: it needs the internet.
  */
 import { execFileSync } from "node:child_process";
 import path from "node:path";

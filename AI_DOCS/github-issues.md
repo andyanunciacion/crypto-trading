@@ -407,10 +407,26 @@ Done (D44):
 
 ### P5-2 · App shell, Overview, kill switch
 `frontend` `backend` · Depends on: P5-1, P4-5
-- [ ] WebSocket feed for equity, P&L, positions, bot status, heartbeat
-- [ ] Header with mode badge, freshness, kill switch (UX1, UX2, UX5)
+- [x] WebSocket feed for equity, P&L, positions, bot status, heartbeat
+- [x] Header with mode badge, freshness, kill switch (UX1, UX2, UX5)
 
 **Done when:** a Playwright test triggers the kill switch from the UI and the engine stops all bots.
+
+Done (D45):
+- `e2e/kill-switch.spec.ts` (`pnpm e2e`): global setup creates the running paper bot `e2e-bot` and starts the engine (the e2e stack has one now). The test signs in and checks the header shows PAPER and a fresh engine, and the Overview shows `e2e-bot` running. It opens the kill switch and checks focus is on Cancel, then clicks "Stop all bots". The reply ("Stopped 1 bot: e2e-bot") comes within 2 s of the click (DESIGN §9), and the live table then shows the bot `stopped` with "kill switch from dashboard". It took 3.1 s in all; the login test passes too.
+- API tests:
+  - `test_overview.py` checks the account against the RiskManager's numbers (the same account as `test_risk_account.py`), positions at the bid and with no price, every bot with why it's paused or stopped, the heartbeat and streamed prices, and an empty account.
+  - It also checks the WebSocket resends with a new bid, and closes with 1008 after logout.
+  - `test_kill_route.py`: the command reaches the engine (source `dashboard`, the flag, the time) and its reply comes back; no reply means 504 with the command left queued; unknown fields get 422.
+  - `test_every_route_needs_auth.py` now requires `GET /overview`, `WS /ws/overview` and `POST /engine/kill`.
+- `shared/tests/test_account.py` covers the moved account math (written first). `engine/tests/test_risk_account.py` and `test_risk_manager.py` pass unchanged. `test_heartbeat.py` checks the Redis beat, and that the file still beats without Redis.
+- Checked by hand in Chrome (2026-10-26, a throwaway stack on port 3100):
+  - Tab and Enter open the dialog, with focus on Cancel.
+  - "Stop all + close positions" answered in 59 ms, and the bot showed `stopped` with the command.
+  - The light theme survives a reload.
+  - With the engine stopped, Engine and Prices turn STALE (icon and word) after ~35 s, and the kill switch says the command is queued after 10 s.
+  - No console errors.
+- Found: shadcn's destructive button fades to 60% red in dark mode; the kill switch now sets full red in both themes. The shadcn CLI resolved `@/lib/utils` to an npm package called `cn` and added it; reverted, and the components were written in the project's style instead.
 
 ### P5-3 · Market chart
 `frontend` · Depends on: P5-2

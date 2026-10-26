@@ -12,31 +12,15 @@ starts, before it loads any bot. Bots stay stopped until set running again by SQ
 import argparse
 import asyncio
 import sys
-import time
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from redis.asyncio import Redis
 
-from shared.commands import BLOCK_SECONDS, COMMANDS_KEY, KillCommand, KillReply, reply_key
+from shared.commands import KillCommand, send
 from shared.config import load_settings
 
 DEFAULT_TIMEOUT_SECONDS = 10
-
-
-async def send(redis: Redis, command: KillCommand, *, reply_within: float) -> KillReply | None:
-    """Queue `command` for the engine and wait up to `reply_within` seconds for its reply
-    (Redis does the waiting, in BLPOP, `BLOCK_SECONDS` at a time).
-
-    None if there's none by then; the command stays queued.
-    """
-    await redis.lpush(COMMANDS_KEY, command.model_dump_json())
-    deadline = time.monotonic() + reply_within
-    while (left := deadline - time.monotonic()) > 0:
-        popped = await redis.blpop([reply_key(command.id)], timeout=min(BLOCK_SECONDS, left))
-        if popped is not None:
-            return KillReply.model_validate_json(popped[1])
-    return None
 
 
 async def run(args: argparse.Namespace, redis_url: str) -> int:

@@ -6,17 +6,9 @@ stored for it: each buy works the numbers out from the trading tables, so they c
 drift from the trades themselves (as backtest metrics aren't stored, D30).
 
 In the quote currency of the symbol bought (USDT):
-- equity: every bot's cash, free and held by orders, plus each open position at the bid
-  (at its entry if there's never been a price, though then the stale data breaker
-  blocks the buy first).
-- the deposits: cash plus positions at cost always equals what was deposited plus every
-  realized P&L (brokers/ledger.py counts each fee when paid), so they're that minus the
-  P&L. Adding up the closed trades' P&L from there, in the order they closed, gives the
-  equity after each one; the peak is the highest of those. An open trade's loss still
-  shows, in equity.
-- day_start: the deposits plus the P&L of trades closed before midnight in Manila. An
-  open position's whole move since its entry counts as today's, also when it opened
-  before midnight: usually the stricter reading.
+- equity, peak and day_start: from shared/account.py, which the dashboard uses too
+  (D45). Each open position is valued at the bid, or at its entry if there's never been
+  a price (though then the stale data breaker blocks the buy first).
 - open positions: the open ones, plus buys still open for a bot with no position yet.
 - coin exposure: the coin's open positions at the bid, plus what's left of open buys of
   it at their limit.
@@ -39,7 +31,8 @@ from engine.brokers.base import Mode
 from engine.exchange.models import Timeframe
 from engine.marketdata.quotes import QuoteSource
 from engine.risk.breakers import Market, PriceSwings
-from engine.risk.limits import DAILY_LOSS, Account, RiskEvent, RiskSettings, manila_midnight
+from engine.risk.limits import DAILY_LOSS, Account, RiskEvent, RiskSettings
+from shared.account import ClosedTrade, Held, account_totals, manila_midnight
 from shared.db.models import (
     BotRow,
     OrderRow,
@@ -153,20 +146,16 @@ class PaperAccounts:
                 bid = None if latest is None else latest.bid
                 bids[key] = position.avg_entry if bid is None else bid
 
-        cash = Decimal(total_cash or 0)  # SUM of no rows is NULL
-        at_cost = sum((p.amount * p.avg_entry for p in held), Decimal(0))
+        totals = account_totals(
+            Decimal(total_cash or 0),  # SUM of no rows is NULL
+            [
+                Held(p.amount, p.avg_entry, p.realized_pnl, bids[(p.exchange, p.symbol)])
+                for p in held
+            ],
+            [ClosedTrade(c.realized_pnl, c.closed_at) for c in closed],
+            midnight,
+        )
         at_bid = [(p, p.amount * bids[(p.exchange, p.symbol)]) for p in held]
-        realized = sum((p.realized_pnl for p in held), Decimal(0)) + sum(
-            (c.realized_pnl for c in closed), Decimal(0)
-        )
-        deposits = cash + at_cost - realized
-        peak = running = deposits
-        for trade in closed:
-            running += trade.realized_pnl
-            peak = max(peak, running)
-        day_start = deposits + sum(
-            (c.realized_pnl for c in closed if c.closed_at < midnight), Decimal(0)
-        )
 
         holding = {(p.bot_id, p.symbol) for p in held}
         opening = {(b.bot_id, b.symbol) for b in buys} - holding
@@ -177,9 +166,9 @@ class PaperAccounts:
             Decimal(0),
         )
         return Account(
-            equity=cash + sum((value for _, value in at_bid), Decimal(0)),
-            peak=peak,
-            day_start=day_start,
+            equity=totals.equity,
+            peak=totals.peak,
+            day_start=totals.day_start,
             open_positions=len(holding) + len(opening),
             coin_exposure=exposure,
             daily_loss_hit=daily_loss_hit,

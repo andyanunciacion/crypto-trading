@@ -25,7 +25,6 @@ them: a bot that isn't running, a stale price or a price spike blocks a buy firs
 """
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Literal, Self
 
@@ -39,8 +38,6 @@ Decision = Literal["allowed", "blocked", "resized"]
 
 # The daily loss rule's name: its blocks in `risk_events` keep it hit until midnight.
 DAILY_LOSS = "daily_loss"
-# Manila is UTC+8 all year: the Philippines has had no daylight saving since 1978.
-MANILA = timezone(timedelta(hours=8), "Asia/Manila")
 # The longest spike window: how much price history the breakers keep (breakers.py).
 MAX_SPIKE_MINUTES = 60
 
@@ -142,11 +139,6 @@ def check_buy(
         if blocked is not None:
             return Checked(blocked, None)
     return _coin_exposure(settings, account, request, rules)
-
-
-def manila_midnight(now: datetime) -> datetime:
-    """When `now`'s day began in Manila: when the daily loss starts again."""
-    return now.astimezone(MANILA).replace(hour=0, minute=0, second=0, microsecond=0)
 
 
 def _drawdown(settings: RiskSettings, account: Account) -> RiskDecision | None:

@@ -1,9 +1,9 @@
 """Commands to the engine over Redis, and its replies (D43).
 
 The engine obeys these even when the API is down: anything that can reach Redis can
-send one (the engine's own CLI now; the API and Telegram later).
+send one (the engine's own CLI, the dashboard through the API; Telegram later).
 
-A sender `LPUSH`es the command's JSON onto `COMMANDS_KEY`, then `BLPOP`s
+A sender (`send()`) `LPUSH`es the command's JSON onto `COMMANDS_KEY`, then `BLPOP`s
 `reply_key(command.id)` for the engine's answer, `BLOCK_SECONDS` at a time. The engine
 pops commands one at a time (`BRPOP`, oldest first), so a command sent while it's
 restarting waits in the list and is applied before any bot is loaded. It pushes the
@@ -14,12 +14,14 @@ The only command so far is the kill switch: stop every bot, cancel every open or
 and, if asked, sell every open position.
 """
 
+import time
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 from uuid import UUID, uuid4
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from redis.asyncio import Redis
 
 COMMANDS_KEY = "engine:commands"
 REPLY_TTL_SECONDS = 3600
@@ -84,3 +86,18 @@ class KillReply(_Frozen):
     closing: list[Closing] = Field(default_factory=list)
     not_closed: list[NotClosed] = Field(default_factory=list)
     took_ms: int  # from receiving the command to this reply
+
+
+async def send(redis: Redis, command: KillCommand, *, reply_within: float) -> KillReply | None:
+    """Queue `command` for the engine and wait up to `reply_within` seconds for its reply
+    (Redis does the waiting, in BLPOP, `BLOCK_SECONDS` at a time).
+
+    None if there's none by then; the command stays queued.
+    """
+    await redis.lpush(COMMANDS_KEY, command.model_dump_json())
+    deadline = time.monotonic() + reply_within
+    while (left := deadline - time.monotonic()) > 0:
+        popped = await redis.blpop([reply_key(command.id)], timeout=min(BLOCK_SECONDS, left))
+        if popped is not None:
+            return KillReply.model_validate_json(popped[1])
+    return None

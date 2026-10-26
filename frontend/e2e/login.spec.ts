@@ -1,14 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { totp } from "./totp";
-
-/** The e2e user's password and TOTP secret, made by global-setup.ts. */
-function credentials(): { password: string; secret: string } {
-  const password = process.env.E2E_PASSWORD;
-  const secret = process.env.E2E_TOTP_SECRET;
-  if (!password || !secret) throw new Error("run through `pnpm e2e`: global-setup makes the user");
-  return { password, secret };
-}
+import { credentials, freshCode } from "./auth";
 
 test("the API refuses a caller without a session", async ({ request }) => {
   const response = await request.get("/api/auth/me");
@@ -24,7 +16,7 @@ test("signs in with a password and a TOTP code, and out again", async ({ page, c
 
   await page.getByLabel("Username").fill("e2e");
   await page.getByLabel("Password").fill(password);
-  const code = totp(secret);
+  const code = await freshCode(secret);
   const wrong = `${code.slice(0, 5)}${(Number(code[5]) + 1) % 10}`;
   await page.getByLabel("Code").fill(wrong);
   await page.getByRole("button", { name: "Sign in" }).click();
@@ -36,7 +28,7 @@ test("signs in with a password and a TOTP code, and out again", async ({ page, c
   await expect(page.getByLabel("Code")).toHaveValue("");
   await expect(page.getByLabel("Code")).toBeFocused();
 
-  await page.getByLabel("Code").fill(totp(secret));
+  await page.getByLabel("Code").fill(code);
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page).toHaveURL("/");
   await expect(page.getByText("Signed in as e2e")).toBeVisible();

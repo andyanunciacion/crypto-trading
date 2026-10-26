@@ -48,3 +48,35 @@ export type Me = { username: string };
 export async function me(): Promise<Me> {
   return (await (await call("/auth/me")).json()) as Me;
 }
+
+/** The engine's answer to the kill switch (`shared/commands.py`). */
+export type KillReply = {
+  id: string;
+  ok: boolean;
+  error: string | null;
+  stopped: number[];
+  canceled: string[];
+  closing: {
+    bot_id: number;
+    symbol: string;
+    amount: string;
+    client_order_id: string | null;
+    status: string | null;
+    filled: string | null;
+  }[];
+  not_closed: { bot_id: number; symbol: string; reason: string }[];
+  took_ms: number;
+};
+
+/**
+ * The kill switch (D43, D45): stop every bot and cancel every open order, and with
+ * `closePositions` sell every position too. Throws an ApiError with status 504 if the
+ * engine didn't answer in time: the command then stays queued for when it starts.
+ */
+export async function kill(closePositions: boolean): Promise<KillReply> {
+  const response = await call("/engine/kill", {
+    method: "POST",
+    body: JSON.stringify({ close_positions: closePositions }),
+  });
+  return (await response.json()) as KillReply;
+}

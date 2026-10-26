@@ -2,8 +2,9 @@
 
 pyproject.toml loads it with `-p backend.testing`, as it does shared.testing.
 
-`api` is the real app (backend.app.create_app) on the throwaway test database, with a
-clock the test sets, called in-process over HTTPS (so the Secure cookie is sent back).
+`api` is the real app (backend.app.create_app) on the throwaway test database and Redis,
+with a clock the test sets, called in-process over HTTPS (so the Secure cookie is sent
+back).
 """
 
 from collections.abc import AsyncIterator
@@ -16,6 +17,7 @@ import pytest
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from pydantic import SecretStr
+from redis.asyncio import Redis
 from sqlalchemy import URL, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -41,15 +43,21 @@ class Clock:
         self.now += timedelta(seconds=seconds)
 
 
-def api_settings() -> ApiSettings:
-    """Settings for tests, with a fresh JWT secret and encryption key; nothing from .env."""
+def api_settings(redis_url: str = "redis://redis:6379/0") -> ApiSettings:
+    """Settings for tests, with a fresh JWT secret and encryption key; nothing from .env.
+
+    The feed sends a snapshot every 0.1 s and the kill switch waits 1 s, so tests are quick.
+    """
     return ApiSettings(
         _env_file=None,
         postgres_user="test",
         postgres_password=SecretStr("test"),
         postgres_db="test",
+        redis_url=redis_url,
         jwt_secret=SecretStr(Fernet.generate_key().decode()),  # 44 random characters
         encryption_key=SecretStr(Fernet.generate_key().decode()),
+        feed_seconds=0.1,
+        kill_reply_seconds=1,
     )
 
 
@@ -58,6 +66,7 @@ class Api:
     app: FastAPI
     client: httpx2.AsyncClient
     db: AsyncEngine
+    redis: Redis
     clock: Clock
     settings: ApiSettings
     secrets: Secrets
@@ -77,12 +86,17 @@ class Api:
 
 
 @pytest.fixture
-async def api(db_url: URL) -> AsyncIterator[Api]:
-    """The API with one user, `andy`, whose password is PASSWORD and secret TOTP_SECRET."""
+async def api(db_url: URL, redis_url: str) -> AsyncIterator[Api]:
+    """The API with one user, `andy`, whose password is PASSWORD and secret TOTP_SECRET.
+
+    Redis starts empty; `api.redis` is a client of the same one (bytes, like the engine's).
+    """
     db = make_engine(db_url)
     async with db.begin() as conn:
         await conn.execute(text("TRUNCATE users RESTART IDENTITY"))
-    settings = api_settings()
+    redis = Redis.from_url(redis_url)
+    await redis.flushdb()
+    settings = api_settings(redis_url)
     secrets = Secrets(settings.encryption_key)
     user_id = await create_user(db, secrets, "andy", PASSWORD, TOTP_SECRET, last_step=None)
     clock = Clock()
@@ -94,5 +108,6 @@ async def api(db_url: URL) -> AsyncIterator[Api]:
             transport=httpx2.ASGITransport(app=app), base_url="https://testserver"
         ) as client,
     ):
-        yield Api(app, client, db, clock, settings, secrets, user_id)
+        yield Api(app, client, db, redis, clock, settings, secrets, user_id)
+    await redis.aclose()
     await db.dispose()
