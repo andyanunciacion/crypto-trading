@@ -46,7 +46,7 @@ Login (password + TOTP)
 | Screen | Roadmap slice | Status |
 |---|---|---|
 | Login with TOTP | 5.1 | ✅ |
-| App shell + kill switch + Overview | 5.2 | ⬜ |
+| App shell + kill switch + Overview | 5.2 | ✅ |
 | Market chart with trade markers | 5.3 | ⬜ |
 | Bots list and detail (create/start/pause/stop, edit params) | 5.4 | ⬜ |
 | Backtests (run + results) | 5.5 | ⬜ |
@@ -76,7 +76,14 @@ A placeholder until (if ever) a brand is needed: shadcn/ui's neutral theme, syst
 ## 8. Design tokens & components
 
 - **Tokens:** shadcn/ui CSS variables in `frontend/app/globals.css` (Tailwind v4: no config file; `@theme inline` maps each variable to a utility). Semantic tokens `profit`, `loss`, `live`, `paper`, `stale` are in place (P5-1), in light and dark, e.g. `text-profit`, `bg-live`.
-- **Components:** shadcn/ui for the basics. Project components: `KillSwitch`, `ModeBadge`, `FreshnessIndicator`, `Money` (formats Decimal strings with currency and sign), `CandleChart` (Lightweight Charts wrapper with markers), `TradeExplainPanel`, `StrategyParamsForm` (rendered from the strategy's pydantic schema).
+- **Components:** shadcn/ui for the basics (`components/ui/`: button, card, input, label, badge, table, tooltip, alert-dialog). Project components (in `components/`; ✅ = built):
+  - ✅ `AppHeader`: name, nav, mode, freshness, kill switch, theme, sign-out.
+  - ✅ `KillSwitch` (UX1), `ModeBadge` (UX2), `FreshnessIndicator` (UX5).
+  - ✅ `Money` and `Percent`: format the API's Decimal strings with `Intl.NumberFormat`, which reads a numeric string exactly (no float), with the currency and, for P&L, a sign and color.
+  - ✅ `Timestamp` (UX7), `ThemeToggle` (UX8).
+  - ✅ `OverviewProvider`: the one WebSocket a screen's header and body share (D45).
+  - ⬜ `CandleChart` (Lightweight Charts wrapper with markers), `TradeExplainPanel`, `StrategyParamsForm` (rendered from the strategy's pydantic schema).
+- **Freshness cutoffs (UX5):** the engine is stale after 30 s without a heartbeat (as Docker's health check), a price after 10 s (the PaperBroker won't fill on an older one), and the feed itself after 5 s without a snapshot. A stale number is greyed out, with a warning icon and the word "stale". The prices shown are the oldest of the ones the engine streams, so a stuck stream can't hide behind a busy one.
 - Money arrives from the API as **strings**, not JSON numbers, so Decimal precision survives (D9).
 
 ## 9. Performance budget

@@ -18,11 +18,13 @@ from typing import Any
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse
+from redis.asyncio import Redis
 from sqlalchemy import URL
 
 from backend.auth import routes as auth_routes
 from backend.auth.crypto import Secrets
 from backend.auth.deps import current_user
+from backend.dashboard import routes as dashboard_routes
 from backend.settings import ApiSettings
 from shared.db.session import make_engine
 
@@ -69,9 +71,12 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.db = make_engine(database_url or settings.database_url)
+        # Live prices, the engine's heartbeat, and commands to the engine (D45).
+        app.state.redis = Redis.from_url(settings.redis_url)
         try:
             yield
         finally:
+            await app.state.redis.aclose()
             await app.state.db.dispose()
 
     # FastAPI serves its docs to anyone by default: off here, and served behind sign-in.
@@ -89,6 +94,7 @@ def create_app(
     protected = APIRouter(dependencies=[Depends(current_user)])
     protected.include_router(api_docs)
     protected.include_router(auth_routes.router)
+    protected.include_router(dashboard_routes.router)
 
     app.include_router(public)
     app.include_router(auth_routes.public)

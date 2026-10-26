@@ -1,8 +1,8 @@
 """Engine entry point. Run with `python -m engine`.
 
-Runs a heartbeat loop, so Docker can tell the worker is alive, and one live price
-stream per symbol (into Redis): PRICE_SYMBOLS, the bots' symbols, and every coin a
-paper position holds. Then it runs the bots that are "running" or "paused" in the
+Runs a heartbeat loop, so Docker and the dashboard (D45) can tell the worker is alive,
+and one live price stream per symbol (into Redis): PRICE_SYMBOLS, the bots' symbols,
+and every coin a paper position holds. Then it runs the bots that are "running" or "paused" in the
 database, on paper (D36, D42), and feeds live prices to the PaperBroker so resting
 orders fill. Bots are loaded once, at startup, and orders left
 open from before the engine started are cancelled first (D38).
@@ -14,7 +14,9 @@ Commands sent while it was down are carried out first, before any bot is loaded.
 import asyncio
 import contextlib
 import signal
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 import structlog
 from redis.asyncio import Redis
@@ -30,6 +32,7 @@ from engine.risk.kill import KillSwitch
 from engine.risk.paper import PaperDesk
 from shared.config import Settings, load_settings
 from shared.db.session import make_engine
+from shared.heartbeat import ENGINE_HEARTBEAT_KEY, EngineHeartbeat
 from shared.logs import configure_logging
 from shared.prices import PriceUpdate
 
@@ -40,18 +43,47 @@ HEARTBEAT_FILE = Path("/tmp/engine-heartbeat")
 log = structlog.get_logger()
 
 
-async def heartbeat(stop: asyncio.Event) -> None:
+async def heartbeat(
+    stop: asyncio.Event,
+    redis: Redis,
+    *,
+    mode: Literal["paper", "live"],
+    exchange: str,
+    symbols: list[str],
+    started_at: datetime,
+) -> None:
+    """Touch the file Docker's health check watches, and tell the dashboard (D45), every
+    beat: with the symbols whose prices it streams, so the dashboard knows which to
+    watch. Without Redis the file still beats: the engine itself is alive."""
     beat = 0
     while not stop.is_set():
         beat += 1
         # File I/O blocks; in a thread it can't stall the event loop.
         await asyncio.to_thread(HEARTBEAT_FILE.touch)
+        payload = EngineHeartbeat(
+            ts=datetime.now(UTC),
+            started_at=started_at,
+            mode=mode,
+            beat=beat,
+            exchange=exchange,
+            symbols=symbols,
+        )
+        try:
+            await redis.set(ENGINE_HEARTBEAT_KEY, payload.model_dump_json())
+        except Exception as exc:
+            log.warning(
+                "engine.heartbeat.redis_failed",
+                beat=beat,
+                error=type(exc).__name__,
+                detail=str(exc),
+            )
         log.info("engine.heartbeat", beat=beat)
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(stop.wait(), timeout=HEARTBEAT_INTERVAL_SECONDS)
 
 
 async def run(settings: Settings) -> None:
+    started_at = datetime.now(UTC)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     # Python running as PID 1 in a container ignores SIGTERM unless it has a handler,
@@ -104,7 +136,16 @@ async def run(settings: Settings) -> None:
 
             # A TaskGroup runs the tasks side by side and waits for all of them to end.
             async with asyncio.TaskGroup() as tasks:
-                tasks.create_task(heartbeat(stop))
+                tasks.create_task(
+                    heartbeat(
+                        stop,
+                        redis,
+                        mode=settings.mode,
+                        exchange=exchange.exchange_id,
+                        symbols=symbols,
+                        started_at=started_at,
+                    )
+                )
                 workers = [
                     tasks.create_task(PriceStream(exchange, sink, symbol).run())
                     for symbol in symbols

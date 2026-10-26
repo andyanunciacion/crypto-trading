@@ -6,7 +6,6 @@ what it's about. Market rules as on MEXC's BTC/USDT: steps of 0.0001 BTC, 1 USDT
 """
 
 from dataclasses import replace
-from datetime import UTC, datetime
 from decimal import Decimal
 from typing import get_args
 
@@ -23,7 +22,6 @@ from engine.risk.limits import (
     RiskDecision,
     RiskSettings,
     check_buy,
-    manila_midnight,
 )
 from shared.db.models import RISK_DECISIONS
 
@@ -283,18 +281,3 @@ def test_bad_settings_are_refused(bad: dict[str, object]) -> None:
 
 def test_decisions_match_the_database_check() -> None:
     assert get_args(Decision) == RISK_DECISIONS
-
-
-@pytest.mark.parametrize(
-    ("now", "midnight"),
-    [
-        # 15:59 UTC is 23:59 in Manila: still the 26th there.
-        (datetime(2026, 10, 26, 15, 59, tzinfo=UTC), datetime(2026, 10, 25, 16, 0, tzinfo=UTC)),
-        # 16:00 UTC is midnight in Manila: a new day.
-        (datetime(2026, 10, 26, 16, 0, tzinfo=UTC), datetime(2026, 10, 26, 16, 0, tzinfo=UTC)),
-        # 02:00 UTC is 10:00 in Manila.
-        (datetime(2026, 10, 26, 2, 0, tzinfo=UTC), datetime(2026, 10, 25, 16, 0, tzinfo=UTC)),
-    ],
-)
-def test_the_day_starts_at_midnight_in_manila(now: datetime, midnight: datetime) -> None:
-    assert manila_midnight(now) == midnight

@@ -445,6 +445,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "pyjwt" },
     { name = "pyotp" },
+    { name = "redis" },
     { name = "segno" },
     { name = "shared" },
     { name = "uvicorn", extra = ["standard"] },
@@ -462,6 +463,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.156.8" },
     { name = "pyjwt", specifier = ">=2.15.1" },
     { name = "pyotp", specifier = ">=2.10.0" },
+    { name = "redis", specifier = ">=8.1.0" },
     { name = "segno", specifier = ">=1.6.6" },
     { name = "shared", editable = "shared" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.54.0" },
@@ -2157,6 +2159,7 @@ dependencies = [
     { name = "alembic" },
     { name = "asyncpg" },
     { name = "pydantic-settings" },
+    { name = "redis" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "structlog" },
 ]
@@ -2166,6 +2169,7 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.20.1" },
     { name = "asyncpg", specifier = ">=0.32.0" },
     { name = "pydantic-settings", specifier = ">=2.16.1" },
+    { name = "redis", specifier = ">=8.1.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.1.6" },
     { name = "structlog", specifier = ">=26.1.0" },
 ]

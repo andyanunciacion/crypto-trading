@@ -9,6 +9,7 @@ dependencies = [
     "fastapi>=0.156.8",
     "pyjwt>=2.15.1",
     "pyotp>=2.10.0",
+    "redis>=8.1.0",
     "segno>=1.6.6",
     "shared",
     "uvicorn[standard]>=0.54.0",
