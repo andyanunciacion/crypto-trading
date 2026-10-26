@@ -9,6 +9,7 @@ from decimal import Decimal
 import pytest
 
 from engine.bots.exits import (
+    ExitCause,
     ExitOrder,
     Hold,
     Sell,
@@ -16,11 +17,11 @@ from engine.bots.exits import (
     Trail,
     Wait,
     exit_order_id,
+    next_exit,
     on_bid,
 )
 from engine.risk.stops import (
     AtrMultiple,
-    ExitKind,
     ExitState,
     Percent,
     RMultiple,
@@ -39,7 +40,7 @@ def levels(stops: Stops = SL5_TP10) -> ExitState:
     return state
 
 
-def exit_(status: str, limit: str, kind: ExitKind = "stop_loss") -> ExitOrder:
+def exit_(status: str, limit: str, kind: ExitCause = "stop_loss") -> ExitOrder:
     return ExitOrder(client_order_id="b1-202610221230-x1", status=status, limit=D(limit), kind=kind)
 
 
@@ -91,6 +92,34 @@ def test_once_a_stop_fired_the_position_is_sold_whatever_the_price() -> None:
     # with the bid back above the stop, what's left is sold, as by the same exit.
     cancelled = [exit_("canceled", "94.95", kind="trailing_stop")]
     assert on_bid(levels(), SL5_TP10, D(99), cancelled) == Sell("trailing_stop", again=True)
+
+
+@pytest.mark.parametrize(
+    ("status", "bid", "expected"),
+    [
+        ("open", "94.95", Wait()),  # at its limit: it can still fill
+        ("open", "94.94", Sell("kill_switch", again=True)),  # below it: place again
+        ("canceled", "99", Sell("kill_switch", again=True)),  # cancelled with some left
+        ("closed", "99", Sell("kill_switch", again=True)),  # filled, yet something's left
+    ],
+    ids=["reaching", "fell-below", "cancelled", "filled-not-flat"],
+)
+def test_once_an_exit_is_placed_the_rest_is_sold_by_the_same_cause(
+    status: str, bid: str, expected: Wait | Sell
+) -> None:
+    # The kill switch's exits (D43) carry on by the same rule as a stop's.
+    assert next_exit([exit_(status, "94.95", kind="kill_switch")], D(bid)) == expected
+
+
+def test_a_stopped_position_the_kill_switch_sold_from_keeps_selling_as_the_kill_switch() -> None:
+    # The kill switch took over from a stop's exit: the latest exit names the cause.
+    exits = [exit_("canceled", "94.95"), exit_("canceled", "93", kind="kill_switch")]
+    assert on_bid(levels(), SL5_TP10, D(120), exits) == Sell("kill_switch", again=True)
+
+
+def test_next_exit_needs_an_exit() -> None:
+    with pytest.raises(ValueError, match="no exit"):
+        next_exit([], D(99))
 
 
 def test_exit_ids_follow_the_buy_and_count_up() -> None:

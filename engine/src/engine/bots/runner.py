@@ -34,10 +34,14 @@ After the engine was down or offline (D38):
 - A bot acts only on a candle that closed less than one timeframe step ago. Older ones
   (all the candles missed in an outage arrive at once) just fill its window and cancel
   its leftovers (`bot.caught_up`): their signals are stale, and the price is not theirs.
+
+The kill switch (risk/kill.py, D43) stops bots with `stop()`: once whatever a bot is
+doing has finished, it never acts again, on a candle or a price. A series whose bots
+are all stopped ends its candle stream.
 """
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Collection, Mapping, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -51,6 +55,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from engine.backoff import Backoff
 from engine.backtest.models import DEFAULT_FEE_RATE, default_slippage
 from engine.bots.exits import (
+    ExitCause,
     Held,
     Sell,
     StopPlan,
@@ -71,7 +76,7 @@ from engine.marketdata.store import CandleStore, Series
 from engine.marketdata.timeframes import STEP, floor
 from engine.risk.manager import RiskManager
 from engine.risk.sizing import SIZING, atr_for, atr_of, lookback
-from engine.risk.stops import NO_STOPS, ExitKind, ExitState, NoLevels, levels_at_entry, reentry
+from engine.risk.stops import NO_STOPS, ExitState, NoLevels, levels_at_entry, reentry
 from engine.risk.stops import lookback as stops_lookback
 from engine.strategies.base import Signal
 from engine.strategies.runner import SignalRunner
@@ -125,6 +130,7 @@ class BotRunner:
         self._watched: dict[str, list[Bot]] = {}  # bots with stops, by symbol
         self._locks: dict[int, asyncio.Lock] = {}  # a bot's candle and prices take turns
         self._exit_skipped: dict[int, str] = {}  # bots whose exit can't be placed this candle
+        self._stopped: set[int] = set()  # bots the kill switch stopped: they never act again
         for bot in bots:
             # ATR sizing or stops may need more candles than the strategy: the runner keeps them.
             signals = SignalRunner(bot.strategy, bot.symbol, bot.timeframe, keep=_atr_window(bot))
@@ -222,6 +228,8 @@ class BotRunner:
         for running in self._series[series]:
             try:
                 async with self._locks[running.bot.id]:
+                    if running.bot.id in self._stopped:
+                        continue
                     self._exit_skipped.pop(running.bot.id, None)  # a new candle tries again
                     if closed_ago < step:
                         await self._step(running, candle)
@@ -251,6 +259,8 @@ class BotRunner:
                 continue  # acting on its candle; the next price checks again
             try:
                 async with lock:
+                    if bot.id in self._stopped:
+                        continue
                     await self._watch(bot, update, update.bid)
             except Exception as exc:
                 log.error(
@@ -262,6 +272,21 @@ class BotRunner:
                     detail=str(exc),
                 )
 
+    async def stop(self, bot_ids: Collection[int]) -> list[int]:
+        """Stop the bots in `bot_ids` that this runner runs (the kill switch, D43).
+
+        Each one first finishes what it's doing (a candle, or a price), so when this
+        returns, none of them is acting or will act again. Returns the ones it stopped.
+        """
+        stopping = [i for i in bot_ids if i in self._locks and i not in self._stopped]
+        self._stopped.update(stopping)  # first, so nothing new starts while we wait
+        for bot_id in stopping:
+            async with self._locks[bot_id]:
+                pass  # its candle or price is done
+        if stopping:
+            log.info("bots.stopped", bot_ids=stopping)
+        return stopping
+
     # --- Internals ----------------------------------------------------------------------
 
     async def _run_series(self, series: Series) -> None:
@@ -269,6 +294,9 @@ class BotRunner:
         async with aclosing(self._stream(series.symbol, series.timeframe, last)) as closed:
             async for candle in closed:
                 await self.on_closed(series, candle)
+                if all(r.bot.id in self._stopped for r in self._series[series]):
+                    log.info("bots.series_ended", series=str(series), reason="every bot stopped")
+                    return
 
     async def _warm_up_until_done(self, series: Series) -> datetime:
         # The adapter already retried network errors; this covers a longer outage at startup.
@@ -525,7 +553,7 @@ def _reason(
 
 
 def _exit_reason(
-    bot: Bot, kind: ExitKind, update: PriceUpdate, levels: ExitState, attempt: int
+    bot: Bot, kind: ExitCause, update: PriceUpdate, levels: ExitState, attempt: int
 ) -> dict[str, JsonValue]:
     """What a stop's exit records: which stop, the levels and price it fired at."""
     return {
