@@ -340,10 +340,25 @@ The breakers block buys only. Settings are in `risk_settings` (migration 0009). 
 
 ### P4-5 · Kill switch (engine)
 `risk` `money` · Depends on: P4-3
-- [ ] Redis command channel; cancel orders, stop bots, optional close positions
-- [ ] Works with the API container stopped
+- [x] Redis command channel; cancel orders, stop bots, optional close positions
+- [x] Works with the API container stopped
 
 **Done when:** an integration test sends the command and every bot is stopped within seconds.
+
+Done (D43):
+- `test_a_kill_over_redis_stops_every_bot_within_seconds` (test_kill_switch.py) sends the kill over Redis, as the CLI does, to three bots: one holding a position with an open buy, one with an open buy, and a paused one. Within 5 s the reply arrives (`took_ms` < 2000), every bot is `stopped` with its `stopped_reason`, no order is open, and the position is kept. After that, neither the next candle nor a bid below the stop places an order, and the RiskManager blocks a stopped bot's buy.
+- The other tests in test_kill_switch.py cover:
+  - closing positions: selling until flat, carrying on a fired stop's exit numbering, and placing the exit again when the bid falls below it;
+  - a restart while closing;
+  - a position with no fresh price, and one it can't sell;
+  - a buy under way when the kill comes;
+  - a kill queued while the engine was down, drained before any bot loads;
+  - bad and failing commands, and the CLI (both its reply and its timeout);
+  - waiting past redis-py's 5 s read timeout.
+- `next_exit` (test_bot_exits.py) is the rule shared with the stops.
+- On the stack (2026-10-26), with `docker compose stop api`, two 1m test bots (8, 9) were running and bot 8 held 0.00124536 BTC. `python -m engine.control.kill --close-positions` replied `ok` in 197 ms. Both bots were stopped with the reason recorded, the position sold in one fill (`b8-202610260755-x1`), and no order was left open. A restart then logged `bots.loaded` `[]`.
+- The first try on the stack found a bug the tests had missed: redis-py's default 5 s read timeout broke every idle 5 s `BRPOP`, so the listener backed off and ran the kill 25 s late. Fixed: every blocking pop waits 1 s and loops (D43). Two tests now idle past 5 s.
+- Not done: tripping the kill switch automatically on a drawdown breach (left manual, D43).
 
 ---
 

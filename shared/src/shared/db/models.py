@@ -116,7 +116,8 @@ class BotRow(Base):
     """One strategy config running on one symbol and timeframe, in paper or live mode.
 
     The bot runner runs the bots whose status is "running" or "paused" when the engine
-    starts. A paused bot sells and keeps its stops, but its buys are blocked (D42).
+    starts. A paused bot sells and keeps its stops, but its buys are blocked (D42). The
+    kill switch sets every one of them "stopped" (D43).
     """
 
     __tablename__ = "bots"
@@ -149,6 +150,9 @@ class BotRow(Base):
     # Why and when it was paused (the error breaker, D42); NULL unless paused.
     paused_reason: Mapped[str | None] = mapped_column(Text)
     paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Why and when the kill switch stopped it (D43); NULL unless it did.
+    stopped_reason: Mapped[str | None] = mapped_column(Text)
+    stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class StrategyConfigRow(Base):

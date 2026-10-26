@@ -6,6 +6,9 @@ paper position holds. Then it runs the bots that are "running" or "paused" in th
 database, on paper (D36, D42), and feeds live prices to the PaperBroker so resting
 orders fill. Bots are loaded once, at startup, and orders left
 open from before the engine started are cancelled first (D38).
+
+It also listens for commands over Redis (control/listener.py, D43): the kill switch.
+Commands sent while it was down are carried out first, before any bot is loaded.
 """
 
 import asyncio
@@ -19,13 +22,16 @@ from redis.asyncio import Redis
 
 from engine.bots.runner import BotRunner
 from engine.bots.store import held_symbols, load_bots
+from engine.control.listener import CommandListener
 from engine.exchange.adapter import ExchangeAdapter
 from engine.marketdata.prices import PriceStream, RedisPriceSink
 from engine.marketdata.quotes import RedisQuotes
 from engine.marketdata.store import CandleStore
+from engine.risk.kill import KillSwitch
 from engine.risk.paper import PaperDesk
 from shared.config import Settings, load_settings
 from shared.db.session import make_engine
+from shared.prices import PriceUpdate
 
 HEARTBEAT_INTERVAL_SECONDS = 10
 # The Docker health check reads this file's modification time (see compose.yaml).
@@ -80,21 +86,36 @@ async def run(settings: Settings) -> None:
     try:
         # Public market data only: no API key, and trading stays off (D22).
         async with ExchangeAdapter() as exchange:
+            sink = RedisPriceSink(redis)
+            quotes = RedisQuotes(redis)
+            desk = PaperDesk(db, quotes, exchange)
+            kill_switch = KillSwitch(desk.risk, db, exchange, quotes)
+            commands = CommandListener(redis, kill_switch)
+            # Before the bots load: a kill sent while the engine was down stops them first.
+            await commands.drain()
             bots = await load_bots(db, exchange.exchange_id)
+            if not bots:
+                log.info("bots.none", hint="python -m engine.bots.create adds one")
             # dict.fromkeys drops repeats and keeps the order.
             bot_symbols = list(dict.fromkeys(bot.symbol for bot in bots))
             # Coins held by bots that aren't running too: equity values them at their bids,
             # and without a fresh price the stale data breaker blocks every buy (D42).
+            # The kill switch sells them at those prices too (D43).
             held = await held_symbols(db, mode="paper")
-            symbols = list(dict.fromkeys([*settings.price_symbols, *bot_symbols, *held]))
-            sink = RedisPriceSink(redis)
-            quotes = RedisQuotes(redis)
-            desk = PaperDesk(db, quotes, exchange)
-            runner = None
-            if bots:
-                runner = BotRunner(bots, desk.risk, exchange, quotes, CandleStore(db), db)
-                # Before prices are fed, so no order left from before can fill first (D38).
-                await runner.recover()
+            traded = list(dict.fromkeys([*bot_symbols, *held]))
+            symbols = list(dict.fromkeys([*settings.price_symbols, *traded]))
+            runner = BotRunner(bots, desk.risk, exchange, quotes, CandleStore(db), db)
+            kill_switch.runner = runner
+            # Before prices are fed, so no order left from before can fill first (D38).
+            await runner.recover()
+            # After that, as it cancelled their exits: they're placed again on the next price.
+            await kill_switch.resume()
+
+            async def on_price(update: PriceUpdate) -> None:
+                # Each price, after its fills: the stops (D40), then the kill switch's sells.
+                await runner.on_price(update)
+                await kill_switch.on_price(update)
+
             # A TaskGroup runs the tasks side by side and waits for all of them to end.
             async with asyncio.TaskGroup() as tasks:
                 tasks.create_task(heartbeat(stop))
@@ -102,18 +123,14 @@ async def run(settings: Settings) -> None:
                     tasks.create_task(PriceStream(exchange, sink, symbol).run())
                     for symbol in symbols
                 ]
-                if runner is not None:
-                    workers.append(tasks.create_task(runner.run()))
+                workers.append(tasks.create_task(runner.run()))
+                workers.append(tasks.create_task(commands.run()))
+                if traded:
                     workers.append(
                         tasks.create_task(
-                            # Stops are checked on each price, after its fills (D40).
-                            desk.feed_prices(
-                                redis, exchange.exchange_id, bot_symbols, then=runner.on_price
-                            )
+                            desk.feed_prices(redis, exchange.exchange_id, traded, then=on_price)
                         )
                     )
-                else:
-                    log.info("bots.none", hint="python -m engine.bots.create adds one")
                 await stop.wait()
                 for worker in workers:
                     worker.cancel()

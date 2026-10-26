@@ -17,12 +17,16 @@ left to fill. Otherwise a new high lifts the trailing stop, never lowering it.
 Each exit has its own client order ID, from the buy that opened the position: buy
 `b4-202610241429-b` is sold by `b4-202610241429-x1`, then `-x2` if that one was cancelled
 with something left, and so on. A retry never reuses a cancelled exit's ID.
+
+The kill switch closes positions with the same exits (risk/kill.py, D43), as kind
+`kill_switch`, so it carries on a stop's numbering, and from then on the position is
+sold until it's gone by the same rule (`next_exit`).
 """
 
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from pydantic import JsonValue
 from sqlalchemy import select, update
@@ -39,6 +43,9 @@ from engine.risk.stops import (
 )
 from engine.strategies.base import Position
 from shared.db.models import OrderRow, PositionRow
+
+# Why an exit sells: one of the stops, or the kill switch closing everything (D43).
+ExitCause = ExitKind | Literal["kill_switch"]
 
 
 @dataclass(frozen=True)
@@ -66,12 +73,12 @@ class StopPlan:
 
 @dataclass(frozen=True)
 class ExitOrder:
-    """An order a stop placed to sell a position."""
+    """An order a stop, or the kill switch, placed to sell a position."""
 
     client_order_id: str
     status: str
     limit: Decimal
-    kind: ExitKind
+    kind: ExitCause
 
 
 @dataclass(frozen=True)
@@ -172,8 +179,8 @@ async def load_held(db: AsyncEngine, bot_id: int, symbol: str, *, mode: Mode) ->
                 client_order_id=e.client_order_id,
                 status=e.status,
                 limit=e.price,
-                # Written by the bot runner as one of the three (`exit_reason`).
-                kind=cast(ExitKind, e.reason["exit"]["kind"]),
+                # Written by the bot runner or the kill switch as an ExitCause.
+                kind=cast(ExitCause, e.reason["exit"]["kind"]),
             )
             for e in exits
         ],
@@ -243,7 +250,7 @@ class Wait:
 class Sell:
     """Sell the whole position: a stop fired, or its exit needs placing again."""
 
-    kind: ExitKind
+    kind: ExitCause
     again: bool  # False the first time the stop fires
 
 
@@ -252,11 +259,7 @@ def on_bid(
 ) -> Hold | Trail | Wait | Sell:
     """What a new `bid` does to a position with these levels and exits so far."""
     if exits:
-        # The stop fired already: sell until the position is gone.
-        latest = exits[-1]
-        if latest.status == "open" and bid >= latest.limit:
-            return Wait()
-        return Sell(latest.kind, again=True)
+        return next_exit(exits, bid)  # a stop fired already: sell until the position is gone
     hit = exit_at_price(levels, bid)
     if hit is not None:
         return Sell(hit.kind, again=False)
@@ -264,6 +267,18 @@ def on_bid(
         return Hold()  # nothing follows the price
     moved = after_price(levels, stops, bid)
     return Hold() if moved == levels else Trail(moved)
+
+
+def next_exit(exits: Sequence[ExitOrder], bid: Decimal) -> Wait | Sell:
+    """What a new `bid` does to a position that's being sold, given its exits so far: the
+    latest is left to fill while it still reaches the bid, and otherwise what's left is
+    sold again, for the same cause."""
+    if not exits:
+        raise ValueError("no exit placed yet: nothing to carry on")
+    latest = exits[-1]
+    if latest.status == "open" and bid >= latest.limit:
+        return Wait()
+    return Sell(latest.kind, again=True)
 
 
 def _text(value: Decimal | None) -> str | None:

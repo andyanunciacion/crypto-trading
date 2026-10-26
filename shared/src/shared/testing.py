@@ -78,7 +78,8 @@ async def insert_bot(db: AsyncEngine, bot_id: int = 1) -> None:
     balances for it.
 
     Those tables' `bot_id` must name a real bot, and the RiskManager blocks the buys of
-    one that isn't running (D42), so a bot an earlier test paused is set running again.
+    one that isn't running (D42), so a bot an earlier test paused or stopped is set
+    running again.
     Tests that truncate `bots` should `RESTART IDENTITY`: this sets the id itself, which
     doesn't move the id sequence on.
     """
@@ -90,7 +91,13 @@ async def insert_bot(db: AsyncEngine, bot_id: int = 1) -> None:
         "timeframe": "1m",
         "status": "running",
     }
-    running = {"status": "running", "paused_reason": None, "paused_at": None}
+    running = {
+        "status": "running",
+        "paused_reason": None,
+        "paused_at": None,
+        "stopped_reason": None,
+        "stopped_at": None,
+    }
     async with db.begin() as conn:
         await conn.execute(
             insert(BotRow).values(row).on_conflict_do_update(index_elements=["id"], set_=running)
