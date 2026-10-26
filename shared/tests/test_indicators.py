@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from engine.strategies.indicators import Bands, atr, bollinger, ema, rsi
+from shared.indicators import Bands, atr, bollinger, ema, rsi
 
 
 def test_ema_matches_a_hand_calculation() -> None:

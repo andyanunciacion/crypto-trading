@@ -15,7 +15,10 @@ import { ApiError, me, signOut } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 // The screens built so far; the others join as their slices land (DESIGN §4).
-const NAV = [{ href: "/", label: "Overview" }];
+const NAV = [
+  { href: "/", label: "Overview" },
+  { href: "/market", label: "Market" },
+];
 
 /**
  * On every screen (DESIGN §4, UX principle 1): the mode, how fresh the data is, and the

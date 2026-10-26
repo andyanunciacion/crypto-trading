@@ -60,6 +60,9 @@ async def test_every_other_route_refuses_a_caller_without_a_session(api: Api) ->
         "GET /overview",
         "WS /ws/overview",
         "POST /engine/kill",
+        "GET /bots/{bot_id}/chart",
+        "WS /ws/bots/{bot_id}/chart",
+        "GET /orders/{order_id}/explain",
     } <= set(checked)
 
 

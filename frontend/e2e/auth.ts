@@ -1,5 +1,6 @@
 import { expect, type Page } from "@playwright/test";
 
+import { psql } from "./stack";
 import { totp } from "./totp";
 
 /** The e2e user's password and TOTP secret, made by global-setup.ts. */
@@ -11,18 +12,25 @@ export function credentials(): { password: string; secret: string } {
 }
 
 const STEP_MS = 30_000;
-// The last 30 s step whose code was used. The tests run one at a time in one worker
-// (playwright.config.ts), so this module, and this value, is shared by every spec.
+// The last 30 s step whose code this worker handed out (it may not be submitted yet).
 let lastStep = -1;
 
+/** The step of the last code the API accepted for the e2e user, from the database.
+ * Each Playwright project runs in its own worker, so memory alone can't know it. */
+function acceptedStep(): number {
+  const step = psql("SELECT coalesce(totp_last_step, -1) FROM users WHERE username = 'e2e';");
+  return Number(step);
+}
+
 /**
- * A TOTP code nobody has used yet. The API accepts each step's code once, so a second
- * sign-in in the same 30 s step waits for the next one.
+ * A TOTP code nobody has used yet. The API accepts each step's code once, so a sign-in
+ * in a step whose code was already used waits for the next one.
  */
 export async function freshCode(secret: string): Promise<string> {
+  const used = Math.max(lastStep, acceptedStep());
   let now = Date.now();
-  if (Math.floor(now / STEP_MS) <= lastStep) {
-    await new Promise((resolve) => setTimeout(resolve, (lastStep + 1) * STEP_MS - now + 500));
+  if (Math.floor(now / STEP_MS) <= used) {
+    await new Promise((resolve) => setTimeout(resolve, (used + 1) * STEP_MS - now + 500));
     now = Date.now();
   }
   lastStep = Math.floor(now / STEP_MS);

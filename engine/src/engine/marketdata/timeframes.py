@@ -1,19 +1,15 @@
 """How long each timeframe's candle lasts, and whether a candle has closed."""
 
 from datetime import UTC, datetime, timedelta
+from typing import get_args
 
 from engine.exchange.models import Candle, Timeframe
+from shared.candles import TIMEFRAME_STEPS
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
-STEP: dict[Timeframe, timedelta] = {
-    "1m": timedelta(minutes=1),
-    "5m": timedelta(minutes=5),
-    "15m": timedelta(minutes=15),
-    "1h": timedelta(hours=1),
-    "4h": timedelta(hours=4),
-    "1d": timedelta(days=1),
-}
+# The steps are in shared, so the dashboard's chart can tell a gap too (D46).
+STEP: dict[Timeframe, timedelta] = {tf: TIMEFRAME_STEPS[tf] for tf in get_args(Timeframe)}
 
 
 def floor(ts: datetime, timeframe: Timeframe) -> datetime:

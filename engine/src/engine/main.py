@@ -5,7 +5,8 @@ and one live price stream per symbol (into Redis): PRICE_SYMBOLS, the bots' symb
 and every coin a paper position holds. Then it runs the bots that are "running" or "paused" in the
 database, on paper (D36, D42), and feeds live prices to the PaperBroker so resting
 orders fill. Bots are loaded once, at startup, and orders left
-open from before the engine started are cancelled first (D38).
+open from before the engine started are cancelled first (D38). The candle each bot's
+series is forming goes to Redis too, for the dashboard's chart (D46).
 
 It also listens for commands over Redis (control/listener.py, D43): the kill switch.
 Commands sent while it was down are carried out first, before any bot is loaded.
@@ -25,6 +26,7 @@ from engine.bots.runner import BotRunner
 from engine.bots.store import held_symbols, load_bots
 from engine.control.listener import CommandListener
 from engine.exchange.adapter import ExchangeAdapter
+from engine.marketdata.forming import RedisFormingSink
 from engine.marketdata.prices import PriceStream, RedisPriceSink
 from engine.marketdata.quotes import RedisQuotes
 from engine.marketdata.store import CandleStore
@@ -122,7 +124,15 @@ async def run(settings: Settings) -> None:
             held = await held_symbols(db, mode="paper")
             traded = list(dict.fromkeys([*bot_symbols, *held]))
             symbols = list(dict.fromkeys([*settings.price_symbols, *traded]))
-            runner = BotRunner(bots, desk.risk, exchange, quotes, CandleStore(db), db)
+            runner = BotRunner(
+                bots,
+                desk.risk,
+                exchange,
+                quotes,
+                CandleStore(db),
+                db,
+                on_kline=RedisFormingSink(redis, exchange.exchange_id),
+            )
             kill_switch.runner = runner
             # Before prices are fed, so no order left from before can fill first (D38).
             await runner.recover()

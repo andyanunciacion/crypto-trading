@@ -1,4 +1,5 @@
-"""RedisPriceSink against a real Redis (a throwaway container, see shared/testing.py)."""
+"""RedisPriceSink and RedisFormingSink against a real Redis (a throwaway container, see
+shared/testing.py)."""
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -9,7 +10,10 @@ import pytest
 from redis.asyncio import Redis
 from redis.asyncio.client import PubSub
 
+from engine.exchange.models import Candle
+from engine.marketdata.forming import RedisFormingSink
 from engine.marketdata.prices import RedisPriceSink
+from shared.candles import FormingCandle, forming_key
 from shared.prices import PriceUpdate, price_channel, price_key
 
 BTC = "BTC/USDT"
@@ -60,3 +64,34 @@ async def test_latest_price_is_stored_and_published(redis: Redis) -> None:
         # Every update reaches subscribers, in order.
         assert await next_message(pubsub) == update("81819.48")
         assert await next_message(pubsub) == update("81819.47")
+
+
+async def test_the_forming_candle_is_stored_for_the_chart(redis: Redis) -> None:
+    received = datetime(2026, 10, 22, 12, 30, 5, tzinfo=UTC)
+    sink = RedisFormingSink(redis, "mexc", clock=lambda: received)
+    kline = Candle(
+        ts=T0,
+        open=Decimal("81800"),
+        high=Decimal("81900.5"),
+        low=Decimal("81750"),
+        close=Decimal("81819.48"),
+        volume=Decimal("12.345"),
+    )
+
+    await sink(BTC, "1h", kline)
+
+    stored = await redis.get(forming_key("mexc", BTC, "1h"))
+    assert stored is not None
+    assert FormingCandle.model_validate_json(stored) == FormingCandle(
+        exchange="mexc",
+        symbol=BTC,
+        timeframe="1h",
+        ts=T0,
+        open=Decimal("81800"),
+        high=Decimal("81900.5"),
+        low=Decimal("81750"),
+        close=Decimal("81819.48"),
+        volume=Decimal("12.345"),
+        received_at=received,
+    )
+    assert await redis.ttl(forming_key("mexc", BTC, "1h")) == -1  # readers judge its age

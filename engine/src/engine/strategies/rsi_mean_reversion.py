@@ -15,7 +15,7 @@ from pydantic import Field, model_validator
 
 from engine.exchange.models import Candle
 from engine.strategies.base import Action, Position, Signal, Strategy, StrategyParams
-from engine.strategies.indicators import rsi
+from shared.indicators import rsi
 
 
 class RsiMeanReversionParams(StrategyParams):

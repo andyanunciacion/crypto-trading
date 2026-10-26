@@ -1,7 +1,8 @@
 """Indicator math for strategies, in plain floats (D9 allows floats here, and only here).
 
 Hand-rolled rather than from a TA library (D28): each one is a few lines and tested
-against hand-worked values.
+against hand-worked values. In `shared` so the dashboard's chart draws the strategies'
+indicators with the same code (chart.py, D46).
 """
 
 import itertools
