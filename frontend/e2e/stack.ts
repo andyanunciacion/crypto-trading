@@ -13,11 +13,34 @@ export const FRONTEND_PORT = 3100;
 
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
 
+function stackEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, API_PORT: String(API_PORT), FRONTEND_PORT: String(FRONTEND_PORT) };
+}
+
+/** Runs SQL in the e2e stack's database; returns psql's unaligned, tuples-only output. */
+export function psql(sql: string): string {
+  return execFileSync(
+    "docker",
+    [
+      "compose",
+      "-p",
+      PROJECT,
+      "exec",
+      "-T",
+      "db",
+      "sh",
+      "-c",
+      'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tA',
+    ],
+    { cwd: REPO_ROOT, env: stackEnv(), input: sql, encoding: "utf8" },
+  ).trim();
+}
+
 /** `docker compose -p crypto-trading-e2e <args>` from the repo root, its output shown. */
 export function compose(args: string[], input?: string): void {
   execFileSync("docker", ["compose", "-p", PROJECT, ...args], {
     cwd: REPO_ROOT,
-    env: { ...process.env, API_PORT: String(API_PORT), FRONTEND_PORT: String(FRONTEND_PORT) },
+    env: stackEnv(),
     input,
     stdio: [input === undefined ? "ignore" : "pipe", "inherit", "inherit"],
   });

@@ -18,7 +18,7 @@ from structlog.testing import capture_logs
 from engine.backoff import Backoff
 from engine.exchange.errors import ExchangeNetworkError
 from engine.exchange.models import Candle, Timeframe
-from engine.marketdata.candle_stream import PAGE_LIMIT, CandleStream
+from engine.marketdata.candle_stream import PAGE_LIMIT, CandleStream, KlineHook
 
 BTC = "BTC/USDT"
 T0 = datetime(2026, 10, 22, 12, 0, tzinfo=UTC)
@@ -114,6 +114,8 @@ def make_stream(
     *,
     backoff: Backoff | None = None,
     stale_after: float = 1.0,
+    on_kline: KlineHook | None = None,
+    kline_timeout: float = 1.0,
 ) -> CandleStream:
     return CandleStream(
         exchange,
@@ -124,6 +126,8 @@ def make_stream(
         stale_after=stale_after,
         settle=0.0,
         fetch_retry=0.0,
+        on_kline=on_kline,
+        kline_timeout=kline_timeout,
     )
 
 
@@ -281,6 +285,55 @@ async def test_every_closed_candle_is_logged() -> None:
     (closed,) = [e for e in logs if e["event"] == "candles.live.closed"]
     assert closed["ts"] == at(1).isoformat()
     assert closed["close"] == "101"
+
+
+async def test_the_kline_hook_gets_the_newest_candle_of_every_update() -> None:
+    # For the dashboard's forming candle (D46): every update, open candle included.
+    exchange = FakeExchange([update(1), [*update(0), *update(1)], update(2)])
+    seen: list[tuple[str, Timeframe, Candle]] = []
+
+    async def hook(symbol: str, timeframe: Timeframe, candle: Candle) -> None:
+        seen.append((symbol, timeframe, candle))
+
+    got = await take(make_stream(exchange, on_kline=hook), 1)
+
+    assert got == [rest_candle(1)]  # what's traded is still REST's
+    assert seen == [(BTC, "1m", update(1)[0]), (BTC, "1m", update(1)[0]), (BTC, "1m", update(2)[0])]
+
+
+async def test_a_failing_kline_hook_never_disturbs_the_stream() -> None:
+    exchange = FakeExchange([update(1), update(1), update(2), update(3)])
+    calls = 0
+
+    async def hook(symbol: str, timeframe: Timeframe, candle: Candle) -> None:
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            raise ConnectionError("redis is down")
+
+    with capture_logs() as logs:
+        got = await take(make_stream(exchange, on_kline=hook), 2)
+
+    assert got == [rest_candle(1), rest_candle(2)]
+    assert not [e for e in logs if e["event"] == "candles.live.reconnecting"]
+    # Logged once while it keeps failing, not on every update; and when it works again.
+    (failed,) = [e for e in logs if e["event"] == "candles.forming.failed"]
+    assert failed["error"] == "ConnectionError"
+    assert [e["event"] for e in logs].count("candles.forming.recovered") == 1
+
+
+async def test_a_hung_kline_hook_is_given_up_on() -> None:
+    exchange = FakeExchange([update(1), update(2)])
+
+    async def hook(symbol: str, timeframe: Timeframe, candle: Candle) -> None:
+        await asyncio.Event().wait()  # never returns
+
+    with capture_logs() as logs:
+        got = await take(make_stream(exchange, on_kline=hook, kline_timeout=0.01), 1)
+
+    assert got == [rest_candle(1)]
+    (failed,) = [e for e in logs if e["event"] == "candles.forming.failed"]
+    assert failed["error"] == "TimeoutError"
 
 
 async def test_stopping_closes_the_socket() -> None:

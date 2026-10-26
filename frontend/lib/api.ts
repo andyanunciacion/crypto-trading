@@ -4,6 +4,8 @@
  * session cookie goes along by itself, and no CORS is needed (D44).
  */
 
+import type { Chart, TradeExplanation } from "@/lib/market";
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -47,6 +49,17 @@ export type Me = { username: string };
 
 export async function me(): Promise<Me> {
   return (await (await call("/auth/me")).json()) as Me;
+}
+
+/** A bot's Market chart (D46): its newest `limit` candles, indicators and trades. */
+export async function chart(botId: number, limit?: number): Promise<Chart> {
+  const query = limit === undefined ? "" : `?limit=${limit}`;
+  return (await (await call(`/bots/${botId}/chart${query}`)).json()) as Chart;
+}
+
+/** Why a trade happened (UX9): its signal, risk check and fills. */
+export async function explain(orderId: number): Promise<TradeExplanation> {
+  return (await (await call(`/orders/${orderId}/explain`)).json()) as TradeExplanation;
 }
 
 /** The engine's answer to the kill switch (`shared/commands.py`). */

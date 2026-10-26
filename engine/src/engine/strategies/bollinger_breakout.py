@@ -14,7 +14,7 @@ from pydantic import Field
 
 from engine.exchange.models import Candle
 from engine.strategies.base import Action, Position, Signal, Strategy, StrategyParams
-from engine.strategies.indicators import bollinger
+from shared.indicators import bollinger
 
 
 class BollingerBreakoutParams(StrategyParams):

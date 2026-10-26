@@ -29,7 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from engine.exchange.models import Candle, MarketRules, Timeframe
 from engine.marketdata.timeframes import STEP
-from engine.strategies.indicators import atr
+from shared.indicators import atr
 
 
 class _Frozen(BaseModel):

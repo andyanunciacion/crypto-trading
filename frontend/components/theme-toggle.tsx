@@ -14,10 +14,15 @@ function subscribe(changed: () => void): () => void {
 
 const isDark = () => document.documentElement.classList.contains("dark");
 
+/** Whether the dark theme is on, updated when it's toggled. */
+export function useDarkTheme(): boolean {
+  // The server renders dark, the default; the browser then reads the real class.
+  return useSyncExternalStore(subscribe, isDark, () => true);
+}
+
 /** Dark by default, with a light toggle (UX8); the choice is kept in this browser. */
 export function ThemeToggle() {
-  // The server renders dark, the default; the browser then reads the real class.
-  const dark = useSyncExternalStore(subscribe, isDark, () => true);
+  const dark = useDarkTheme();
 
   function toggle() {
     const next = !dark;

@@ -70,7 +70,7 @@ from engine.bots.orders import Skip, exit_order, order_for
 from engine.bots.store import Bot, open_orders
 from engine.brokers.base import client_order_id
 from engine.exchange.models import Balance, Candle, MarketRules, OrderSide, Timeframe
-from engine.marketdata.candle_stream import CandleSource, CandleStream, fetch_range
+from engine.marketdata.candle_stream import CandleSource, CandleStream, KlineHook, fetch_range
 from engine.marketdata.quotes import MAX_QUOTE_AGE, QuoteSource
 from engine.marketdata.store import CandleStore, Series
 from engine.marketdata.timeframes import STEP, floor
@@ -115,6 +115,7 @@ class BotRunner:
         db: AsyncEngine,
         *,
         stream: StreamFactory | None = None,
+        on_kline: KlineHook | None = None,
         clock: Callable[[], datetime] = _utcnow,
         fee_rate: Decimal = DEFAULT_FEE_RATE,
     ) -> None:
@@ -124,6 +125,7 @@ class BotRunner:
         self._candles = candles
         self._db = db
         self._stream = stream or self._live_stream
+        self._on_kline = on_kline  # the forming candle, for the dashboard's chart (D46)
         self._clock = clock
         self._fee_rate = fee_rate  # the fee the PaperBroker charges, left room for when buying
         self._series: dict[Series, list[_Running]] = {}
@@ -319,7 +321,9 @@ class BotRunner:
     def _live_stream(
         self, symbol: str, timeframe: Timeframe, last_closed: datetime
     ) -> AsyncGenerator[Candle]:
-        return CandleStream(self._market, symbol, timeframe, last_closed).closed()
+        return CandleStream(
+            self._market, symbol, timeframe, last_closed, on_kline=self._on_kline
+        ).closed()
 
     async def _cancel_leftovers(self, bot: Bot) -> list[str]:
         canceled = await open_orders(self._db, bot.id, mode=self._risk.mode)

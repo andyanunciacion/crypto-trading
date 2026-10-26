@@ -430,10 +430,31 @@ Done (D45):
 
 ### P5-3 · Market chart
 `frontend` · Depends on: P5-2
-- [ ] Lightweight Charts candles, indicators, trade markers
-- [ ] Trade explanation panel (UX9)
+- [x] Lightweight Charts candles, indicators, trade markers
+- [x] Trade explanation panel (UX9)
 
 **Done when:** live candles update on screen and clicking a trade marker shows its signal and risk decision.
+
+Done (D46):
+- `e2e/market.spec.ts` (`pnpm e2e`): one filled buy is written for `e2e-bot` in its newest stored candle. The test opens Market from the nav and waits for the forming candle to move (the chart's `data-last-bar`, since a canvas can't be read). It clicks the marker where the chart reports it drew it, and checks the panel's Signal section shows the signal's reason and its Risk check section shows "allowed". Escape closes the panel; the trades table's row opens it again from the keyboard. It runs as its own Playwright project before the others, as the kill switch test stops the bot. All 4 e2e tests pass (2026-10-26).
+- `shared/tests/test_chart.py`: each strategy's lines, each point over its own warm-up window, none while warming up or across a gap. `engine/tests/test_chart_parity.py`: for every registered strategy, the chart's lines equal its signals' `indicators` at every candle.
+- `test_candle_stream.py`: the `on_kline` hook gets every update's newest candle; a failing hook is logged once and never makes the stream reconnect; a hung one is given up on. `test_redis_sink.py` checks the forming candle in Redis.
+- `backend/tests/test_market.py`: candles with warm-up-backed lines, the forming candle only while newer, trades (signal, stop-loss, kill switch; unfilled orders and other bots' left out), 404/422, explanations (signal, resize with its event, exits, an old reason that doesn't fit), and the WebSocket (new candle with its point, forming, trades on change, 4404 for an unknown bot, 1008 after sign-out). `test_every_route_needs_auth.py` requires the three new routes.
+- Found running it: each Playwright project runs in its own worker, so `freshCode` couldn't remember the TOTP step another worker used, and the next sign-in reused it. It now reads `users.totp_last_step` from the e2e database.
+- Checked by hand in Chrome (2026-10-27, a throwaway stack on port 3100: `e2e-bot` with EMA crossover and `rsi-bot` with RSI, both on BTC/USDT 1h, 5,280 backfilled candles, three seeded trades):
+  - The chart draws both EMAs, volume, the forming candle (moving every second; "Live: forming candle 0 s ago") and the B and S SL markers. Its axis and crosshair read Manila time.
+  - The legend follows the cursor: OHLC and each line's value.
+  - A marker click opens the panel: the signal's reason and indicator values, `allowed`, the strategy and sizing; for the stop-loss exit, the bid, levels and fill.
+  - rsi-bot's resized buy shows the requested 0.0089 BTC against the placed 0.003 BTC, and the account it was checked against.
+  - The keyboard path: Tab goes from the bot picker, past TradingView's attribution link, to the newest trade; Enter opens it, Escape closes it.
+  - Dark and light themes re-color everything without a reload.
+  - With 5,000 candles (`?limit=5000`), the API answered in 240 ms (615 ms with RSI's 85-candle windows), and 2.4 s of scripted zooming and panning ran at 60 fps with no long tasks (DESIGN §9).
+  - With the engine stopped, the chart said "stale: the forming candle last moved 41 s ago", and the header turned STALE.
+  - No console errors.
+- It found three things:
+  - Closing the panel left focus on `<body>`. The panel has no Radix Trigger (a marker or a row opens it), and Radix only returns focus to a Trigger. It now returns focus to whatever opened it, and `market.spec.ts` checks the row is focused again.
+  - The RSI pane was squashed to about 12% of the chart. The panes are now set to 2:1.
+  - The page always loaded 1,000 candles, so the 5,000-candle budget couldn't be tried. `?limit=` (1 to 5,000) now passes through to the API.
 
 ### P5-4 · Bots page
 `frontend` `backend` · Depends on: P5-2, P3-3

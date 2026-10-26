@@ -20,5 +20,15 @@ export default defineConfig({
     baseURL: `http://localhost:${FRONTEND_PORT}`,
     trace: "retain-on-failure",
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: [
+    // First, while e2e-bot is running: the chart watches its live candles.
+    { name: "market", testMatch: "market.spec.ts", use: { ...devices["Desktop Chrome"] } },
+    // Then the rest, the kill switch among them, which stops the bot.
+    {
+      name: "chromium",
+      testIgnore: "market.spec.ts",
+      dependencies: ["market"],
+      use: { ...devices["Desktop Chrome"] },
+    },
+  ],
 });

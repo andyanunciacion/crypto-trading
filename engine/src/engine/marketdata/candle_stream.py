@@ -15,10 +15,15 @@ skipped, never made up (D25).
 Like the price stream (prices.py), any error or 30 s of silence drops the connection
 and reconnects after a backoff. Nothing is polled meanwhile: the first update after a
 reconnect fetches every candle that closed in between.
+
+An optional `on_kline` hook gets the newest candle of every update, open or not: the
+dashboard's chart draws it as the candle still forming (D46). It's never traded on.
+The hook can't disturb the stream: its errors are logged (once, until it works
+again) and swallowed, and one that takes over `kline_timeout` is given up on.
 """
 
 import asyncio
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from datetime import datetime
 from typing import Protocol
 
@@ -38,8 +43,13 @@ STALE_AFTER_SECONDS = 30.0
 SETTLE_SECONDS = 2.0
 FETCH_TRIES = 3  # how often to ask for a candle REST doesn't have yet, per close
 FETCH_RETRY_SECONDS = 2.0
+# The on_kline hook writes to Redis, normally in about a millisecond.
+KLINE_TIMEOUT_SECONDS = 1.0
 
 log = structlog.get_logger()
+
+# Called with each kline update's newest candle, which is usually still open.
+KlineHook = Callable[[str, Timeframe, Candle], Awaitable[None]]
 
 
 class CandleSource(Protocol):
@@ -100,6 +110,8 @@ class CandleStream:
         settle: float = SETTLE_SECONDS,
         fetch_tries: int = FETCH_TRIES,
         fetch_retry: float = FETCH_RETRY_SECONDS,
+        on_kline: KlineHook | None = None,
+        kline_timeout: float = KLINE_TIMEOUT_SECONDS,
     ) -> None:
         self._source = source
         self._symbol = symbol
@@ -113,6 +125,9 @@ class CandleStream:
         self._fetch_retry = fetch_retry
         # The open candle REST was last asked about: not again until a newer one opens.
         self._asked_at: datetime | None = None
+        self._on_kline = on_kline
+        self._kline_timeout = kline_timeout
+        self._kline_failing = False  # logged once when the hook starts failing
 
     async def closed(self) -> AsyncGenerator[Candle]:
         log.info(
@@ -162,7 +177,29 @@ class CandleStream:
                 attempts=self._backoff.attempts,
             )
             self._backoff.reset()
-        return max((c.ts for c in updates), default=None)
+        newest = max(updates, key=lambda c: c.ts, default=None)
+        if newest is not None and self._on_kline is not None:
+            await self._kline(self._on_kline, newest)
+        return None if newest is None else newest.ts
+
+    async def _kline(self, hook: KlineHook, candle: Candle) -> None:
+        try:
+            async with asyncio.timeout(self._kline_timeout):
+                await hook(self._symbol, self._timeframe, candle)
+        except Exception as exc:
+            if not self._kline_failing:
+                self._kline_failing = True
+                log.warning(
+                    "candles.forming.failed",
+                    symbol=self._symbol,
+                    timeframe=self._timeframe,
+                    error=type(exc).__name__,
+                    detail=str(exc),
+                )
+            return
+        if self._kline_failing:
+            self._kline_failing = False
+            log.info("candles.forming.recovered", symbol=self._symbol, timeframe=self._timeframe)
 
     async def _recover(self, exc: Exception) -> None:
         delay = self._backoff.next_delay()
