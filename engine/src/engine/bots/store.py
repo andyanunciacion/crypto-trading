@@ -19,7 +19,7 @@ from engine.risk.sizing import ALL_IN, SIZING, Sizing
 from engine.risk.stops import NO_STOPS, STOPS, Stops
 from engine.strategies.base import Strategy
 from engine.strategies.registry import build
-from shared.db.models import BotRow, OrderRow, StrategyConfigRow
+from shared.db.models import BotRow, OrderRow, PositionRow, StrategyConfigRow
 
 log = structlog.get_logger()
 
@@ -93,11 +93,13 @@ async def create_bot(
     return bot_id
 
 
-async def load_running_bots(db: AsyncEngine, exchange: str) -> list[Bot]:
-    """The bots with status "running" that this engine can run, oldest first.
+async def load_bots(db: AsyncEngine, exchange: str) -> list[Bot]:
+    """The bots with status "running" or "paused" that this engine can run, oldest first.
 
-    A bot it can't run is logged (`bot.refused`, with the reason) and left out, so one
-    bad row doesn't stop the others.
+    A paused bot (D42) still runs: its sells go through and its stops are watched, but
+    the RiskManager blocks its buys until it's set running again. A bot it can't run is
+    logged (`bot.refused`, with the reason) and left out, so one bad row doesn't stop
+    the others.
     """
     query = (
         select(
@@ -107,6 +109,7 @@ async def load_running_bots(db: AsyncEngine, exchange: str) -> list[Bot]:
             BotRow.symbol,
             BotRow.timeframe,
             BotRow.mode,
+            BotRow.status,
             BotRow.sizing,
             BotRow.stops,
             StrategyConfigRow.id.label("config_id"),
@@ -117,23 +120,26 @@ async def load_running_bots(db: AsyncEngine, exchange: str) -> list[Bot]:
         )
         .select_from(BotRow)
         .outerjoin(StrategyConfigRow, StrategyConfigRow.id == BotRow.active_strategy_config_id)
-        .where(BotRow.status == "running")
+        .where(BotRow.status.in_(("running", "paused")))
         .order_by(BotRow.id)
     )
     async with db.connect() as conn:
         rows = (await conn.execute(query)).all()
     bots: list[Bot] = []
+    statuses: dict[int, str] = {}
     for row in rows:
         try:
             bots.append(_bot(row, exchange))
         except ValueError as exc:  # includes pydantic's ValidationError for bad params
             log.error("bot.refused", bot_id=row.id, name=row.name, reason=str(exc))
+        statuses[row.id] = row.status
     log.info(
         "bots.loaded",
         bots=[
             {
                 "id": b.id,
                 "name": b.name,
+                "status": statuses[b.id],
                 "symbol": b.symbol,
                 "timeframe": b.timeframe,
                 "strategy": b.strategy.name,
@@ -144,6 +150,22 @@ async def load_running_bots(db: AsyncEngine, exchange: str) -> list[Bot]:
         ],
     )
     return bots
+
+
+async def held_symbols(db: AsyncEngine, *, mode: Mode) -> list[str]:
+    """The symbols of every open position in `mode`, stopped bots' included.
+
+    The engine streams their prices: the account's equity values each at its bid, and
+    a coin with no fresh price blocks every buy (the stale data breaker, D42).
+    """
+    query = (
+        select(PositionRow.symbol)
+        .where(PositionRow.mode == mode, PositionRow.closed_at.is_(None))
+        .distinct()
+        .order_by(PositionRow.symbol)
+    )
+    async with db.connect() as conn:
+        return list((await conn.scalars(query)).all())
 
 
 async def open_orders(db: AsyncEngine, bot_id: int | None = None, *, mode: Mode) -> list[str]:

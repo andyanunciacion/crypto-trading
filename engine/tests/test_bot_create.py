@@ -12,7 +12,7 @@ from sqlalchemy import URL, func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from engine.bots.create import create_paper_bot, parse_args
-from engine.bots.store import load_running_bots
+from engine.bots.store import load_bots
 from engine.exchange.adapter import ExchangeAdapter
 from engine.exchange.errors import ExchangeError
 from engine.exchange.models import Balance
@@ -78,7 +78,7 @@ async def test_creates_a_running_funded_paper_bot(
 ) -> None:
     bot_id = await create(db, adapter)
 
-    (bot,) = await load_running_bots(db, "mexc")
+    (bot,) = await load_bots(db, "mexc")
     assert (bot.id, bot.name, bot.symbol, bot.timeframe) == (bot_id, "btc-ema", "BTC/USDT", "1h")
     assert bot.strategy.params == EMA.params
     assert bot.sizing == ALL_IN  # the default: as before P4
@@ -92,7 +92,7 @@ async def test_creates_a_running_funded_paper_bot(
 async def test_a_bot_keeps_its_sizing(db: AsyncEngine, adapter: ExchangeAdapter) -> None:
     await create(db, adapter, sizing=PercentOfEquity(percent=Decimal(25)))
 
-    (bot,) = await load_running_bots(db, "mexc")
+    (bot,) = await load_bots(db, "mexc")
     assert bot.sizing == PercentOfEquity(percent=Decimal(25))
 
 
@@ -100,7 +100,7 @@ async def test_a_bot_keeps_its_stops(db: AsyncEngine, adapter: ExchangeAdapter) 
     stops = Stops(stop_loss=Percent(percent=Decimal(3)))
     await create(db, adapter, stops=stops)
 
-    (bot,) = await load_running_bots(db, "mexc")
+    (bot,) = await load_bots(db, "mexc")
     assert bot.stops == stops
 
 

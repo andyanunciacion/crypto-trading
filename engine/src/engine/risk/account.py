@@ -7,7 +7,8 @@ drift from the trades themselves (as backtest metrics aren't stored, D30).
 
 In the quote currency of the symbol bought (USDT):
 - equity: every bot's cash, free and held by orders, plus each open position at the bid
-  (at its entry if there's never been a price; a stale price is P4-4's to catch).
+  (at its entry if there's never been a price, though then the stale data breaker
+  blocks the buy first).
 - the deposits: cash plus positions at cost always equals what was deposited plus every
   realized P&L (brokers/ledger.py counts each fee when paid), so they're that minus the
   P&L. Adding up the closed trades' P&L from there, in the order they closed, gives the
@@ -20,19 +21,33 @@ In the quote currency of the symbol bought (USDT):
 - coin exposure: the coin's open positions at the bid, plus what's left of open buys of
   it at their limit.
 - whether the daily loss limit already blocked a buy today, from `risk_events`.
+
+The circuit breakers (breakers.py, D42) get the buying bot's status and timeframe, how
+old each price the buy relies on is, and the coin's recent swing from `PriceSwings`.
+The error breaker pauses a bot here, in `bots`.
 """
 
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import cast
 
-from sqlalchemy import exists, func, insert, select
+from sqlalchemy import exists, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from engine.brokers.base import Mode
+from engine.exchange.models import Timeframe
 from engine.marketdata.quotes import QuoteSource
+from engine.risk.breakers import Market, PriceSwings
 from engine.risk.limits import DAILY_LOSS, Account, RiskEvent, RiskSettings, manila_midnight
-from shared.db.models import OrderRow, PaperBalanceRow, PositionRow, RiskEventRow, RiskSettingsRow
+from shared.db.models import (
+    BotRow,
+    OrderRow,
+    PaperBalanceRow,
+    PositionRow,
+    RiskEventRow,
+    RiskSettingsRow,
+)
 
 
 def _utcnow() -> datetime:
@@ -43,14 +58,21 @@ class PaperAccounts:
     mode: Mode = "paper"
 
     def __init__(
-        self, db: AsyncEngine, quotes: QuoteSource, *, clock: Callable[[], datetime] = _utcnow
+        self,
+        db: AsyncEngine,
+        quotes: QuoteSource,
+        *,
+        clock: Callable[[], datetime] = _utcnow,
+        swings: PriceSwings | None = None,
     ) -> None:
         self._db = db
         self._quotes = quotes
         self._clock = clock
+        self._swings = swings or PriceSwings()  # filled by the price feed (PaperDesk)
 
     async def settings(self) -> RiskSettings:
-        """The limits in `risk_settings`, read fresh, so a change applies to the next buy.
+        """The limits and breakers in `risk_settings`, read fresh, so a change applies to
+        the next buy.
 
         A missing row is an error, not "no limits": the buy fails rather than going unchecked.
         """
@@ -59,6 +81,11 @@ class PaperAccounts:
             RiskSettingsRow.max_coin_exposure_pct,
             RiskSettingsRow.max_daily_loss_pct,
             RiskSettingsRow.max_drawdown_pct,
+            RiskSettingsRow.stale_after_candles,
+            RiskSettingsRow.max_failed_orders,
+            RiskSettingsRow.failed_orders_minutes,
+            RiskSettingsRow.spike_pct,
+            RiskSettingsRow.spike_minutes,
         ).where(RiskSettingsRow.mode == self.mode)
         async with self._db.connect() as conn:
             row = (await conn.execute(query)).one_or_none()
@@ -157,6 +184,64 @@ class PaperAccounts:
             coin_exposure=exposure,
             daily_loss_hit=daily_loss_hit,
         )
+
+    async def market(self, bot_id: int, symbol: str, settings: RiskSettings) -> Market:
+        """What the circuit breakers check a buy of `symbol` by `bot_id` against.
+
+        A bot missing from `bots` is an error: the buy fails rather than going unchecked.
+        """
+        async with self._db.connect() as conn:
+            bot = (
+                await conn.execute(
+                    select(
+                        BotRow.exchange, BotRow.timeframe, BotRow.status, BotRow.paused_reason
+                    ).where(BotRow.id == bot_id, BotRow.mode == self.mode)
+                )
+            ).one_or_none()
+            held = (
+                await conn.execute(
+                    select(PositionRow.exchange, PositionRow.symbol)
+                    .where(PositionRow.mode == self.mode, PositionRow.closed_at.is_(None))
+                    .distinct()
+                    .order_by(PositionRow.symbol)
+                )
+            ).all()
+        if bot is None:
+            raise LookupError(f"no {self.mode} bot {bot_id}")
+
+        now = self._clock()
+        # The coin bought, then every coin held: equity values each at its bid.
+        ages: dict[str, timedelta | None] = {}
+        for exchange, priced in [(bot.exchange, symbol), *((h.exchange, h.symbol) for h in held)]:
+            if priced not in ages:
+                latest = await self._quotes.latest(exchange, priced)
+                ages[priced] = None if latest is None else now - latest.ts
+        minutes = settings.spike_minutes
+        swing = (
+            None
+            if minutes is None
+            else self._swings.swing(bot.exchange, symbol, now - timedelta(minutes=minutes))
+        )
+        return Market(
+            status=bot.status,
+            paused_reason=bot.paused_reason,
+            timeframe=cast(
+                Timeframe, bot.timeframe
+            ),  # the table's check constraint allows no other
+            price_ages=ages,
+            swing=swing,
+        )
+
+    async def pause(self, bot_id: int, reason: str) -> bool:
+        """Pause a running bot, saying why (the error breaker). False if it wasn't running."""
+        async with self._db.begin() as conn:
+            paused = await conn.scalar(
+                update(BotRow)
+                .where(BotRow.id == bot_id, BotRow.mode == self.mode, BotRow.status == "running")
+                .values(status="paused", paused_reason=reason, paused_at=self._clock())
+                .returning(BotRow.id)
+            )
+        return paused is not None
 
     async def record(self, event: RiskEvent) -> None:
         """Write a block or resize to `risk_events`."""

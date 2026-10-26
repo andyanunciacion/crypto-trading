@@ -2,7 +2,8 @@
 
 Only engine/brokers/ and engine/risk/ may name a broker (test_broker_boundary.py), so
 the code that builds the PaperBroker, funds paper bots and feeds it live prices lives
-here. The bot runner only ever gets `desk.risk`.
+here. The bot runner only ever gets `desk.risk`. Each price fed is also noted in
+`desk.swings`, for the spike breaker (D42).
 
 One broker serves every paper bot: all its state is in the database, keyed by bot.
 """
@@ -22,6 +23,7 @@ from engine.brokers.paper import PaperBroker, RulesSource
 from engine.exchange.models import Balance
 from engine.marketdata.quotes import QuoteSource
 from engine.risk.account import PaperAccounts
+from engine.risk.breakers import PriceSwings
 from engine.risk.manager import RiskManager
 from shared.prices import PriceUpdate, price_channel
 
@@ -37,21 +39,25 @@ class PaperDesk:
         *,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
+        # Every price the feed brings, for the spike breaker (D42).
+        self.swings = PriceSwings()
         if clock is None:
             self._broker = PaperBroker(db, quotes, rules)
-            accounts = PaperAccounts(db, quotes)
+            accounts = PaperAccounts(db, quotes, swings=self.swings)
+            self.risk = RiskManager(self._broker, accounts, rules)
         else:
             self._broker = PaperBroker(db, quotes, rules, clock=clock)
-            accounts = PaperAccounts(db, quotes, clock=clock)
+            accounts = PaperAccounts(db, quotes, clock=clock, swings=self.swings)
+            self.risk = RiskManager(self._broker, accounts, rules, clock=clock)
         # The limits count every paper bot together, as one account (D41).
-        self.risk = RiskManager(self._broker, accounts, rules)
 
     async def fund(self, bot_id: int, currency: str, amount: Decimal) -> Balance:
         """Give a paper bot virtual money."""
         return await self._broker.deposit(bot_id, currency, amount)
 
     async def on_price(self, update: PriceUpdate) -> None:
-        """Fill the resting paper orders `update` reaches."""
+        """Note `update` for the spike breaker, then fill the resting paper orders it reaches."""
+        self.swings.observe(update)  # first, so a price that fails to fill still counts
         await self._broker.on_price(update)
 
     async def feed_prices(

@@ -115,7 +115,8 @@ class BacktestRunRow(Base):
 class BotRow(Base):
     """One strategy config running on one symbol and timeframe, in paper or live mode.
 
-    The bot runner runs the bots whose status is "running" when the engine starts.
+    The bot runner runs the bots whose status is "running" or "paused" when the engine
+    starts. A paused bot sells and keeps its stops, but its buys are blocked (D42).
     """
 
     __tablename__ = "bots"
@@ -145,6 +146,9 @@ class BotRow(Base):
     sizing: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=ALL_IN_SIZING)
     # When a position is sold whatever the strategy says (engine/risk/stops.py, D40); {} is none.
     stops: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default="{}")
+    # Why and when it was paused (the error breaker, D42); NULL unless paused.
+    paused_reason: Mapped[str | None] = mapped_column(Text)
+    paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class StrategyConfigRow(Base):
@@ -288,6 +292,14 @@ class RiskSettingsRow(Base):
             " AND max_drawdown_pct > 0 AND max_drawdown_pct <= 100",
             name="limits",
         ),
+        CheckConstraint(
+            "stale_after_candles >= 1"
+            " AND max_failed_orders >= 1 AND failed_orders_minutes >= 1"
+            " AND (max_failed_orders IS NULL) = (failed_orders_minutes IS NULL)"
+            " AND spike_pct > 0 AND spike_minutes >= 1 AND spike_minutes <= 60"
+            " AND (spike_pct IS NULL) = (spike_minutes IS NULL)",
+            name="breakers",
+        ),
     )
 
     mode: Mapped[str] = mapped_column(Text, primary_key=True)
@@ -295,6 +307,12 @@ class RiskSettingsRow(Base):
     max_coin_exposure_pct: Mapped[Decimal | None] = mapped_column(Numeric)  # of equity
     max_daily_loss_pct: Mapped[Decimal | None] = mapped_column(Numeric)  # of midnight's equity
     max_drawdown_pct: Mapped[Decimal | None] = mapped_column(Numeric)  # below the peak
+    # The circuit breakers (engine/risk/breakers.py, D42).
+    stale_after_candles: Mapped[int | None] = mapped_column(Integer)  # of the buying bot's
+    max_failed_orders: Mapped[int | None] = mapped_column(Integer)  # then the bot is paused
+    failed_orders_minutes: Mapped[int | None] = mapped_column(Integer)  # within this long
+    spike_pct: Mapped[Decimal | None] = mapped_column(Numeric)  # a swing this big stops buys
+    spike_minutes: Mapped[int | None] = mapped_column(Integer)  # within this long (60 at most)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

@@ -326,9 +326,17 @@ Done (D41): `test_each_limit_blocks_a_buy_and_records_it` (test_risk_manager.py)
 
 ### P4-4 · Circuit breakers
 `risk` · Depends on: P4-3
-- [ ] Stale data (> 2 candles), 3 failed orders in 10 min, price spike
+- [x] Stale data (> 2 candles), 3 failed orders in 10 min, price spike
 
 **Done when:** tests show each breaker pauses trading and logs why.
+
+Done (D42):
+- `test_each_breaker_pauses_buys_and_records_why` (test_risk_manager.py) blocks a buy with each breaker and checks its `risk_events` row and `risk.decision` log. The breakers are a paused bot, a stopped bot, stale data and a price spike.
+- `test_three_failed_orders_in_ten_minutes_pause_the_bot` checks the pause, its `risk.breaker.tripped` log, the blocked buy after it, a sell still going through, and resuming. Its database twin checks that the pause in `bots` survives a restarted RiskManager.
+- `test_breakers.py` covers each rule's boundary, `PriceSwings` and `Failures`.
+- `test_a_price_spike_blocks_the_next_buy_but_never_the_stops_exit` (test_bot_runner.py) runs it end to end.
+
+The breakers block buys only. Settings are in `risk_settings` (migration 0009). Paused bots still load and keep their stops.
 
 ### P4-5 · Kill switch (engine)
 `risk` `money` · Depends on: P4-3
