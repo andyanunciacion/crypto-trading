@@ -141,6 +141,8 @@ class BotRow(Base):
     switch_policy: Mapped[str] = mapped_column(Text, server_default="keep")  # used from P6
     # How much each buy spends (engine/risk/sizing.py, D39), validated when loaded.
     sizing: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=ALL_IN_SIZING)
+    # When a position is sold whatever the strategy says (engine/risk/stops.py, D40); {} is none.
+    stops: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default="{}")
 
 
 class StrategyConfigRow(Base):
@@ -238,8 +240,16 @@ class PositionRow(Base):
     amount: Mapped[Decimal] = mapped_column(Numeric)  # 0 once closed
     avg_entry: Mapped[Decimal] = mapped_column(Numeric)
     fees_paid: Mapped[Decimal] = mapped_column(Numeric)  # every fill's fee, in the quote currency
-    stop: Mapped[Decimal | None] = mapped_column(Numeric)  # set by the RiskManager (P4)
+    # Its exit levels (engine/risk/stops.py, D40), set by the bot runner while it's open;
+    # all NULL for a bot without stops. `stop` is the higher of the stop-loss and trailing.
+    stop: Mapped[Decimal | None] = mapped_column(Numeric)
     take_profit: Mapped[Decimal | None] = mapped_column(Numeric)
+    stop_loss: Mapped[Decimal | None] = mapped_column(Numeric)  # the fixed stop-loss level
+    peak: Mapped[Decimal | None] = mapped_column(Numeric)  # highest bid since entry, to trail
+    entry_atr: Mapped[Decimal | None] = mapped_column(Numeric)  # for ATR distances
+    # The avg_entry the levels were placed from: when another fill moves it, they're
+    # placed again. NULL until they're placed.
+    levels_entry: Mapped[Decimal | None] = mapped_column(Numeric)
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     realized_pnl: Mapped[Decimal] = mapped_column(Numeric)  # net of fees (engine.brokers.ledger)

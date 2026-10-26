@@ -16,6 +16,7 @@ from engine.brokers.base import Mode
 from engine.exchange.models import Timeframe
 from engine.marketdata.store import Series
 from engine.risk.sizing import ALL_IN, SIZING, Sizing
+from engine.risk.stops import NO_STOPS, STOPS, Stops
 from engine.strategies.base import Strategy
 from engine.strategies.registry import build
 from shared.db.models import BotRow, OrderRow, StrategyConfigRow
@@ -35,6 +36,7 @@ class Bot:
     strategy_config_id: int
     strategy: Strategy[Any]
     sizing: Sizing = ALL_IN  # how much each buy spends (D39)
+    stops: Stops = NO_STOPS  # when a position is sold whatever the strategy says (D40)
 
     @property
     def series(self) -> Series:
@@ -51,6 +53,7 @@ async def create_bot(
     strategy: Strategy[Any],
     created_by: str,
     sizing: Sizing = ALL_IN,
+    stops: Stops = NO_STOPS,
 ) -> int:
     """Add a running paper bot with `strategy` as its first config. Returns the bot's id.
 
@@ -68,6 +71,7 @@ async def create_bot(
                     mode="paper",
                     status="running",
                     sizing=SIZING.dump_python(sizing, mode="json"),
+                    stops=STOPS.dump_python(stops, mode="json"),
                 )
                 .returning(BotRow.id)
             )
@@ -104,6 +108,7 @@ async def load_running_bots(db: AsyncEngine, exchange: str) -> list[Bot]:
             BotRow.timeframe,
             BotRow.mode,
             BotRow.sizing,
+            BotRow.stops,
             StrategyConfigRow.id.label("config_id"),
             StrategyConfigRow.bot_id.label("config_bot_id"),
             StrategyConfigRow.strategy,
@@ -133,6 +138,7 @@ async def load_running_bots(db: AsyncEngine, exchange: str) -> list[Bot]:
                 "timeframe": b.timeframe,
                 "strategy": b.strategy.name,
                 "params": b.strategy.params.model_dump(mode="json"),
+                "stops": STOPS.dump_python(b.stops, mode="json", exclude_none=True),
             }
             for b in bots
         ],
@@ -177,4 +183,5 @@ def _bot(row: Any, exchange: str) -> Bot:
         strategy_config_id=row.config_id,
         strategy=build(row.strategy, row.version, row.params),
         sizing=SIZING.validate_python(row.sizing),
+        stops=STOPS.validate_python(row.stops),
     )

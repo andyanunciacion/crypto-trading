@@ -102,7 +102,10 @@ async def run(settings: Settings) -> None:
                     workers.append(tasks.create_task(runner.run()))
                     workers.append(
                         tasks.create_task(
-                            desk.feed_prices(redis, exchange.exchange_id, bot_symbols)
+                            # Stops are checked on each price, after its fills (D40).
+                            desk.feed_prices(
+                                redis, exchange.exchange_id, bot_symbols, then=runner.on_price
+                            )
                         )
                     )
                 else:

@@ -22,9 +22,12 @@ from engine.risk.stops import (
     RMultiple,
     Stops,
     after_candle,
+    after_price,
+    exit_at_price,
     exit_on_candle,
     levels_at_entry,
     lookback,
+    reentry,
 )
 
 D = Decimal
@@ -167,6 +170,79 @@ def test_an_atr_trailing_stop_keeps_the_entry_atr() -> None:
     state = levels(stops, atr="2")
     assert state.stop == D(94)
     assert after_candle(state, stops, bar("105", "110", "104", "108")).stop == D(104)
+
+
+# --- Live prices (paper and live bots) ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("bid", "expected"),
+    [
+        ("96", None),  # between the two: nothing
+        ("95", Exit("stop_loss", D(95))),  # at the stop
+        ("93", Exit("stop_loss", D(93))),  # past it: the bid is the price
+        ("110", Exit("take_profit", D(110))),  # at the take-profit
+        ("112", Exit("take_profit", D(112))),
+    ],
+    ids=["neither", "stop", "below-stop", "take-profit", "above-take-profit"],
+)
+def test_exits_on_known_bids(bid: str, expected: Exit | None) -> None:
+    assert exit_at_price(levels(SL5_TP10), D(bid)) == expected
+
+
+def test_no_stops_means_no_bid_hits_a_level() -> None:
+    state = levels(Stops())
+    assert exit_at_price(state, D("0.01")) is None
+    assert exit_at_price(state, D(1_000_000)) is None
+
+
+def test_a_trailing_stop_follows_the_bid_and_never_falls() -> None:
+    trailing = Stops(trailing=pct("10"))
+    state = levels(trailing)  # stop 90
+    # Bids 110 then 120: stops 99 then 108. A lower bid (115) leaves it at 108.
+    for bid, stop in (("110", "99"), ("120", "108"), ("115", "108")):
+        state = after_price(state, trailing, D(bid))
+        assert state.stop == D(stop)
+    assert state.peak == D(120)
+    assert exit_at_price(state, D("108.5")) is None
+    assert exit_at_price(state, D(108)) == Exit("trailing_stop", D(108))
+
+
+def test_a_trailing_stop_past_the_stop_loss_fires_as_trailing_on_a_bid() -> None:
+    stops = Stops(stop_loss=pct("5"), trailing=pct("10"))
+    state = levels(stops)  # 95, the stop-loss
+    assert exit_at_price(state, D(95)) == Exit("stop_loss", D(95))
+    state = after_price(state, stops, D(120))  # trail 108
+    assert exit_at_price(state, D(107)) == Exit("trailing_stop", D(107))
+
+
+def test_a_new_average_entry_places_the_levels_again() -> None:
+    # A buy filled in slices: first at 100, then the average became 102.
+    stops = Stops(stop_loss=pct("5"), take_profit=RMultiple(multiple=D(2)))
+    moved = reentry(levels(stops), stops, D(102))
+    # 102 x 0.95 = 96.9; R = 5.1, so 2R above 102 = 112.2.
+    assert isinstance(moved, ExitState)
+    assert (moved.stop, moved.stop_loss, moved.take_profit, moved.peak) == (
+        D("96.9"),
+        D("96.9"),
+        D("112.2"),
+        D(102),
+    )
+
+
+def test_a_new_average_entry_keeps_the_trailing_peak() -> None:
+    trailing = Stops(trailing=pct("10"))
+    state = after_price(levels(trailing), trailing, D(110))  # peak 110, stop 99
+    moved = reentry(state, trailing, D(101))
+    # Still 10% below the 110 peak, not below the new 101 entry.
+    assert isinstance(moved, ExitState) and (moved.peak, moved.stop) == (D(110), D(99))
+
+
+def test_a_new_average_entry_keeps_the_entry_atr() -> None:
+    stops = Stops(stop_loss=AtrMultiple(multiple=D(2)))
+    moved = reentry(levels(stops, atr="5"), stops, D(104))
+    # 104 - 2 x 5 = 94.
+    assert isinstance(moved, ExitState) and (moved.stop, moved.atr) == (D(94), D(5))
 
 
 # --- Settings -----------------------------------------------------------------------------

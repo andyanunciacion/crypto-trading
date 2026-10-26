@@ -8,7 +8,7 @@ One broker serves every paper bot: all its state is in the database, keyed by bo
 """
 
 import asyncio
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -46,17 +46,24 @@ class PaperDesk:
         """Give a paper bot virtual money."""
         return await self._broker.deposit(bot_id, currency, amount)
 
+    async def on_price(self, update: PriceUpdate) -> None:
+        """Fill the resting paper orders `update` reaches."""
+        await self._broker.on_price(update)
+
     async def feed_prices(
         self,
         redis: Redis,
         exchange: str,
         symbols: Sequence[str],
         *,
+        then: Callable[[PriceUpdate], Awaitable[None]] | None = None,
         backoff: Backoff | None = None,
     ) -> None:
         """Fill resting paper orders from every price update of `symbols`, until cancelled.
 
-        Listens on the price stream's pub/sub channels (shared/prices.py). A bad update is
+        Listens on the price stream's pub/sub channels (shared/prices.py). Each update
+        then goes to `then` (the bot runner's stops), after its fills, so it sees the
+        positions as that price left them. A bad update, or an error in `then`, is
         logged and skipped. If Redis goes away it subscribes again after a backoff;
         updates sent meanwhile are missed, which only delays a fill to a later one.
         """
@@ -70,7 +77,7 @@ class PaperDesk:
                     backoff.reset()
                     async for message in pubsub.listen():
                         if message["type"] == "message":
-                            await self._on_message(message)
+                            await self._on_message(message, then)
             except Exception as exc:  # cancelling raises CancelledError, which isn't caught
                 delay = backoff.next_delay()
                 log.warning(
@@ -82,15 +89,22 @@ class PaperDesk:
                 )
                 await asyncio.sleep(delay)
 
-    async def _on_message(self, message: dict[str, Any]) -> None:
+    async def _on_message(
+        self, message: dict[str, Any], then: Callable[[PriceUpdate], Awaitable[None]] | None
+    ) -> None:
+        channel = message["channel"]
+        fields = {"channel": channel.decode() if isinstance(channel, bytes) else channel}
         try:
             update = PriceUpdate.model_validate_json(message["data"])
-            await self._broker.on_price(update)
+            await self.on_price(update)
         except Exception as exc:
-            channel = message["channel"]
-            log.warning(
-                "paper.feed.error",
-                channel=channel.decode() if isinstance(channel, bytes) else channel,
-                error=type(exc).__name__,
-                detail=str(exc),
+            log.warning("paper.feed.error", **fields, error=type(exc).__name__, detail=str(exc))
+            return
+        if then is None:
+            return
+        try:
+            await then(update)
+        except Exception as exc:
+            log.error(
+                "paper.feed.listener_error", **fields, error=type(exc).__name__, detail=str(exc)
             )
