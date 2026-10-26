@@ -31,6 +31,8 @@ TIMEFRAMES = ("1m", "5m", "15m", "1h", "4h", "1d")
 TRADING_MODES = ("paper", "live")
 ORDER_STATUSES = ("open", "closed", "canceled", "rejected")
 BOT_STATUSES = ("running", "paused", "stopped")
+# Must match engine.risk.limits.Decision (a test checks this).
+RISK_DECISIONS = ("allowed", "blocked", "resized")
 # What a strategy switch (P6) does with an open position.
 SWITCH_POLICIES = ("keep", "close_first", "hand_over")
 # The default sizing (engine.risk.sizing.AllIn): spend all the free cash, as before P4.
@@ -265,3 +267,54 @@ class PaperBalanceRow(Base):
     currency: Mapped[str] = mapped_column(Text, primary_key=True)
     free: Mapped[Decimal] = mapped_column(Numeric)
     used: Mapped[Decimal] = mapped_column(Numeric)  # held by open orders
+
+
+# --- Risk (P4-3): the limits, and what they blocked -----------------------------------
+
+
+class RiskSettingsRow(Base):
+    """The account's limits in one mode (engine/risk/limits.py, D41). NULL turns one off.
+
+    Read on every buy, so a change applies to the next one without a restart.
+    """
+
+    __tablename__ = "risk_settings"
+    __table_args__ = (
+        CheckConstraint(f"mode IN {TRADING_MODES!r}", name="mode"),
+        CheckConstraint(
+            "max_open_positions >= 1"
+            " AND max_coin_exposure_pct > 0 AND max_coin_exposure_pct <= 100"
+            " AND max_daily_loss_pct > 0 AND max_daily_loss_pct <= 100"
+            " AND max_drawdown_pct > 0 AND max_drawdown_pct <= 100",
+            name="limits",
+        ),
+    )
+
+    mode: Mapped[str] = mapped_column(Text, primary_key=True)
+    max_open_positions: Mapped[int | None] = mapped_column(Integer)
+    max_coin_exposure_pct: Mapped[Decimal | None] = mapped_column(Numeric)  # of equity
+    max_daily_loss_pct: Mapped[Decimal | None] = mapped_column(Numeric)  # of midnight's equity
+    max_drawdown_pct: Mapped[Decimal | None] = mapped_column(Numeric)  # below the peak
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RiskEventRow(Base):
+    """An order a limit blocked or shrank, with what it was decided on."""
+
+    __tablename__ = "risk_events"
+    __table_args__ = (
+        CheckConstraint(f"mode IN {TRADING_MODES!r}", name="mode"),
+        CheckConstraint(f"decision IN {RISK_DECISIONS!r}", name="decision"),
+        # Whether the daily loss limit already blocked a buy today (engine/risk/account.py).
+        Index("ix_risk_events_mode_rule_ts", "mode", "rule", "ts"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    mode: Mapped[str] = mapped_column(Text)
+    bot_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("bots.id"))
+    client_order_id: Mapped[str] = mapped_column(Text)  # the order's, placed or not
+    rule: Mapped[str] = mapped_column(Text)
+    decision: Mapped[str] = mapped_column(Text)
+    detail: Mapped[str] = mapped_column(Text)
+    inputs: Mapped[dict[str, Any]] = mapped_column(JSONB)  # the order, settings and account
