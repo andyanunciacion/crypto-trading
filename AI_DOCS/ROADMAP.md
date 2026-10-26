@@ -55,7 +55,7 @@
 1. [x] **Position sizing:** fixed amount, percent of equity, ATR-based.
 2. [x] **Stops:** stop-loss, take-profit, trailing stops. (Rules and backtests in P4-2a; paper bots in P4-2b, whose paper run matched its backtests trade for trade.)
 3. [x] **Limits:** max open positions, max exposure per coin, max daily loss, max drawdown (defaults in ARCHITECTURE §6), stored in `risk_settings`; every block recorded in `risk_events`. Account-wide; a buy over the coin cap is shrunk; sells never checked (D41).
-4. [ ] **Circuit breakers:** stale data (> 2 candles), repeated errors (3 in 10 min), price spikes.
+4. [x] **Circuit breakers:** stale data (> 2 candles), repeated errors (3 in 10 min), price spikes (a 3% swing in 5 min). Buys only; the error breaker pauses the bot until it's set running again (D42).
 5. [ ] **Kill switch (engine side):** Redis command → cancel orders, stop all bots, optionally close positions.
 
 **Exit criteria:** a test proves each limit blocks orders, including edge cases; the kill switch stops everything within seconds.

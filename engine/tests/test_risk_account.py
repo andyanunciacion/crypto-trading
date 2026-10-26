@@ -19,9 +19,11 @@ from decimal import Decimal
 
 import pytest
 from sqlalchemy import URL, delete, insert, select, text, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from engine.risk.account import PaperAccounts
+from engine.risk.breakers import Market, PriceSwings, Swing
 from engine.risk.limits import Account, RiskDecision, RiskEvent, RiskSettings
 from shared.db.models import (
     BotRow,
@@ -47,18 +49,20 @@ def d(value: str) -> Decimal:
 @dataclass
 class Quotes:
     bids: dict[str, str] = field(default_factory=lambda: {BTC: "90"})
+    at: dict[str, datetime] = field(default_factory=dict)  # when each price came; NOW if not
 
     async def latest(self, exchange: str, symbol: str) -> PriceUpdate | None:
         if symbol not in self.bids:
             return None
         bid = d(self.bids[symbol])
+        ts = self.at.get(symbol, NOW)
         return PriceUpdate(
             exchange=exchange,
             symbol=symbol,
             bid=bid,
             ask=bid + 1,
-            ts=NOW,
-            received_at=NOW,
+            ts=ts,
+            received_at=ts,
             source="ws",
         )
 
@@ -204,11 +208,106 @@ async def test_the_daily_loss_limit_stays_hit_until_midnight_in_manila(db: Async
 
 
 async def test_settings_come_from_the_mode_row(db: AsyncEngine) -> None:
-    await set_limits(db, max_open_positions=2, max_drawdown_pct=d("7.5"))
+    await set_limits(
+        db,
+        max_open_positions=2,
+        max_drawdown_pct=d("7.5"),
+        stale_after_candles=2,
+        spike_pct=d("3"),
+        spike_minutes=5,
+    )
 
     assert await accounts(db).settings() == RiskSettings(
-        max_open_positions=2, max_drawdown_pct=d("7.5")
+        max_open_positions=2,
+        max_drawdown_pct=d("7.5"),
+        stale_after_candles=2,
+        spike_pct=d("3"),
+        spike_minutes=5,
     )
+
+
+async def test_the_database_refuses_half_a_breaker(db: AsyncEngine) -> None:
+    with pytest.raises(IntegrityError, match="ck_risk_settings_breakers"):
+        await set_limits(db, max_failed_orders=3)
+
+
+# --- The circuit breakers' market (D42) ------------------------------------------------
+
+ETH = "ETH/USDT"
+SPIKES = RiskSettings(spike_pct=d("3"), spike_minutes=5)
+
+
+def mid(ts: datetime, price: str, symbol: str = ETH) -> PriceUpdate:
+    return PriceUpdate(
+        exchange="mexc",
+        symbol=symbol,
+        bid=d(price),
+        ask=d(price),
+        ts=ts,
+        received_at=ts,
+        source="ws",
+    )
+
+
+async def test_the_market_has_every_price_the_buy_relies_on(db: AsyncEngine) -> None:
+    # Bot 2 buys ETH. Bot 1 holds BTC, whose price is 90 s old; ETH's came just now.
+    quotes = Quotes({BTC: "90", ETH: "50"}, at={BTC: NOW - timedelta(seconds=90)})
+    swings = PriceSwings()
+    for minutes_ago, price in ((6, "40"), (4, "50"), (1, "51.5")):  # 6 is outside the 5 min
+        swings.observe(mid(NOW - timedelta(minutes=minutes_ago), price))
+    swings.observe(mid(NOW, "70", symbol=BTC))  # another coin's swing doesn't count
+
+    market = await PaperAccounts(db, quotes, clock=lambda: NOW, swings=swings).market(
+        2, ETH, SPIKES
+    )
+
+    assert market == Market(
+        status="running",
+        paused_reason=None,
+        timeframe="1m",
+        price_ages={ETH: timedelta(0), BTC: timedelta(seconds=90)},  # the one bought first
+        swing=Swing(low=d("50"), high=d("51.5")),
+    )
+
+
+async def test_a_coin_never_priced_has_no_age(db: AsyncEngine) -> None:
+    market = await accounts(db, Quotes({})).market(1, BTC, RiskSettings())
+    assert (market.price_ages, market.swing) == ({BTC: None}, None)  # spikes off: no swing
+
+
+async def test_the_market_has_the_bots_status(db: AsyncEngine) -> None:
+    await accounts(db).pause(1, "3 failed orders within 10 min")
+
+    paused = await accounts(db).market(1, BTC, RiskSettings())
+    stopped = await accounts(db).market(3, BTC, RiskSettings())
+
+    assert (paused.status, paused.paused_reason) == ("paused", "3 failed orders within 10 min")
+    assert (stopped.status, stopped.paused_reason) == ("stopped", None)
+
+
+async def test_a_bot_missing_from_bots_is_an_error(db: AsyncEngine) -> None:
+    with pytest.raises(LookupError, match="no paper bot 9"):
+        await accounts(db).market(9, BTC, RiskSettings())
+
+
+async def test_pausing_pauses_only_a_running_bot(db: AsyncEngine) -> None:
+    assert await accounts(db).pause(1, "first") is True
+    assert await accounts(db).pause(1, "again") is False  # already paused: keeps its reason
+    assert await accounts(db).pause(3, "stopped") is False
+
+    async with db.connect() as conn:
+        rows = (
+            await conn.execute(
+                select(BotRow.id, BotRow.status, BotRow.paused_reason, BotRow.paused_at).order_by(
+                    BotRow.id
+                )
+            )
+        ).all()
+    assert [tuple(r) for r in rows] == [
+        (1, "paused", "first", NOW),
+        (2, "running", None, None),
+        (3, "stopped", None, None),
+    ]
 
 
 async def test_no_settings_row_is_an_error_not_no_limits(db: AsyncEngine) -> None:

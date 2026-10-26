@@ -19,14 +19,17 @@ only lower exposure, and blocking one could trap a position (D40).
 
 They're account-wide: equity, positions and exposure count every bot in the mode, as
 they will on one shared exchange account (P9).
+
+The circuit breakers (breakers.py, D42) share these settings and are checked before
+them: a bot that isn't running, a stale price or a price spike blocks a buy first.
 """
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 from engine.exchange.models import MarketRules, OrderRequest
 from engine.risk.sizing import below_minimum
@@ -38,6 +41,8 @@ Decision = Literal["allowed", "blocked", "resized"]
 DAILY_LOSS = "daily_loss"
 # Manila is UTC+8 all year: the Philippines has had no daylight saving since 1978.
 MANILA = timezone(timedelta(hours=8), "Asia/Manila")
+# The longest spike window: how much price history the breakers keep (breakers.py).
+MAX_SPIKE_MINUTES = 60
 
 
 class _Frozen(BaseModel):
@@ -55,12 +60,29 @@ class RiskDecision(_Frozen):
 
 
 class RiskSettings(_Frozen):
-    """The limits, one row of `risk_settings` per mode. None turns a limit off."""
+    """The limits and circuit breakers, one row of `risk_settings` per mode. None turns
+    one off."""
 
     max_open_positions: int | None = Field(default=None, ge=1)
     max_coin_exposure_pct: Decimal | None = Field(default=None, gt=0, le=100)
     max_daily_loss_pct: Decimal | None = Field(default=None, gt=0, le=100)
     max_drawdown_pct: Decimal | None = Field(default=None, gt=0, le=100)
+    # The circuit breakers (breakers.py, D42).
+    stale_after_candles: int | None = Field(default=None, ge=1)
+    max_failed_orders: int | None = Field(default=None, ge=1)
+    failed_orders_minutes: int | None = Field(default=None, ge=1)
+    spike_pct: Decimal | None = Field(default=None, gt=0)
+    spike_minutes: int | None = Field(default=None, ge=1, le=MAX_SPIKE_MINUTES)
+
+    @model_validator(mode="after")
+    def _set_in_pairs(self) -> Self:
+        for count, minutes in (
+            ("max_failed_orders", "failed_orders_minutes"),
+            ("spike_pct", "spike_minutes"),
+        ):
+            if (getattr(self, count) is None) != (getattr(self, minutes) is None):
+                raise ValueError(f"{count} and {minutes} go together: set both, or neither")
+        return self
 
 
 NO_LIMITS = RiskSettings()
@@ -84,11 +106,11 @@ class Account:
 
     def to_json(self) -> dict[str, JsonValue]:
         return {
-            "equity": _show(self.equity),
-            "peak": _show(self.peak),
-            "day_start": _show(self.day_start),
+            "equity": show(self.equity),
+            "peak": show(self.peak),
+            "day_start": show(self.day_start),
             "open_positions": self.open_positions,
-            "coin_exposure": _show(self.coin_exposure),
+            "coin_exposure": show(self.coin_exposure),
             "daily_loss_hit": self.daily_loss_hit,
         }
 
@@ -136,8 +158,8 @@ def _drawdown(settings: RiskSettings, account: Account) -> RiskDecision | None:
     drawdown = (peak - equity) / peak * 100
     return _blocked(
         "max_drawdown",
-        f"equity {_show(equity)} is {_pct(drawdown)}% below its peak {_show(peak)}:"
-        f" the limit is {_show(limit)}%",
+        f"equity {show(equity)} is {show_pct(drawdown)}% below its peak {show(peak)}:"
+        f" the limit is {show(limit)}%",
     )
 
 
@@ -156,8 +178,8 @@ def _daily_loss(settings: RiskSettings, account: Account) -> RiskDecision | None
         return None
     return _blocked(
         DAILY_LOSS,
-        f"down {_show(loss)} today, {_pct(loss / start * 100)}% of {_show(start)} at midnight"
-        f" Asia/Manila: the limit is {_show(limit)}%; no buys until the next midnight",
+        f"down {show(loss)} today, {show_pct(loss / start * 100)}% of {show(start)} at midnight"
+        f" Asia/Manila: the limit is {show(limit)}%; no buys until the next midnight",
     )
 
 
@@ -184,8 +206,8 @@ def _coin_exposure(
         return Checked(WITHIN_LIMITS, request)
     coin = request.symbol.split("/")[0]
     over = (
-        f"{coin} would be {_show(after)} of {_show(account.equity)} equity, over the"
-        f" {_show(limit)}% limit ({_show(cap)}), with {_show(account.coin_exposure)}"
+        f"{coin} would be {show(after)} of {show(account.equity)} equity, over the"
+        f" {show(limit)}% limit ({show(cap)}), with {show(account.coin_exposure)}"
         " already held or on order"
     )
     room = max(cap - account.coin_exposure, Decimal(0))
@@ -198,7 +220,7 @@ def _coin_exposure(
     resized = RiskDecision(
         decision="resized",
         rule="max_coin_exposure",
-        detail=f"{over}; resized from {_show(request.amount)} to {_show(amount)}",
+        detail=f"{over}; resized from {show(request.amount)} to {show(amount)}",
         requested_amount=request.amount,
     )
     return Checked(resized, request.model_copy(update={"amount": amount}))
@@ -208,10 +230,10 @@ def _blocked(rule: str, detail: str) -> RiskDecision:
     return RiskDecision(decision="blocked", rule=rule, detail=detail)
 
 
-def _pct(value: Decimal) -> str:
-    return _show(value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+def show_pct(value: Decimal) -> str:
+    return show(value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
-def _show(value: Decimal) -> str:
+def show(value: Decimal) -> str:
     # Plain digits: no "0E-13" or "1000.0" from a value read back from the database.
     return f"{value.normalize():f}"

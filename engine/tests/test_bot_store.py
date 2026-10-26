@@ -1,7 +1,8 @@
 """Bots in the database: created with their first config, loaded only when the engine can
-run them. Against a real TimescaleDB (see shared.testing)."""
+run them (running or paused). Against a real TimescaleDB (see shared.testing)."""
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -10,12 +11,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from structlog.testing import capture_logs
 
-from engine.bots.store import create_bot, load_running_bots, open_orders
+from engine.bots.store import create_bot, held_symbols, load_bots, open_orders
 from engine.risk.sizing import AllIn
 from engine.risk.stops import NO_STOPS, AtrMultiple, RMultiple, Stops
 from engine.strategies.ema_crossover import EmaCrossover, EmaCrossoverParams
 from engine.strategies.rsi_mean_reversion import RsiMeanReversion, RsiMeanReversionParams
-from shared.db.models import BotRow, OrderRow, StrategyConfigRow
+from shared.db.models import BotRow, OrderRow, PositionRow, StrategyConfigRow
 from shared.db.session import make_engine
 
 BTC = "BTC/USDT"
@@ -54,14 +55,14 @@ async def set_bot(db: AsyncEngine, bot_id: int, **values: object) -> None:
 
 async def refusals(db: AsyncEngine) -> list[tuple[int, str]]:
     with capture_logs() as logs:
-        assert await load_running_bots(db, "mexc") == []
+        assert await load_bots(db, "mexc") == []
     return [(log["bot_id"], log["reason"]) for log in logs if log["event"] == "bot.refused"]
 
 
 async def test_a_created_bot_loads_with_its_strategy(db: AsyncEngine) -> None:
     bot_id = await ema_bot(db)
 
-    (bot,) = await load_running_bots(db, "mexc")
+    (bot,) = await load_bots(db, "mexc")
 
     assert (bot.id, bot.name, bot.exchange, bot.symbol, bot.timeframe) == (
         bot_id,
@@ -114,7 +115,7 @@ async def test_a_bot_keeps_its_stops(db: AsyncEngine) -> None:
         stops=stops,
     )
 
-    (bot,) = await load_running_bots(db, "mexc")
+    (bot,) = await load_bots(db, "mexc")
     assert bot.stops == stops
 
 
@@ -134,11 +135,57 @@ async def test_names_are_unique(db: AsyncEngine) -> None:
         await ema_bot(db)
 
 
-@pytest.mark.parametrize("status", ["paused", "stopped"])
-async def test_only_running_bots_load(db: AsyncEngine, status: str) -> None:
-    await set_bot(db, await ema_bot(db), status=status)
+async def test_stopped_bots_dont_load(db: AsyncEngine) -> None:
+    await set_bot(db, await ema_bot(db), status="stopped")
 
-    assert await load_running_bots(db, "mexc") == []
+    assert await load_bots(db, "mexc") == []
+
+
+async def test_paused_bots_load_so_their_positions_stay_watched(db: AsyncEngine) -> None:
+    # Its buys are the RiskManager's to block (D42); its sells and stops carry on.
+    paused = await ema_bot(db)
+    await set_bot(db, paused, status="paused", paused_reason="3 failed orders within 10 min")
+    running = await ema_bot(db, "other")
+
+    with capture_logs() as logs:
+        bots = await load_bots(db, "mexc")
+
+    assert [b.id for b in bots] == [paused, running]
+    (loaded,) = [log for log in logs if log["event"] == "bots.loaded"]
+    assert [b["status"] for b in loaded["bots"]] == ["paused", "running"]
+
+
+async def test_held_symbols_are_every_open_positions_coin_in_one_mode(db: AsyncEngine) -> None:
+    bot_id = await ema_bot(db)
+    await set_bot(db, bot_id, status="stopped")  # a stopped bot's position still counts
+
+    def position(symbol: str, closed: bool = False, mode: str = "paper") -> dict[str, object]:
+        return {
+            "bot_id": bot_id,
+            "mode": mode,
+            "exchange": "mexc",
+            "symbol": symbol,
+            "side": "long",
+            "amount": Decimal(0) if closed else Decimal(1),
+            "avg_entry": Decimal(100),
+            "fees_paid": Decimal(0),
+            "opened_at": datetime(2026, 10, 25, tzinfo=UTC),
+            "closed_at": datetime(2026, 10, 26, tzinfo=UTC) if closed else None,
+            "realized_pnl": Decimal(0),
+        }
+
+    async with db.begin() as conn:
+        await conn.execute(
+            insert(PositionRow),
+            [
+                position("ETH/USDT"),
+                position("SOL/USDT", closed=True),
+                position("XRP/USDT", mode="live"),
+            ],
+        )
+
+    assert await held_symbols(db, mode="paper") == ["ETH/USDT"]
+    assert await held_symbols(db, mode="live") == ["XRP/USDT"]
 
 
 async def test_a_live_bot_is_refused(db: AsyncEngine) -> None:
@@ -196,7 +243,7 @@ async def test_one_bad_bot_doesnt_stop_the_others(db: AsyncEngine) -> None:
     )
 
     with capture_logs() as logs:
-        bots = await load_running_bots(db, "mexc")
+        bots = await load_bots(db, "mexc")
 
     assert [b.id for b in bots] == [good]
     assert [log["bot_id"] for log in logs if log["event"] == "bot.refused"] == [bad]

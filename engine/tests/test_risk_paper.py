@@ -20,6 +20,7 @@ from structlog.testing import capture_logs
 from engine.brokers.base import BrokerOrder
 from engine.exchange.models import Balance, MarketRules, OrderRequest
 from engine.marketdata.prices import RedisPriceSink
+from engine.risk.breakers import Swing
 from engine.risk.paper import PaperDesk
 from shared.db.session import make_engine
 from shared.prices import PriceUpdate, price_channel
@@ -147,6 +148,17 @@ async def test_a_published_price_fills_a_resting_order(desk: PaperDesk, redis: R
 
     # A resting order fills at its own limit, 100.
     assert [(f.price, f.amount) for f in done.fills] == [(Decimal(100), Decimal("0.5"))]
+    # The price is noted for the spike breaker too (D42): its mid, 99.95.
+    assert desk.swings.swing("mexc", BTC, T0) == Swing(low=Decimal("99.95"), high=Decimal("99.95"))
+
+
+async def test_a_price_counts_for_the_spike_breaker_even_if_it_fills_nothing(
+    desk: PaperDesk,
+) -> None:
+    await desk.on_price(quote(ask="100"))
+    await desk.on_price(quote(ask="104"))  # nothing open: nothing to fill
+
+    assert desk.swings.swing("mexc", BTC, T0) == Swing(low=Decimal("99.95"), high=Decimal("101.95"))
 
 
 async def test_a_bad_update_is_logged_and_the_feed_carries_on(

@@ -74,10 +74,13 @@ def db_url(timescale_url: URL) -> URL:
 
 
 async def insert_bot(db: AsyncEngine, bot_id: int = 1) -> None:
-    """Make sure bot `bot_id` exists, for tests that write orders or balances for it.
+    """Make sure bot `bot_id` exists and is running, for tests that write orders or
+    balances for it.
 
-    Those tables' `bot_id` must name a real bot. Tests that truncate `bots` should
-    `RESTART IDENTITY`: this sets the id itself, which doesn't move the id sequence on.
+    Those tables' `bot_id` must name a real bot, and the RiskManager blocks the buys of
+    one that isn't running (D42), so a bot an earlier test paused is set running again.
+    Tests that truncate `bots` should `RESTART IDENTITY`: this sets the id itself, which
+    doesn't move the id sequence on.
     """
     row = {
         "id": bot_id,
@@ -85,9 +88,13 @@ async def insert_bot(db: AsyncEngine, bot_id: int = 1) -> None:
         "exchange": "mexc",
         "symbol": "BTC/USDT",
         "timeframe": "1m",
+        "status": "running",
     }
+    running = {"status": "running", "paused_reason": None, "paused_at": None}
     async with db.begin() as conn:
-        await conn.execute(insert(BotRow).values(row).on_conflict_do_nothing())
+        await conn.execute(
+            insert(BotRow).values(row).on_conflict_do_update(index_elements=["id"], set_=running)
+        )
 
 
 async def set_limits(db: AsyncEngine, mode: str = "paper", **limits: object) -> None:
@@ -95,13 +102,18 @@ async def set_limits(db: AsyncEngine, mode: str = "paper", **limits: object) -> 
 
     The test database is shared by the whole run, so tests whose orders go through a
     RiskManager set the limits they need instead of relying on what's there. With no
-    `limits`, every limit is off: for tests that aren't about them.
+    `limits`, every limit and circuit breaker is off: for tests that aren't about them.
     """
     row = {
         "max_open_positions": None,
         "max_coin_exposure_pct": None,
         "max_daily_loss_pct": None,
         "max_drawdown_pct": None,
+        "stale_after_candles": None,
+        "max_failed_orders": None,
+        "failed_orders_minutes": None,
+        "spike_pct": None,
+        "spike_minutes": None,
         **limits,
     }
     async with db.begin() as conn:

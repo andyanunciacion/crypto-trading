@@ -25,7 +25,7 @@ from structlog.testing import capture_logs
 
 from engine.bots.exits import Held, load_held
 from engine.bots.runner import BotRunner
-from engine.bots.store import Bot, create_bot, load_running_bots
+from engine.bots.store import Bot, create_bot, load_bots
 from engine.exchange.models import Balance, Candle, MarketRules, Timeframe
 from engine.marketdata.store import CandleStore, Series
 from engine.risk.paper import PaperDesk
@@ -167,7 +167,7 @@ class Setup:
             stops=stops,
         )
         await self.desk.fund(bot_id, "USDT", d(cash))
-        (bot,) = [b for b in await load_running_bots(self.db, "mexc") if b.id == bot_id]
+        (bot,) = [b for b in await load_bots(self.db, "mexc") if b.id == bot_id]
         return bot
 
     def tick(self) -> None:
@@ -205,7 +205,7 @@ class Setup:
         Nothing of the old ones is cleaned up or carried over: only the database is.
         """
         self.desk = PaperDesk(self.db, self.quotes, self.market, clock=self.clock)
-        return self.runner(await load_running_bots(self.db, "mexc"))
+        return self.runner(await load_bots(self.db, "mexc"))
 
     async def order_rows(self) -> int:
         async with self.db.connect() as conn:
@@ -743,6 +743,36 @@ async def test_a_limit_blocks_the_next_buy_but_never_the_stops_exit(setup: Setup
             "blocked",
             "down 51.8693736 today, 5.19% of 1000 at midnight Asia/Manila: the limit is 3%;"
             " no buys until the next midnight",
+        )
+    ]
+
+
+async def test_a_price_spike_blocks_the_next_buy_but_never_the_stops_exit(setup: Setup) -> None:
+    bot, runner = await bought(setup, STOP5)
+    await set_limits(setup.db, spike_pct=d("3"), spike_minutes=5)
+
+    # The bid falls to 104.5: the stop sells, spike or not.
+    await setup.price(runner, bid="104.5")
+    assert (await sold(setup, "b1-202610221230-x1"))[0] == "closed"
+
+    # Fast EMA crosses below at 90, then back above at 130: a BUY, two minutes after a
+    # 104.55 mid. That's a swing of 24.29%, over the 3% limit: blocked.
+    setup.tick()
+    setup.quotes.set(ask="90.1", bid="90")
+    await runner.on_closed(SERIES, candle(31, "90"))
+    setup.tick()
+    await setup.price(runner, bid="129.9", ask="130")
+    await runner.on_closed(SERIES, candle(32, "130"))
+
+    assert await setup.desk.risk.get_order("b1-202610221232-b") is None
+    async with setup.db.connect() as conn:
+        events = (await conn.execute(select(RiskEventRow))).all()
+    assert [(e.bot_id, e.client_order_id, e.rule, e.detail) for e in events] == [
+        (
+            bot.id,
+            "b1-202610221232-b",
+            "price_spike",
+            "BTC/USDT swung 24.29% within 5 min (low 104.55, high 129.95): the limit is 3%",
         )
     ]
 

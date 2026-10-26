@@ -1,9 +1,10 @@
 """Engine entry point. Run with `python -m engine`.
 
 Runs a heartbeat loop, so Docker can tell the worker is alive, and one live price
-stream per symbol (into Redis): PRICE_SYMBOLS plus the bots' symbols. Then it runs the
-bots that are "running" in the database, on paper (D36), and feeds live prices to the
-PaperBroker so resting orders fill. Bots are loaded once, at startup, and orders left
+stream per symbol (into Redis): PRICE_SYMBOLS, the bots' symbols, and every coin a
+paper position holds. Then it runs the bots that are "running" or "paused" in the
+database, on paper (D36, D42), and feeds live prices to the PaperBroker so resting
+orders fill. Bots are loaded once, at startup, and orders left
 open from before the engine started are cancelled first (D38).
 """
 
@@ -17,7 +18,7 @@ import structlog
 from redis.asyncio import Redis
 
 from engine.bots.runner import BotRunner
-from engine.bots.store import load_running_bots
+from engine.bots.store import held_symbols, load_bots
 from engine.exchange.adapter import ExchangeAdapter
 from engine.marketdata.prices import PriceStream, RedisPriceSink
 from engine.marketdata.quotes import RedisQuotes
@@ -79,10 +80,13 @@ async def run(settings: Settings) -> None:
     try:
         # Public market data only: no API key, and trading stays off (D22).
         async with ExchangeAdapter() as exchange:
-            bots = await load_running_bots(db, exchange.exchange_id)
+            bots = await load_bots(db, exchange.exchange_id)
             # dict.fromkeys drops repeats and keeps the order.
             bot_symbols = list(dict.fromkeys(bot.symbol for bot in bots))
-            symbols = list(dict.fromkeys([*settings.price_symbols, *bot_symbols]))
+            # Coins held by bots that aren't running too: equity values them at their bids,
+            # and without a fresh price the stale data breaker blocks every buy (D42).
+            held = await held_symbols(db, mode="paper")
+            symbols = list(dict.fromkeys([*settings.price_symbols, *bot_symbols, *held]))
             sink = RedisPriceSink(redis)
             quotes = RedisQuotes(redis)
             desk = PaperDesk(db, quotes, exchange)
