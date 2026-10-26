@@ -62,7 +62,7 @@
 
 ## Phase 5 — API and dashboard
 
-1. [ ] **Auth:** single user, password + TOTP, JWT in an httpOnly cookie; Next.js login page.
+1. [x] **Auth:** single user, password + TOTP, JWT in an httpOnly cookie; Next.js login page. The user is made by a CLI on the server; every API route is protected unless listed as public; Tailwind + shadcn/ui set up; Playwright runs against a throwaway stack (D44).
 2. [ ] **Shell + Overview + kill switch:** header with mode badge, freshness and kill switch (UX1, UX2, UX5); Overview with equity, today's P&L, positions and bot status over WebSocket.
 3. [ ] **Market:** Lightweight Charts candles with indicators and trade markers; trade explanation panel (UX9).
 4. [ ] **Bots:** create, start, pause, stop; edit strategy params via a form generated from the schema; commands go to the engine via Redis.

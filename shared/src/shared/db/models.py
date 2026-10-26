@@ -340,3 +340,28 @@ class RiskEventRow(Base):
     decision: Mapped[str] = mapped_column(Text)
     detail: Mapped[str] = mapped_column(Text)
     inputs: Mapped[dict[str, Any]] = mapped_column(JSONB)  # the order, settings and account
+
+
+class UserRow(Base):
+    """Who can sign in to the dashboard: one user, with a password and TOTP (§9, D44).
+
+    Made by the CLI (backend/users.py), never by the API.
+    """
+
+    __tablename__ = "users"
+    __table_args__ = (
+        CheckConstraint("failed_logins >= 0 AND session_version >= 1", name="counters"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    username: Mapped[str] = mapped_column(Text, unique=True)
+    password_hash: Mapped[str] = mapped_column(Text)  # argon2id, with its own salt
+    totp_secret_enc: Mapped[str] = mapped_column(Text)  # Fernet-encrypted (D12), never plain
+    # The 30 s step of the last code accepted, so the same code can't be used twice.
+    totp_last_step: Mapped[int | None] = mapped_column(BigInteger)
+    # In every session's JWT; bumping it (logout) ends every session.
+    session_version: Mapped[int] = mapped_column(Integer, server_default="1")
+    failed_logins: Mapped[int] = mapped_column(Integer, server_default="0")  # in a row
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

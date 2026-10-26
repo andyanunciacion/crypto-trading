@@ -5,3 +5,8 @@ node_modules
 .env.*
 *.tsbuildinfo
 next-env.d.ts
+# End-to-end tests run from the host against the stack, never inside the image.
+e2e
+playwright.config.ts
+playwright-report
+test-results

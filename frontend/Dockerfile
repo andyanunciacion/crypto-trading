@@ -13,6 +13,9 @@ RUN --mount=type=cache,id=pnpm,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
 
 FROM base AS build
+# Where the dashboard's /api/* goes (next.config.ts). Rewrites are fixed at build time.
+ARG API_URL=http://api:8000
+ENV API_URL=$API_URL
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN pnpm build

@@ -18,12 +18,12 @@ import structlog
 
 from engine.exchange.adapter import ExchangeAdapter
 from engine.exchange.models import Candle, Timeframe
-from engine.main import configure_logging
 from engine.marketdata.candle_stream import PAGE_LIMIT
 from engine.marketdata.store import Bounds, CandleStore, Gap, Series
 from engine.marketdata.timeframes import STEP, floor, is_closed
 from shared.config import Settings, load_settings
 from shared.db.session import make_engine
+from shared.logs import configure_logging
 
 log = structlog.get_logger()
 

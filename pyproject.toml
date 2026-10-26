@@ -50,8 +50,8 @@ warn_required_dynamic_aliases = true
 
 [tool.pytest.ini_options]
 testpaths = ["shared/tests", "backend/tests", "engine/tests"]
-# Database fixtures (a throwaway TimescaleDB) for every package's tests.
-addopts = ["-p", "shared.testing"]
+# Database fixtures (a throwaway TimescaleDB) for every package's tests, and the API's.
+addopts = ["-p", "shared.testing", "-p", "backend.testing"]
 # The tests/ folders have no __init__.py, so test file names must be unique across packages.
 # Run `async def` tests on an event loop without marking each one.
 asyncio_mode = "auto"
