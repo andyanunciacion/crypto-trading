@@ -366,11 +366,44 @@ Done (D43):
 
 ### P5-1 · Auth
 `backend` `frontend` `security` · Depends on: P0-T2
-- [ ] `users` table; argon2 password; TOTP enrolment and check
-- [ ] JWT in httpOnly secure cookie; auth on every REST/WS route
-- [ ] Login page
+- [x] `users` table; argon2 password; TOTP enrolment and check
+- [x] JWT in httpOnly secure cookie; auth on every REST/WS route
+- [x] Login page
 
 **Done when:** a Playwright test logs in with password + TOTP, and API tests show every route rejects unauthenticated calls.
+
+Done (D44):
+- `e2e/login.spec.ts` (`pnpm e2e`, against a throwaway Compose project) does the following, with a TOTP code worked out in the test:
+  - A visit to `/` with no session lands on `/login?next=%2F`.
+  - A wrong code shows the error.
+  - The right password and code land on `/` with "Signed in as e2e".
+  - The cookie is HttpOnly, Secure and SameSite=Strict, and not in `document.cookie`.
+  - After signing out, the old cookie gets a 401.
+  - The API answers 401 through `/api` with no session.
+- `test_every_route_needs_auth.py` calls every route the app has, WebSockets included, with no session and requires a 401 (or a close with 1008); `PUBLIC` must be exactly `/health` and `/auth/login`.
+- `test_auth_routes.py` covers:
+  - the cookie's attributes;
+  - one answer for every wrong part;
+  - a code used twice;
+  - the lockout and its reset;
+  - expiry;
+  - forged, stale and unknown tokens;
+  - logout ending every session.
+- `test_users_cli.py` covers enrolment (QR, encrypted secret, confirming code), the single-user rule, bad passwords, the e2e flags, and the resets and unlock. `test_auth_helpers.py` covers the pure parts.
+- Found building it: a fresh stack's `migrate` failed because the `db` health check passed on the image's socket-only init server; it now checks over TCP.
+- Checked by hand in Chrome (2026-10-26, a throwaway stack on port 3100):
+  - The dark theme renders, and focus starts in Username.
+  - Sign in stays disabled until every field is filled.
+  - A wrong code shows the error and outlines Code in red.
+  - The right code signs in and returns to `next`, with no console errors.
+  - Sign out and a revisit both land on `/login`.
+- It found two things:
+  - `--password-stdin` kept the byte-order mark PowerShell pipes first (UTF-8 output encoding), giving a password nobody could type. It's stripped now (`test_a_byte_order_mark_from_a_powershell_pipe_isnt_part_of_the_password`).
+  - After a failed sign-in, focus now returns to Code (checked in `login.spec.ts`).
+- On the dev stack (2026-10-26):
+  - The API answers 401 on `/auth/me` and `/docs`, and 200 on `/health`.
+  - `/` redirects to `/login?next=%2F`.
+  - Migration 0011 is applied, with no user yet: the owner creates theirs with `backend.users create`.
 
 ### P5-2 · App shell, Overview, kill switch
 `frontend` `backend` · Depends on: P5-1, P4-5

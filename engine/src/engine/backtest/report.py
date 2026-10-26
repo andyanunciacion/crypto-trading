@@ -28,12 +28,12 @@ from engine.backtest.models import (
 )
 from engine.backtest.store import BacktestRunStore, StoredRun
 from engine.exchange.models import Timeframe
-from engine.main import configure_logging
 from engine.marketdata.timeframes import STEP
 from engine.risk.sizing import SIZING
 from engine.risk.stops import NO_STOPS, STOPS
 from shared.config import Settings, load_settings
 from shared.db.session import make_engine
+from shared.logs import configure_logging
 
 # Crypto trades every day of the year, so a year is 365 days of candles, not the 252
 # trading days used for stocks.

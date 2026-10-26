@@ -33,7 +33,6 @@ from engine.backoff import Backoff
 from engine.exchange.adapter import ExchangeAdapter
 from engine.exchange.errors import ExchangeNetworkError
 from engine.exchange.models import Candle, MarketRules, Timeframe
-from engine.main import configure_logging
 from engine.marketdata.candle_stream import (
     FETCH_TRIES,
     SETTLE_SECONDS,
@@ -43,6 +42,7 @@ from engine.marketdata.candle_stream import (
 )
 from engine.marketdata.timeframes import STEP, floor
 from shared.config import load_settings
+from shared.logs import configure_logging
 
 log = structlog.get_logger()
 

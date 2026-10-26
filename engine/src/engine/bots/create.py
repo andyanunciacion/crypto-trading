@@ -35,7 +35,6 @@ from engine.bots.store import create_bot
 from engine.exchange.adapter import ExchangeAdapter
 from engine.exchange.errors import ExchangeError
 from engine.exchange.models import Timeframe
-from engine.main import configure_logging
 from engine.marketdata.quotes import RedisQuotes
 from engine.risk.paper import PaperDesk
 from engine.risk.sizing import ALL_IN, SIZING, Sizing
@@ -44,6 +43,7 @@ from engine.strategies.base import Strategy
 from engine.strategies.registry import STRATEGIES, build, strategy_class
 from shared.config import Settings, load_settings
 from shared.db.session import make_engine
+from shared.logs import configure_logging
 
 log = structlog.get_logger()
 

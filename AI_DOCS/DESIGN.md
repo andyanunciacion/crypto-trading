@@ -45,7 +45,7 @@ Login (password + TOTP)
 
 | Screen | Roadmap slice | Status |
 |---|---|---|
-| Login with TOTP | 5.1 | ⬜ |
+| Login with TOTP | 5.1 | ✅ |
 | App shell + kill switch + Overview | 5.2 | ⬜ |
 | Market chart with trade markers | 5.3 | ⬜ |
 | Bots list and detail (create/start/pause/stop, edit params) | 5.4 | ⬜ |
@@ -75,7 +75,7 @@ A placeholder until (if ever) a brand is needed: shadcn/ui's neutral theme, syst
 
 ## 8. Design tokens & components
 
-- **Tokens:** shadcn/ui CSS variables in `frontend/` (Tailwind config + `globals.css`). Add semantic tokens for `profit`, `loss`, `live`, `paper`, `stale`.
+- **Tokens:** shadcn/ui CSS variables in `frontend/app/globals.css` (Tailwind v4: no config file; `@theme inline` maps each variable to a utility). Semantic tokens `profit`, `loss`, `live`, `paper`, `stale` are in place (P5-1), in light and dark, e.g. `text-profit`, `bg-live`.
 - **Components:** shadcn/ui for the basics. Project components: `KillSwitch`, `ModeBadge`, `FreshnessIndicator`, `Money` (formats Decimal strings with currency and sign), `CandleChart` (Lightweight Charts wrapper with markers), `TradeExplainPanel`, `StrategyParamsForm` (rendered from the strategy's pydantic schema).
 - Money arrives from the API as **strings**, not JSON numbers, so Decimal precision survives (D9).
 

@@ -15,7 +15,6 @@ import asyncio
 import contextlib
 import signal
 from pathlib import Path
-from typing import TextIO
 
 import structlog
 from redis.asyncio import Redis
@@ -31,6 +30,7 @@ from engine.risk.kill import KillSwitch
 from engine.risk.paper import PaperDesk
 from shared.config import Settings, load_settings
 from shared.db.session import make_engine
+from shared.logs import configure_logging
 from shared.prices import PriceUpdate
 
 HEARTBEAT_INTERVAL_SECONDS = 10
@@ -38,20 +38,6 @@ HEARTBEAT_INTERVAL_SECONDS = 10
 HEARTBEAT_FILE = Path("/tmp/engine-heartbeat")
 
 log = structlog.get_logger()
-
-
-def configure_logging(level: str, stream: TextIO | None = None) -> None:
-    """JSON logs to `stream` (default stdout). CLIs whose stdout is data log to stderr."""
-    structlog.configure(
-        processors=[
-            structlog.processors.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso", utc=True),
-            structlog.processors.JSONRenderer(),
-        ],
-        # Drops calls below LOG_LEVEL before they do any work.
-        wrapper_class=structlog.make_filtering_bound_logger(level),
-        logger_factory=structlog.PrintLoggerFactory(stream),
-    )
 
 
 async def heartbeat(stop: asyncio.Event) -> None:

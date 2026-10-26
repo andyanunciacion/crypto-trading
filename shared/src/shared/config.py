@@ -68,10 +68,11 @@ def load_settings(env_file: str | None = ".env") -> Settings:
     try:
         return Settings(_env_file=env_file)
     except ValidationError as exc:
-        raise SystemExit(_describe(exc)) from None
+        raise SystemExit(describe_errors(exc)) from None
 
 
-def _describe(exc: ValidationError) -> str:
+def describe_errors(exc: ValidationError) -> str:
+    """A settings error as a list of what to fix, for the API's settings too."""
     # Only the setting name and pydantic's message, never the input value,
     # so a mistyped secret can't end up in the logs.
     lines = ["Configuration error. Fix these settings in .env (see .env.example):"]

@@ -25,13 +25,13 @@ from engine.backtest.simulator import (
 )
 from engine.backtest.store import BacktestRunStore, candles_sha256
 from engine.exchange.models import Candle
-from engine.main import configure_logging
 from engine.marketdata.store import CandleStore, Series
 from engine.marketdata.timeframes import STEP
 from engine.strategies.base import Strategy
 from engine.strategies.registry import STRATEGIES, build, strategy_class
 from shared.config import Settings, load_settings
 from shared.db.session import make_engine
+from shared.logs import configure_logging
 
 log = structlog.get_logger()
 

@@ -15,7 +15,10 @@ services:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       # $$ passes a literal $ through, so the variable is read inside the container.
-      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      # -h 127.0.0.1: over TCP, as the other services connect. On a new volume the image
+      # first runs a temporary server on the Unix socket only, for its init scripts, and a
+      # socket check would call that healthy ~13 s before TCP connections work.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -52,7 +55,7 @@ services:
     # Settings are validated at startup by shared/config.py.
     env_file: .env
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${API_PORT:-8000}:8000"
     depends_on:
       db:
         condition: service_healthy
@@ -92,8 +95,15 @@ services:
   frontend:
     build:
       context: ./frontend
+      args:
+        # Where the dashboard's /api/* goes (next.config.ts): the API service, inside the
+        # Compose network. Baked in at build time.
+        API_URL: http://api:8000
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_started
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 10s
