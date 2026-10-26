@@ -1,6 +1,6 @@
 """Signal → order: buys sized by the bot's sizing mode (all-in unless a test says
-otherwise), whole-position sells, priced as a marketable limit. Each expected number is
-worked out by hand beside it.
+otherwise), whole-position sells and stop exits, priced as a marketable limit. Each
+expected number is worked out by hand beside it.
 
 Fee 0.1%, slippage 0.05%, amount step 0.0001 BTC, price step 0.01 USDT.
 """
@@ -11,9 +11,10 @@ from typing import Any
 
 import pytest
 
-from engine.bots.orders import Planned, Skip, order_for
+from engine.bots.orders import Planned, Skip, exit_order, order_for
 from engine.exchange.models import MarketRules, OrderRequest
 from engine.risk.sizing import ALL_IN, AtrRisk, FixedAmount, PercentOfEquity, Sizing
+from engine.risk.stops import NO_STOPS, AtrMultiple, Percent, Stops
 from engine.strategies.base import Action, Position, Signal
 from shared.prices import PriceUpdate
 
@@ -68,6 +69,8 @@ def plan(
     sizing: Sizing = ALL_IN,
     equity: str | None = None,  # the cash, unless given
     atr: str | None = None,
+    stops: Stops = NO_STOPS,
+    stops_atr: str | None = None,
 ) -> Planned | Skip:
     side = "b" if sig.action == "buy" else "s"
     return order_for(
@@ -83,6 +86,8 @@ def plan(
         now=NOW,
         fee_rate=FEE,
         slippage=SLIPPAGE,
+        stops=stops,
+        stops_atr=None if stops_atr is None else d(stops_atr),
     )
 
 
@@ -184,6 +189,62 @@ def test_a_sell_isnt_sized() -> None:
 
     assert isinstance(placed, Planned)
     assert (placed.request.amount, placed.sizing) == (d("0.5"), None)
+
+
+# --- Stops -----------------------------------------------------------------------------
+
+ATR_STOP = Stops(stop_loss=AtrMultiple(multiple=Decimal(2)))
+
+
+def test_a_buy_with_stops_is_planned_as_without() -> None:
+    assert order(signal("buy"), stops=Stops(stop_loss=Percent(percent=d("3")))) == request(
+        "buy", "9.9850", "100.05"
+    )
+    assert order(signal("buy"), stops=ATR_STOP, stops_atr="5") == request("buy", "9.9850", "100.05")
+
+
+def test_a_buy_whose_stops_cant_be_placed_is_skipped() -> None:
+    # Not opened without the stop it was told to have, as in a backtest (D40).
+    assert order(signal("buy"), stops=ATR_STOP) == Skip(
+        "no ATR for the stops: needs 85 candles in a row"
+    )
+    assert order(signal("buy"), stops=ATR_STOP, stops_atr="0") == Skip(
+        "ATR is 0: no price movement to set a stop by"
+    )
+
+
+def test_a_sell_doesnt_need_its_stops() -> None:
+    assert order(signal("sell"), position=HOLDING, stops=ATR_STOP) == request(
+        "sell", "0.5", "99.85"
+    )
+
+
+def exit_(position: Position = HOLDING, price: PriceUpdate | None = None) -> OrderRequest | Skip:
+    planned = exit_order(
+        position,
+        quote() if price is None else price,
+        RULES,
+        client_order_id="b1-202610231200-x1",
+        now=NOW,
+        slippage=SLIPPAGE,
+    )
+    return planned if isinstance(planned, Skip) else planned.request
+
+
+def test_a_stop_exit_sells_the_whole_position_like_a_sell() -> None:
+    # 99.9 x 0.9995 = 99.85005 -> down to 99.85, as a SELL would.
+    assert exit_() == request("sell", "0.5", "99.85").model_copy(
+        update={"client_order_id": "b1-202610231200-x1"}
+    )
+
+
+def test_a_stop_exit_needs_a_fresh_bid_and_a_sellable_amount() -> None:
+    assert exit_(price=quote(bid=None)) == Skip("no bid for BTC/USDT")
+    assert exit_(price=quote(ts=NOW - timedelta(seconds=11))) == Skip(
+        "price for BTC/USDT is 11 s old"
+    )
+    dust = Position(amount=d("0.00005"), avg_entry=d("90"))
+    assert exit_(dust) == Skip("amount 0.00005 below min_amount 0.0001")
 
 
 # --- Sells -----------------------------------------------------------------------------

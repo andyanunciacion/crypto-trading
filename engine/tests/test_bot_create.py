@@ -18,6 +18,7 @@ from engine.exchange.errors import ExchangeError
 from engine.exchange.models import Balance
 from engine.risk.paper import PaperDesk
 from engine.risk.sizing import ALL_IN, FixedAmount, PercentOfEquity, Sizing
+from engine.risk.stops import NO_STOPS, Percent, Stops
 from engine.strategies.ema_crossover import EmaCrossover, EmaCrossoverParams
 from shared.db.models import BotRow
 from shared.db.session import make_engine
@@ -56,6 +57,7 @@ async def create(
     symbol: str = "BTC/USDT",
     cash: str = "500",
     sizing: Sizing = ALL_IN,
+    stops: Stops = NO_STOPS,
 ) -> int:
     return await create_paper_bot(
         db,
@@ -67,6 +69,7 @@ async def create(
         timeframe="1h",
         cash=Decimal(cash),
         sizing=sizing,
+        stops=stops,
     )
 
 
@@ -91,6 +94,14 @@ async def test_a_bot_keeps_its_sizing(db: AsyncEngine, adapter: ExchangeAdapter)
 
     (bot,) = await load_running_bots(db, "mexc")
     assert bot.sizing == PercentOfEquity(percent=Decimal(25))
+
+
+async def test_a_bot_keeps_its_stops(db: AsyncEngine, adapter: ExchangeAdapter) -> None:
+    stops = Stops(stop_loss=Percent(percent=Decimal(3)))
+    await create(db, adapter, stops=stops)
+
+    (bot,) = await load_running_bots(db, "mexc")
+    assert bot.stops == stops
 
 
 async def test_a_symbol_the_exchange_doesnt_list_creates_nothing(
@@ -123,6 +134,17 @@ def test_arguments() -> None:
     )
     assert (args.params, args.cash, args.exchange) == ({"fast": 5}, Decimal(1000), "mexc")
     assert args.sizing == ALL_IN
+    assert args.stops == NO_STOPS
+
+
+def test_the_stops_argument_is_checked() -> None:
+    stopped = ["btc-ema", "ema_crossover", "BTC/USDT", "1h", "--stops"]
+    assert parse_args([*stopped, '{"trailing": {"kind": "percent", "percent": 2}}']).stops == Stops(
+        trailing=Percent(percent=Decimal(2))
+    )
+    for bad in ('{"take_profit": {"kind": "r", "multiple": 2}}', '{"stoploss": {}}', "not json"):
+        with pytest.raises(SystemExit):
+            parse_args([*stopped, bad])
 
 
 def test_the_sizing_argument_is_checked() -> None:

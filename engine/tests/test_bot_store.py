@@ -12,6 +12,7 @@ from structlog.testing import capture_logs
 
 from engine.bots.store import create_bot, load_running_bots, open_orders
 from engine.risk.sizing import AllIn
+from engine.risk.stops import NO_STOPS, AtrMultiple, RMultiple, Stops
 from engine.strategies.ema_crossover import EmaCrossover, EmaCrossoverParams
 from engine.strategies.rsi_mean_reversion import RsiMeanReversion, RsiMeanReversionParams
 from shared.db.models import BotRow, OrderRow, StrategyConfigRow
@@ -83,6 +84,10 @@ async def test_a_created_bot_loads_with_its_strategy(db: AsyncEngine) -> None:
     )
     assert (row["mode"], row["status"], row["switch_policy"]) == ("paper", "running", "keep")
     assert (bot.sizing, row["sizing"]) == (AllIn(), {"mode": "all_in"})
+    assert (bot.stops, row["stops"]) == (NO_STOPS, NO_STOPS_JSON)  # none, as before P4-2b
+
+
+NO_STOPS_JSON = {"stop_loss": None, "take_profit": None, "trailing": None, "atr_period": 14}
 
 
 async def test_a_bot_with_bad_sizing_is_refused(db: AsyncEngine) -> None:
@@ -92,6 +97,34 @@ async def test_a_bot_with_bad_sizing_is_refused(db: AsyncEngine) -> None:
 
     ((refused, reason),) = await refusals(db)
     assert refused == bot_id and "less than or equal to 100" in reason
+
+
+async def test_a_bot_keeps_its_stops(db: AsyncEngine) -> None:
+    stops = Stops(
+        stop_loss=AtrMultiple(multiple=Decimal(2)), take_profit=RMultiple(multiple=Decimal(2))
+    )
+    await create_bot(
+        db,
+        name="btc-ema",
+        exchange="mexc",
+        symbol=BTC,
+        timeframe="1h",
+        strategy=EmaCrossover(EmaCrossoverParams(fast=9, slow=21)),
+        created_by="test",
+        stops=stops,
+    )
+
+    (bot,) = await load_running_bots(db, "mexc")
+    assert bot.stops == stops
+
+
+async def test_a_bot_with_bad_stops_is_refused(db: AsyncEngine) -> None:
+    bot_id = await ema_bot(db)
+    # An R take-profit with no stop-loss to measure R by.
+    await set_bot(db, bot_id, stops={"take_profit": {"kind": "r", "multiple": 2}})
+
+    ((refused, reason),) = await refusals(db)
+    assert refused == bot_id and "needs a stop_loss" in reason
 
 
 async def test_names_are_unique(db: AsyncEngine) -> None:

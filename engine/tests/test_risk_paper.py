@@ -166,3 +166,35 @@ async def test_a_bad_update_is_logged_and_the_feed_carries_on(
     assert [(e["channel"], e["error"]) for e in errors] == [
         ("prices:mexc:BTC/USDT", "ValidationError")
     ]
+
+
+async def test_each_price_goes_on_after_its_fills(desk: PaperDesk, redis: Redis) -> None:
+    placed = await resting_buy(desk)
+    seen: list[tuple[Decimal | None, str]] = []
+
+    async def then(update: PriceUpdate) -> None:
+        # What the bot runner's stops see: the order this price filled, already filled.
+        order = await desk.risk.get_order(placed.client_order_id)
+        assert order is not None
+        seen.append((update.ask, order.status))
+        if len(seen) == 1:
+            raise RuntimeError("boom")
+
+    feed = asyncio.create_task(desk.feed_prices(redis, "mexc", [BTC], then=then))
+    try:
+        with capture_logs() as logs:
+            await subscribed(redis)
+            await RedisPriceSink(redis).publish(quote(ask="100"))
+            await RedisPriceSink(redis).publish(quote(ask="101"))
+            async with asyncio.timeout(5):
+                while len(seen) < 2:  # noqa: ASYNC110 (waiting on the feed task)
+                    await asyncio.sleep(0.01)
+    finally:
+        feed.cancel()
+
+    assert seen == [(Decimal(100), "closed"), (Decimal(101), "closed")]
+    # The first one's error is logged, and the next price still goes on.
+    errors = [log for log in logs if log["event"] == "paper.feed.listener_error"]
+    assert [(e["channel"], e["error"], e["detail"]) for e in errors] == [
+        ("prices:mexc:BTC/USDT", "RuntimeError", "boom")
+    ]

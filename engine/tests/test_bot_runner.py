@@ -6,6 +6,10 @@ an injected stream instead of the WebSocket one.
 EMA crossover with fast 3, slow 5 (warm-up 16): 30 flat candles at 100, then a close at
 110 crosses the fast EMA above the slow one (BUY), and a close at 90 right after
 crosses it back below (SELL). Fee 0.1%, slippage 0.05% (BTC/USDT).
+
+Stops are fed prices the way the price feed does it (`Setup.price`): the broker fills
+first, then the runner checks the stops. The BUY at candle 30 buys 9.0768 BTC at 110,
+leaving 0.553552 USDT.
 """
 
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
@@ -19,12 +23,14 @@ from sqlalchemy import URL, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 from structlog.testing import capture_logs
 
+from engine.bots.exits import Held, load_held
 from engine.bots.runner import BotRunner
 from engine.bots.store import Bot, create_bot, load_running_bots
 from engine.exchange.models import Balance, Candle, MarketRules, Timeframe
 from engine.marketdata.store import CandleStore, Series
 from engine.risk.paper import PaperDesk
 from engine.risk.sizing import ALL_IN, AtrRisk, PercentOfEquity, Sizing
+from engine.risk.stops import NO_STOPS, AtrMultiple, Percent, Stops
 from engine.strategies.base import Action, Position, Signal, Strategy, StrategyParams
 from engine.strategies.ema_crossover import EmaCrossover, EmaCrossoverParams
 from shared.db.models import BotRow, OrderRow
@@ -98,14 +104,17 @@ class FakeQuotes:
     clock: Clock
     price: PriceUpdate | None = None
 
-    def set(self, *, ask: str, bid: str, size: str | None = "50") -> None:
-        """A fresh book ticker: `size` on offer at each side (None: unknown, so no fill)."""
+    def set(
+        self, *, ask: str, bid: str, size: str | None = "50", ask_size: str | None = None
+    ) -> None:
+        """A fresh book ticker: `size` on offer at each side (None: unknown, so no fill),
+        or `ask_size` at the ask if given."""
         self.price = PriceUpdate(
             exchange="mexc",
             symbol=BTC,
             ask=d(ask),
             bid=d(bid),
-            ask_size=None if size is None else d(size),
+            ask_size=d(ask_size) if ask_size is not None else None if size is None else d(size),
             bid_size=None if size is None else d(size),
             ts=self.clock.now,
             received_at=self.clock.now,
@@ -138,7 +147,11 @@ class Setup:
         )
 
     async def ema_bot(
-        self, name: str = "btc-ema", cash: str = "1000", sizing: Sizing = ALL_IN
+        self,
+        name: str = "btc-ema",
+        cash: str = "1000",
+        sizing: Sizing = ALL_IN,
+        stops: Stops = NO_STOPS,
     ) -> Bot:
         strategy = EmaCrossover(EmaCrossoverParams(fast=3, slow=5))
         bot_id = await create_bot(
@@ -150,6 +163,7 @@ class Setup:
             strategy=strategy,
             created_by="test",
             sizing=sizing,
+            stops=stops,
         )
         await self.desk.fund(bot_id, "USDT", d(cash))
         (bot,) = [b for b in await load_running_bots(self.db, "mexc") if b.id == bot_id]
@@ -158,6 +172,31 @@ class Setup:
     def tick(self) -> None:
         """One minute on: the next candle has just closed."""
         self.clock.now += MINUTE
+
+    async def price(
+        self,
+        runner: BotRunner,
+        *,
+        bid: str,
+        size: str = "50",
+        ask: str | None = None,
+        ask_size: str | None = None,
+    ) -> None:
+        """A new book ticker a second on, as the price feed hands it out: the broker
+        fills what it reaches, then the runner checks the stops. The ask is 0.1 above."""
+        self.clock.now += timedelta(seconds=1)
+        self.quotes.set(
+            ask=str(d(bid) + d("0.1")) if ask is None else ask,
+            bid=bid,
+            size=size,
+            ask_size=ask_size,
+        )
+        assert self.quotes.price is not None
+        await self.desk.on_price(self.quotes.price)
+        await runner.on_price(self.quotes.price)
+
+    async def held(self, bot: Bot) -> Held | None:
+        return await load_held(self.db, bot.id, BTC, mode="paper")
 
     async def restart(self) -> BotRunner:
         """A new desk and runner on the same database, as after the engine was killed.
@@ -608,3 +647,277 @@ async def test_a_candle_rest_had_late_is_not_traded(setup: Setup) -> None:
         candle(30).ts.isoformat()
     ]
     assert await setup.order_rows() == 0
+
+
+# --- Stops -------------------------------------------------------------------------------
+
+BUY_ID = "b1-202610221230-b"
+STOP5 = Stops(stop_loss=Percent(percent=d("5")))  # 110 x 0.95 = 104.5
+
+
+async def bought(setup: Setup, stops: Stops, size: str = "50") -> tuple[Bot, BotRunner]:
+    """A bot with `stops` that bought at candle 30, at 110 (`size` on offer there)."""
+    bot = await setup.ema_bot(stops=stops)
+    runner = setup.runner([bot])
+    await runner.warm_up(SERIES)
+    setup.tick()
+    setup.quotes.set(ask="110", bid="109.9", size=size)
+    await runner.on_closed(SERIES, candle(30, "110"))
+    return bot, runner
+
+
+async def sold(setup: Setup, client_order_id: str) -> tuple[str, Decimal, Decimal, Any]:
+    order = await setup.desk.risk.get_order(client_order_id)
+    assert order is not None
+    return order.status, order.price, order.filled, order.reason.get("exit")
+
+
+async def test_a_stop_loss_sells_the_position(setup: Setup) -> None:
+    bot, runner = await bought(setup, STOP5)
+    # Placed when the buy filled, before any price: from the 110 entry.
+    held = await setup.held(bot)
+    assert held is not None and held.levels is not None
+    assert (held.levels.stop, held.levels.stop_loss, held.levels_entry) == (
+        d("104.5"),
+        d("104.5"),
+        d("110"),
+    )
+
+    await setup.price(runner, bid="104.6")  # not yet
+    assert await setup.order_rows() == 1
+    with capture_logs() as logs:
+        await setup.price(runner, bid="104.5")
+
+    # Limit 104.5 x 0.9995 = 104.44775 -> 104.44; sells all 9.0768 at the 104.5 bid.
+    status, limit, filled, exit_ = await sold(setup, "b1-202610221230-x1")
+    assert (status, limit, filled) == ("closed", d("104.44"), d("9.0768"))
+    assert isinstance(exit_, dict) and (exit_["kind"], exit_["attempt"], exit_["bid"]) == (
+        "stop_loss",
+        1,
+        "104.5",
+    )
+    assert await setup.desk.risk.position(bot.id, BTC) is None
+    # 0.553552 + 9.0768 x 104.5 = 948.5256, less its 0.9485256 fee: 948.1306264.
+    assert await setup.desk.risk.balances(bot.id) == {"USDT": usdt("948.1306264")}
+    (logged,) = [log for log in logs if log["event"] == "bot.exit"]
+    assert (logged["kind"], logged["client_order_id"], logged["status"]) == (
+        "stop_loss",
+        "b1-202610221230-x1",
+        "closed",
+    )
+    # Flat again: later prices do nothing.
+    await setup.price(runner, bid="90")
+    assert await setup.order_rows() == 2
+
+
+async def test_a_trailing_stop_follows_the_bid_and_sells_on_the_turn(setup: Setup) -> None:
+    bot, runner = await bought(setup, Stops(trailing=Percent(percent=d("10"))))  # 99
+    with capture_logs() as logs:
+        await setup.price(runner, bid="120")  # 10% below 120: 108
+        await setup.price(runner, bid="115")  # lower: stays at 108
+    raised = [(log["old"], log["new"]) for log in logs if log["event"] == "bot.stop_raised"]
+    assert [(d(old), d(new)) for old, new in raised] == [(d("99"), d("108"))]
+    held = await setup.held(bot)
+    assert held is not None and held.levels is not None
+    assert (held.levels.stop, held.levels.peak) == (d("108"), d("120"))
+
+    await setup.price(runner, bid="108.1")
+    assert await setup.order_rows() == 1
+    await setup.price(runner, bid="108")
+
+    # 108 x 0.9995 = 107.946 -> 107.94.
+    status, limit, filled, exit_ = await sold(setup, "b1-202610221230-x1")
+    assert (status, limit, filled, exit_["kind"]) == (
+        "closed",
+        d("107.94"),
+        d("9.0768"),
+        "trailing_stop",
+    )
+
+
+async def test_a_take_profit_sells_the_position(setup: Setup) -> None:
+    bot, runner = await bought(setup, Stops(take_profit=Percent(percent=d("10"))))  # 121
+    await setup.price(runner, bid="120.9")
+    assert await setup.order_rows() == 1
+    await setup.price(runner, bid="121")
+
+    # 121 x 0.9995 = 120.9395 -> 120.93; all 9.0768 at the 121 bid.
+    status, limit, filled, exit_ = await sold(setup, "b1-202610221230-x1")
+    assert (status, limit, filled, exit_["kind"]) == (
+        "closed",
+        d("120.93"),
+        d("9.0768"),
+        "take_profit",
+    )
+    assert await setup.desk.risk.position(bot.id, BTC) is None
+
+
+async def test_an_exit_the_bid_falls_below_is_placed_again(setup: Setup) -> None:
+    bot, runner = await bought(setup, STOP5)
+    await setup.price(runner, bid="104.5", size="4")  # only 4 BTC wanted at the bid
+    status, _, filled, _ = await sold(setup, "b1-202610221230-x1")
+    assert (status, filled) == ("open", d("4"))
+
+    # The same bid again: its 4 BTC were taken already, so no fill, and the exit still
+    # reaches the bid. No second exit: it's left to fill.
+    await setup.price(runner, bid="104.5", size="4")
+    assert await setup.order_rows() == 2
+
+    # The bid falls below its 104.44 limit: replaced at the new bid.
+    with capture_logs() as logs:
+        await setup.price(runner, bid="104")
+    status, _, filled, _ = await sold(setup, "b1-202610221230-x1")
+    assert (status, filled) == ("canceled", d("4"))
+    # 104 x 0.9995 = 103.948 -> 103.94, for the 5.0768 left.
+    status, limit, filled, exit_ = await sold(setup, "b1-202610221230-x2")
+    assert (status, limit, filled, exit_["kind"], exit_["attempt"]) == (
+        "closed",
+        d("103.94"),
+        d("5.0768"),
+        "stop_loss",
+        2,
+    )
+    (logged,) = [log for log in logs if log["event"] == "bot.exit"]
+    assert (logged["again"], logged["canceled"]) == (True, ["b1-202610221230-x1"])
+    assert await setup.desk.risk.position(bot.id, BTC) is None
+
+
+async def test_an_exit_cancels_a_buy_still_filling_first(setup: Setup) -> None:
+    bot, runner = await bought(setup, STOP5, size="4")  # 4 of 9.0768 bought, the rest open
+
+    # Nothing on offer at the ask, so the buy can't fill more; the bid hits the stop.
+    await setup.price(runner, bid="104.5", ask="104.6", ask_size="0")
+
+    buy = await setup.desk.risk.get_order(BUY_ID)
+    assert buy is not None and (buy.status, buy.filled) == ("canceled", d("4"))
+    status, _, filled, _ = await sold(setup, "b1-202610221230-x1")
+    assert (status, filled) == ("closed", d("4"))
+    assert await setup.desk.risk.position(bot.id, BTC) is None
+    # Nothing left held for the buy: 1000 - 440.44 + 418 - 0.418 = 977.142.
+    assert await setup.desk.risk.balances(bot.id) == {"USDT": usdt("977.142")}
+
+
+async def test_an_exit_and_a_sell_on_the_same_candle(setup: Setup) -> None:
+    bot, runner = await bought(setup, STOP5)
+    await setup.price(runner, bid="104.5", size="4")  # the exit sells 4, 5.0768 left
+
+    # The candle closes on the cross down: the runner cancels the exit's remainder, as
+    # any leftover, and the SELL sells what's left.
+    setup.tick()
+    setup.quotes.set(ask="90.1", bid="90")
+    await runner.on_closed(SERIES, candle(31, "90"))
+
+    status, _, filled, _ = await sold(setup, "b1-202610221230-x1")
+    assert (status, filled) == ("canceled", d("4"))
+    sell = await setup.desk.risk.get_order("b1-202610221231-s")
+    assert sell is not None and (sell.status, sell.amount) == ("closed", d("5.0768"))
+    assert await setup.desk.risk.position(bot.id, BTC) is None
+
+
+async def test_after_the_candles_cancel_a_fired_stop_sells_the_rest(setup: Setup) -> None:
+    bot, runner = await bought(setup, STOP5)
+    await setup.price(runner, bid="104.5", size="4")  # the exit sells 4, 5.0768 left
+    setup.tick()
+    await runner.on_closed(SERIES, candle(31, "110"))  # no cross: HOLD; the exit is cancelled
+    status, _, _, _ = await sold(setup, "b1-202610221230-x1")
+    assert status == "canceled"
+
+    # The bid is back above the stop, but the stop fired: the rest is sold, as one exit.
+    await setup.price(runner, bid="106")
+
+    # 106 x 0.9995 = 105.947 -> 105.94.
+    status, limit, filled, exit_ = await sold(setup, "b1-202610221230-x2")
+    assert (status, limit, filled, exit_["kind"]) == (
+        "closed",
+        d("105.94"),
+        d("5.0768"),
+        "stop_loss",
+    )
+    assert await setup.desk.risk.position(bot.id, BTC) is None
+
+
+async def test_a_restart_keeps_the_levels(setup: Setup) -> None:
+    _, runner = await bought(setup, Stops(trailing=Percent(percent=d("10"))))
+    await setup.price(runner, bid="120")  # trailed to 108
+
+    restarted = await setup.restart()
+    with capture_logs() as logs:
+        await restarted.recover()
+    (recovered,) = [log for log in logs if log["event"] == "bot.recovered"]
+    levels = recovered["levels"]
+    assert (d(levels["stop"]), d(levels["peak"])) == (d("108"), d("120"))
+
+    # The new runner knows nothing but the database, and sells at the same 108.
+    await setup.price(restarted, bid="108")
+    status, _, filled, exit_ = await sold(setup, "b1-202610221230-x1")
+    assert (status, filled, exit_["kind"]) == ("closed", d("9.0768"), "trailing_stop")
+
+
+async def test_a_later_fill_of_the_buy_places_the_levels_again(setup: Setup) -> None:
+    bot, runner = await bought(setup, STOP5, size="4")  # 4 at 110: stop 104.5
+
+    # The rest of the buy fills at a 100 ask. The 99.9 bid is below the old stop, but the
+    # levels move to the new average entry first, so it isn't a stop.
+    with capture_logs() as logs:
+        await setup.price(runner, bid="99.9", ask="100")
+
+    held = await setup.held(bot)
+    assert held is not None and held.levels is not None
+    entry = held.position.avg_entry
+    # (4 x 110 + 5.0768 x 100) / 9.0768 = 104.40...
+    assert (held.position.amount, round(entry, 2)) == (d("9.0768"), d("104.41"))
+    assert (held.levels_entry, held.levels.stop) == (entry, entry * d("0.95"))
+    assert [log["again"] for log in logs if log["event"] == "bot.levels_placed"] == [True]
+    assert await setup.order_rows() == 1  # no exit
+
+
+async def test_an_atr_stop_is_placed_by_the_atr_at_the_signal(setup: Setup) -> None:
+    setup.market.rest = [ranged(i) for i in range(30)]  # ATR 5 at candle 30 (above)
+    stops = Stops(stop_loss=AtrMultiple(multiple=d("2")), atr_period=3)
+    bot = await setup.ema_bot(stops=stops)
+    runner = setup.runner([bot])
+    await runner.warm_up(SERIES)
+    setup.tick()
+    setup.quotes.set(ask="110", bid="109.9")
+    await runner.on_closed(SERIES, ranged(30, "110"))
+
+    # The buy records the stops it gets, with the ATR they're placed by.
+    buy = await setup.desk.risk.get_order(BUY_ID)
+    assert buy is not None
+    recorded = buy.reason["stops"]
+    assert isinstance(recorded, dict) and recorded["settings"] == {
+        "stop_loss": {"kind": "atr", "multiple": "2"},
+        "take_profit": None,
+        "trailing": None,
+        "atr_period": 3,
+    }
+    assert isinstance(recorded["atr"], str) and d(recorded["atr"]) == 5
+    # 110 - 2 x 5 = 100.
+    held = await setup.held(bot)
+    assert held is not None and held.levels is not None and held.levels.stop == 100
+
+
+async def test_an_exit_that_cant_be_placed_is_tried_once_a_candle(setup: Setup) -> None:
+    _, runner = await bought(setup, STOP5)
+    await setup.price(runner, bid="104.5", size="9.0767")  # leaves 0.0001 BTC unsold
+
+    with capture_logs() as logs:
+        await setup.price(runner, bid="104")  # replaced, but 0.0001 is too small to sell
+        await setup.price(runner, bid="103.9")  # not tried again this candle
+        setup.tick()
+        await runner.on_closed(SERIES, candle(31, "110"))  # HOLD
+        await setup.price(runner, bid="103.8")  # a new candle: tried, and said, once more
+
+    skipped = [log["reason"] for log in logs if log["event"] == "bot.exit_skipped"]
+    assert len(skipped) == 2 and all("below min_cost" in r for r in skipped), skipped
+    assert await setup.order_rows() == 2  # the buy and the one exit
+
+
+async def test_a_bot_without_stops_is_left_alone(setup: Setup) -> None:
+    bot, runner = await bought(setup, NO_STOPS)
+
+    await setup.price(runner, bid="50")
+
+    assert await setup.order_rows() == 1
+    held = await setup.held(bot)
+    assert held is not None and (held.levels, held.plan) == (None, None)

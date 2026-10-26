@@ -15,8 +15,9 @@ A backtest only has candles, not the order prices came in, so it checks each can
 pessimistically (`exit_on_candle`): a price that gapped past a level fills at the open;
 with a stop and a take-profit both inside one candle, the stop is assumed to have come
 first; and a candle's own high lifts the trailing stop only after the candle
-(`after_candle`), never into the low of that same candle. Live bots (P4-2b) check every
-price instead.
+(`after_candle`), never into the low of that same candle. Paper and live bots check
+every price instead (`exit_at_price`, `after_price`): one price comes in one order, so
+there's nothing to assume. They check the bid, which is what a sell gets.
 """
 
 from dataclasses import dataclass, replace
@@ -144,9 +145,32 @@ def exit_on_candle(state: ExitState, candle: Candle) -> Exit | None:
 
 def after_candle(state: ExitState, stops: Stops, candle: Candle) -> ExitState:
     """The levels for the next candle: the trailing stop follows this one's high."""
-    if candle.high <= state.peak:
+    return after_price(state, stops, candle.high)
+
+
+def exit_at_price(state: ExitState, bid: Decimal) -> Exit | None:
+    """Whether a live `bid` reaches a level. The exit's price is the bid itself."""
+    if state.stop is not None and bid <= state.stop:
+        return Exit(_stop_kind(state), bid)
+    if state.take_profit is not None and bid >= state.take_profit:
+        return Exit("take_profit", bid)
+    return None
+
+
+def after_price(state: ExitState, stops: Stops, price: Decimal) -> ExitState:
+    """The levels after `price`: a new high lifts the trailing stop, never lowers it."""
+    if price <= state.peak:
         return state
-    return _trail(replace(state, peak=candle.high), stops)
+    return _trail(replace(state, peak=price), stops)
+
+
+def reentry(state: ExitState, stops: Stops, entry: Decimal) -> ExitState | NoLevels:
+    """The levels again, for a position whose average entry moved to `entry` (its buy
+    filled once more). They keep the ATR at entry, and the trailing stop the peak so far."""
+    placed = levels_at_entry(stops, entry, state.atr)
+    if isinstance(placed, NoLevels):
+        return placed
+    return after_price(placed, stops, state.peak)
 
 
 def _trail(state: ExitState, stops: Stops) -> ExitState:

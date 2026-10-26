@@ -263,19 +263,62 @@ All steps done 2026-10-25 (the run counts).
 
 **Done when:** tests trigger each stop on known price paths. ✔
 
-**P4-2b · Stops for paper bots**
-- [ ] `bots.stops` (migration) and `bots.create --stops`
-- [ ] Levels placed when a buy fills, kept in `positions.stop`/`take_profit`, so a restart keeps them; trailing stop raised on each price, never lowered
-- [ ] A watcher on live prices: bid ≤ stop or ≥ take-profit sells the whole position through the RiskManager, as a marketable limit with its own client order ID (one that a retry after a cancel doesn't collide with), and never twice at once
-- [ ] What happens with the strategy's own orders around it (an exit and a SELL on the same candle; the next candle's leftover cancel)
-- [ ] Compare a paper bot's stop exits with a backtest over the same candles
+**P4-2b · Stops for paper bots** (#48)
+- [x] `bots.stops` (migration 0007) and `bots.create --stops`
+- [x] Levels placed when a buy fills, from `avg_entry` (again if a later slice moves it), with the settings and ATR the buy recorded in its `reason`. Kept on `positions` (`stop`, `take_profit`, plus `stop_loss`, `peak`, `entry_atr`, `levels_entry`), so a restart keeps them. The trailing stop follows the bid, never lowered
+- [x] `BotRunner.on_price`, after each update's fills (`PaperDesk.feed_prices(then=...)`): bid ≤ stop or ≥ take-profit cancels the bot's open orders and sells the whole position through the RiskManager, as a marketable limit. Its ID is `<buy id minus b>x<n>` (`b4-202610241429-x1`, `-x2` after a cancel). Once fired, it sells until the position is gone; an exit the bid fell below is replaced; never two at once
+- [x] Around the strategy's own orders: the candle's leftover cancel also cancels an exit's remainder, then a SELL sells what's left (or HOLD, and the next price sells it). A bot's candle and its prices take turns (one lock per bot)
+- [x] Compare a paper bot's stop exits with a backtest over the same candles (below)
 
-**Done when:** tests show each stop selling a paper position on a known price path, a restart keeps the levels, and a stopped paper run's exits check out by hand against the logged prices.
+**Done when:** tests show each stop selling a paper position on a known price path, a restart keeps the levels, and a stopped paper run's exits check out by hand against the logged prices. ✔
+
+Tests: `test_stops.py` (`exit_at_price`, `after_price`, `reentry`), `test_bot_exits.py` (`on_bid`, exit IDs), `test_bot_orders.py` (stops before a buy, `exit_order`), `test_bot_runner.py` § Stops (one price path each: stop-loss, trailing, take-profit, a replaced exit, a buy cancelled first, exit + SELL on one candle, a fired stop after the candle's cancel, restart, a later buy fill, ATR stop, a dust exit tried once a candle, no stops), `test_risk_paper.py` (`then` after the fills).
+
+**The paper run** (2026-10-25 and 26, before merging; the code was the branch's, on migration 0007):
+1. [x] Apply migration 0007: `docker compose up --build -d`, then `docker compose exec db psql -U crypto -d crypto_trading -tAc "SELECT version_num FROM alembic_version"` shows `0007`.
+2. [x] Create a fast bot with tight stops, so a few hours give several exits: `docker compose run --rm engine python -m engine.bots.create btc-stops ema_crossover BTC/USDT 1m --params '{\"fast\": 9, \"slow\": 21}' --cash 1000 --stops '{\"stop_loss\": {\"kind\": \"percent\", \"percent\": 0.3}, \"take_profit\": {\"kind\": \"r\", \"multiple\": 2}, \"trailing\": {\"kind\": \"percent\", \"percent\": 0.2}}'`, then `docker compose restart engine`. Keep the PC awake.
+   - Bot 5 `btc-stops` (9/21) never traded: its cross up came before it started, and entries are events (D31). It was stopped.
+   - Bot 6 `btc-stops-5-13` (EMA 5/13, the same stops) ran from 2026-10-25 12:03 UTC.
+   - Bot 7 `btc-stops-9-21` (9/21) joined at 15:50. It was added because 5/13's own SELL kept beating the trailing stop. A 7-day backtest put 9/21's stop exits at 31% of its exits, against 15% for 5/13.
+   - The PC was shut down from 16:10 to 02:49 UTC the next day, with both bots flat. The night's candles were backfilled, and each part was compared on its own.
+3. [x] Once it holds a position, restart the engine (`docker compose kill engine`, then `docker compose up -d engine`). `bot.recovered` shows the levels, and the position still exits on them afterwards.
+   - Killed at 12:58:45 UTC while bot 6 held 0.01241318 BTC at 80438.78.
+   - `bot.recovered` logged the same levels, and the `positions` row was identical before and after: stop 80299.42930, take-profit 80921.41268, stop-loss 80197.46366, peak 80460.35.
+   - The trailing stop kept rising after the restart. The strategy's SELL closed the position at 13:05, above the stop.
+4. [x] After a few hours, stop the bot (CLAUDE.md) and restart the engine. Check each `bot.exit` by hand:
+   - its `bid` is ≤ its `stop` (`stop_loss`/`trailing_stop`), or ≥ its `take_profit`;
+   - its fills (`broker.order.filled` for that client order ID) are between the bid in their logged `quote` and the exit's `limit`;
+   - the levels in `bot.levels_placed` match the entry (0.3% below it, and 2 × 0.3% above);
+   - each `bot.stop_raised` is 0.2% below the bid it logs.
+
+   Four exits, all `trailing_stop` (with these settings the trailing stop starts above the stop-loss, so a `stop_loss` exit can't happen):
+
+   | Time (UTC) | Bots | Peak bid | Stop | Bid | Fills | Limit |
+   |---|---|---|---|---|---|---|
+   | 2026-10-26 03:17:55 | 6, 7 | 79831.41 | 79671.74718 | 79669.95 | all at 79669.95 | 79630.11 |
+   | 2026-10-26 04:22:39 | 6, 7 | 80075.53 | 79915.37894 | 79914.84 | all at 79914.84 | 79874.88 |
+
+   - Each stop is 0.2% below its peak, and each limit is the bid × (1 − 0.05%), rounded down.
+   - At 03:17:55 the bid showed only 0.001957 BTC. Bot 6 took all of it and bot 7 none. The next two quotes (0.002279, then 0.05107949, at the same bid) filled the rest of both orders. `taken_at_best` came to 0.02491404, which is both positions, so nothing filled twice (D34).
+   - A script checked every `bot.levels_placed` (19) and `bot.stop_raised` (785) in the engine's log against these rules: 0 problems.
+   - Four of the 19 were levels placed again while bot 6's 03:01 buy filled in slices, each from the new `avg_entry` and keeping the peak.
+   - No `bot.error`, `bot.exit_skipped`, `bot.levels_failed` or `paper.feed.listener_error`.
+   - Bot 7 was stopped at 04:32 UTC. Bot 6 held a position then, so it kept running until flat (a stopped bot's position isn't watched, D40). Its last trade closed by the strategy's SELL at 04:43, above the stop. It was stopped at 04:44, at 980.50 USDT. Bot 7 ended at 994.74 USDT. The engine now logs `bots.loaded` with `[]`.
+5. [x] Compare with a backtest over the same candles: `docker compose run --rm engine python -m engine.backtest.run ema_crossover BTC/USDT 1m --days 1 --params '{\"fast\": 9, \"slow\": 21}' --stops '<the same>'`. For the trades in the bot's hours, match exits by time and kind. Note where they differ, and why (the bid path vs. the candle's high and low, D40). Over ~20% apart → revisit the candle assumptions (D40).
+   - Bot 6 on 2026-10-25, 12:38–16:10, against run 45: 7 trades, all closed by the strategy's SELL. The backtest had the same buys and sells in the same minutes, and no stop exits either. The closest call was 17 USDT above the stop.
+   - 2026-10-26 from 03:02, against runs 49 (5/13) and 50 (9/21): the same trades in the same minutes. Bot 6: 4 round trips, 2 `trailing_stop`. Bot 7: 3 round trips, 2 `trailing_stop`. The backtest's 02:48–02:50 trade came before the engine's first candle that day, so it's left out.
+   - Paper's stop fills were 36–39 USDT better. The backtest fills a stop at the stop minus 0.05% slippage, while paper took the live bid.
+   - The backtest's first stop sat about 2 USDT higher, because it trails the candle's high (79833.79) rather than the bid (79831.41), as D40 expects.
+   - Strategy SELLs and buys were also about 40 USDT better in paper: the same slippage assumption. So backtests here are on the cautious side.
+6. [x] Tick the box above and ROADMAP's Stops, and note the result here.
+
+   Not a stop result, but worth knowing: these 1m EMA bots lose money. Over 7 days the backtests lost 69% (5/13) and 51% (9/21), with fees of 458 and 332 USDT on 1000. A round trip costs about 0.3% in fees and slippage, more than a 0.2% trailing stop can save. They were only here to exercise the stops.
 
 ### P4-3 · Limits
 `risk` `money` · Depends on: P4-1
 - [ ] Max open positions, max exposure per coin, max daily loss (resets at Asia/Manila midnight), max drawdown
 - [ ] `risk_settings` and `risk_events` tables
+- [ ] Never block a sell or a stop's exit (`reason.exit`): they only lower exposure (D40)
 
 **Done when:** a test per limit shows it blocks orders, and every block is written to `risk_events`.
 
