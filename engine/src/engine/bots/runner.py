@@ -35,13 +35,20 @@ After the engine was down or offline (D38):
   (all the candles missed in an outage arrive at once) just fill its window and cancel
   its leftovers (`bot.caught_up`): their signals are stale, and the price is not theirs.
 
-The kill switch (risk/kill.py, D43) stops bots with `stop()`: once whatever a bot is
-doing has finished, it never acts again, on a candle or a price. A series whose bots
-are all stopped ends its candle stream.
+The kill switch (risk/kill.py, D43) and the Bots page stop bots with `stop()`: once
+whatever a bot is doing has finished, it never acts again, on a candle or a price. A
+series whose bots are all stopped ends its candle stream.
+
+The Bots page starts them with `add()` (D47), while the others run. The new bot warms
+up in the background, so a slow REST call never holds up the command listener (a kill
+must stay fast). On a series that's already streaming, it's seeded from REST and then,
+in one step with no await in between, with the candles the series delivered since, so
+it joins with a whole window. A series that isn't streaming (new, or ended) is started.
 """
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable, Collection, Mapping, Sequence
+from collections import deque
+from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Mapping, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -86,6 +93,8 @@ log = structlog.get_logger()
 
 # Closed candles of a series after the given open time, as CandleStream.closed() yields them.
 StreamFactory = Callable[[str, Timeframe, datetime], AsyncGenerator[Candle]]
+# A series' newest candles, for a bot joining it: enough for the seconds its warm-up takes.
+RECENT_CANDLES = 5
 
 
 class MarketSource(CandleSource, Protocol):
@@ -116,6 +125,7 @@ class BotRunner:
         *,
         stream: StreamFactory | None = None,
         on_kline: KlineHook | None = None,
+        on_new_symbol: Callable[[str], None] | None = None,
         clock: Callable[[], datetime] = _utcnow,
         fee_rate: Decimal = DEFAULT_FEE_RATE,
     ) -> None:
@@ -126,48 +136,78 @@ class BotRunner:
         self._db = db
         self._stream = stream or self._live_stream
         self._on_kline = on_kline  # the forming candle, for the dashboard's chart (D46)
+        # Told each symbol a bot added later trades, so its prices get streamed.
+        self._on_new_symbol = on_new_symbol
         self._clock = clock
         self._fee_rate = fee_rate  # the fee the PaperBroker charges, left room for when buying
         self._series: dict[Series, list[_Running]] = {}
         self._watched: dict[str, list[Bot]] = {}  # bots with stops, by symbol
         self._locks: dict[int, asyncio.Lock] = {}  # a bot's candle and prices take turns
         self._exit_skipped: dict[int, str] = {}  # bots whose exit can't be placed this candle
-        self._stopped: set[int] = set()  # bots the kill switch stopped: they never act again
+        self._stopped: set[int] = set()  # bots stopped: they never act again (until added)
+        self._tasks: asyncio.TaskGroup | None = None  # set while run() runs
+        self._live: set[Series] = set()  # series with a stream task
+        self._warm: set[Series] = set()  # ... that has warmed up its bots
+        self._recent: dict[Series, deque[Candle]] = {}  # each series' newest closed candles
+        self._joining: dict[int, asyncio.Task[None]] = {}  # bots added, still warming up
         for bot in bots:
-            # ATR sizing or stops may need more candles than the strategy: the runner keeps them.
-            signals = SignalRunner(bot.strategy, bot.symbol, bot.timeframe, keep=_atr_window(bot))
-            self._series.setdefault(bot.series, []).append(_Running(bot, signals))
+            self._enlist(_Running(bot, _signals(bot)))
             self._locks[bot.id] = asyncio.Lock()
-            if bot.stops != NO_STOPS:
-                self._watched.setdefault(bot.symbol, []).append(bot)
+
+    @property
+    def running(self) -> list[int]:
+        """The bots it runs, warmed up: not stopped, not still joining."""
+        return sorted(
+            r.bot.id
+            for series, bots in self._series.items()
+            if series in self._warm
+            for r in bots
+            if r.bot.id not in self._stopped
+        )
 
     async def run(self) -> None:
-        """Run every bot until cancelled."""
+        """Run every bot until cancelled. With no bots, it waits for `add()`."""
         async with asyncio.TaskGroup() as tasks:
-            for series in self._series:
-                tasks.create_task(self._run_series(series))
+            self._tasks = tasks
+            try:
+                for series in list(self._series):
+                    self._start_series(series)
+                await asyncio.Event().wait()  # only cancelling ends it
+            finally:
+                self._tasks = None
+
+    def add(self, bot: Bot) -> bool:
+        """Start running `bot`, while the others run (D47). False if it runs already.
+
+        It warms up in the background (module docstring), and only acts once that's
+        done. Stopped before then, it never joins. Call it while `run()` runs.
+        """
+        if bot.id in self._joining or self._runs(bot.id):
+            return False
+        if self._tasks is None:
+            raise RuntimeError("add() needs run() to be running")
+        self._forget(bot.id)  # an earlier run of it, stopped, perhaps with other settings
+        self._stopped.discard(bot.id)
+        self._exit_skipped.pop(bot.id, None)
+        self._locks.setdefault(bot.id, asyncio.Lock())
+        if self._on_new_symbol is not None:
+            self._on_new_symbol(bot.symbol)  # first: its first order needs a fresh price
+        self._joining[bot.id] = self._tasks.create_task(self._join(bot))
+        log.info("bot.starting", bot_id=bot.id, name=bot.name, series=str(bot.series))
+        return True
 
     async def warm_up(self, series: Series) -> datetime:
         """Seed the bots on `series` with their warm-up candles from REST.
 
         Returns the open time of the newest one: the live stream carries on after it.
         """
-        bots = self._series[series]
-        step = STEP[series.timeframe]
-        last_closed = floor(self._clock(), series.timeframe) - step
-        needed = max(max(b.signals.strategy.warmup_candles, _atr_window(b.bot), 1) for b in bots)
-        history = await fetch_range(
-            self._market,
-            series.symbol,
-            series.timeframe,
-            last_closed - (needed - 1) * step,
-            last_closed + step,
-        )
-        await self._candles.upsert(series, history)
+        # A copy: a bot that joins while this waits on REST seeds itself (_join).
+        bots = list(self._series[series])
+        history = await self._history(series, bots)
         for running in bots:
             running.signals.seed(history)
         # REST may not have the newest candle yet; then the stream fetches it first.
-        last = history[-1].ts if history else last_closed
+        last = history[-1].ts if history else self._last_closed(series)
         log.info(
             "bots.warmed_up",
             series=str(series),
@@ -225,9 +265,11 @@ class BotRunner:
                 error=type(exc).__name__,
                 detail=str(exc),
             )
+        self._recent.setdefault(series, deque(maxlen=RECENT_CANDLES)).append(candle)
         step = STEP[series.timeframe]
         closed_ago = self._clock() - (candle.ts + step)
-        for running in self._series[series]:
+        # A copy: a bot joining meanwhile starts at the next candle (it's seeded with this one).
+        for running in list(self._series[series]):
             try:
                 async with self._locks[running.bot.id]:
                     if running.bot.id in self._stopped:
@@ -255,7 +297,7 @@ class BotRunner:
         """
         if update.bid is None or self._clock() - update.ts > MAX_QUOTE_AGE:
             return
-        for bot in self._watched.get(update.symbol, []):
+        for bot in list(self._watched.get(update.symbol, [])):
             lock = self._locks[bot.id]
             if bot.exchange != update.exchange or lock.locked():
                 continue  # acting on its candle; the next price checks again
@@ -275,10 +317,12 @@ class BotRunner:
                 )
 
     async def stop(self, bot_ids: Collection[int]) -> list[int]:
-        """Stop the bots in `bot_ids` that this runner runs (the kill switch, D43).
+        """Stop the bots in `bot_ids` that this runner runs (the kill switch, D43; the
+        Bots page, D47).
 
         Each one first finishes what it's doing (a candle, or a price), so when this
-        returns, none of them is acting or will act again. Returns the ones it stopped.
+        returns, none of them is acting or will act again. A bot still warming up after
+        `add()` never joins. Returns the ones it stopped.
         """
         stopping = [i for i in bot_ids if i in self._locks and i not in self._stopped]
         self._stopped.update(stopping)  # first, so nothing new starts while we wait
@@ -291,25 +335,112 @@ class BotRunner:
 
     # --- Internals ----------------------------------------------------------------------
 
+    def _enlist(self, running: _Running) -> None:
+        bot = running.bot
+        self._series.setdefault(bot.series, []).append(running)
+        if bot.stops != NO_STOPS:
+            self._watched.setdefault(bot.symbol, []).append(bot)
+
+    def _forget(self, bot_id: int) -> None:
+        for bots in self._series.values():
+            bots[:] = [r for r in bots if r.bot.id != bot_id]
+        for watched in self._watched.values():
+            watched[:] = [b for b in watched if b.id != bot_id]
+
+    def _runs(self, bot_id: int) -> bool:
+        """On a series (maybe still warming up) and not stopped."""
+        enlisted = any(r.bot.id == bot_id for bots in self._series.values() for r in bots)
+        return enlisted and bot_id not in self._stopped
+
+    def _start_series(self, series: Series) -> None:
+        assert self._tasks is not None  # run() is running
+        # Stopped bots stay behind: their windows are old, and a restart re-adds them anew.
+        bots = [r for r in self._series[series] if r.bot.id not in self._stopped]
+        self._series[series] = bots
+        if bots:
+            self._live.add(series)
+            self._tasks.create_task(self._run_series(series))
+
+    def _last_closed(self, series: Series) -> datetime:
+        return floor(self._clock(), series.timeframe) - STEP[series.timeframe]
+
+    async def _history(self, series: Series, bots: Sequence[_Running]) -> list[Candle]:
+        """The closed candles `bots` need to warm up, up to the newest, from REST (and stored)."""
+        step = STEP[series.timeframe]
+        last_closed = self._last_closed(series)
+        needed = max(max(b.signals.strategy.warmup_candles, _atr_window(b.bot), 1) for b in bots)
+        history = await fetch_range(
+            self._market,
+            series.symbol,
+            series.timeframe,
+            last_closed - (needed - 1) * step,
+            last_closed + step,
+        )
+        await self._candles.upsert(series, history)
+        return history
+
+    async def _join(self, bot: Bot) -> None:
+        """Warm up a bot `add()` started, then put it on its series."""
+        running = _Running(bot, _signals(bot))
+        series = bot.series
+        try:
+            history: list[Candle] = []
+            if series in self._live:
+                history = await self._until_done(
+                    "bot.warm_up_failed", series, lambda: self._history(series, [running])
+                )
+            if bot.id in self._stopped:
+                log.info("bot.start_abandoned", bot_id=bot.id, name=bot.name, reason="stopped")
+                return
+            # From here to the end, no await: no candle can slip in between.
+            if series in self._live:
+                newest = history[-1].ts if history else None
+                running.signals.seed(history)
+                running.signals.seed(
+                    [c for c in self._recent.get(series, ()) if newest is None or c.ts > newest]
+                )
+                self._enlist(running)
+                log.info(
+                    "bot.started",
+                    bot_id=bot.id,
+                    name=bot.name,
+                    series=str(series),
+                    candles=len(running.signals.window),
+                )
+            else:
+                # Its stream warms it up, with whichever bots are on the series.
+                self._enlist(running)
+                self._start_series(series)
+                log.info("bot.started", bot_id=bot.id, name=bot.name, series=str(series))
+        finally:
+            self._joining.pop(bot.id, None)
+
     async def _run_series(self, series: Series) -> None:
-        last = await self._warm_up_until_done(series)
+        last = await self._until_done("bots.warm_up_failed", series, lambda: self.warm_up(series))
+        self._warm.add(series)
         async with aclosing(self._stream(series.symbol, series.timeframe, last)) as closed:
             async for candle in closed:
                 await self.on_closed(series, candle)
                 if all(r.bot.id in self._stopped for r in self._series[series]):
                     log.info("bots.series_ended", series=str(series), reason="every bot stopped")
+                    # Now, before the stream closes (an await): a bot added from here on
+                    # starts the series anew, and this task mustn't undo that.
+                    self._live.discard(series)
+                    self._warm.discard(series)
                     return
 
-    async def _warm_up_until_done(self, series: Series) -> datetime:
-        # The adapter already retried network errors; this covers a longer outage at startup.
+    async def _until_done[T](
+        self, event: str, series: Series, attempt: Callable[[], Awaitable[T]]
+    ) -> T:
+        # The adapter already retried network errors; this covers a longer outage.
         backoff = Backoff()
         while True:
             try:
-                return await self.warm_up(series)
+                return await attempt()
             except Exception as exc:
                 delay = backoff.next_delay()
                 log.warning(
-                    "bots.warm_up_failed",
+                    event,
                     series=str(series),
                     attempt=backoff.attempts,
                     delay_s=round(delay, 2),
@@ -516,6 +647,11 @@ class BotRunner:
             canceled=canceled,
             quote=update.model_dump(mode="json"),
         )
+
+
+def _signals(bot: Bot) -> SignalRunner[Any]:
+    # ATR sizing or stops may need more candles than the strategy: the runner keeps them.
+    return SignalRunner(bot.strategy, bot.symbol, bot.timeframe, keep=_atr_window(bot))
 
 
 def _atr_window(bot: Bot) -> int:

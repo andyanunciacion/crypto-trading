@@ -21,6 +21,10 @@ In order:
 A restarted engine carries on selling every position whose latest exit is the kill
 switch's (`resume`), since the restart cancelled that exit (D38). It's worked out from
 `orders`, so nothing extra is stored.
+
+`close_bot()` sells one bot's position the same way, for "Stop + close position" on the
+Bots page (D47, control/bots.py stops the bot first). Its exits have kind `close`, and
+a restart carries on with them too.
 """
 
 import asyncio
@@ -37,7 +41,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from engine.backtest.models import default_slippage
-from engine.bots.exits import Wait, exit_order_id, load_held, next_exit
+from engine.bots.exits import ExitCause, Wait, exit_order_id, load_held, next_exit
 from engine.bots.orders import Skip, exit_order
 from engine.bots.store import open_orders
 from engine.brokers.paper import RulesSource
@@ -49,7 +53,9 @@ from shared.prices import PriceUpdate
 
 log = structlog.get_logger()
 
-KILL_SWITCH = "kill_switch"  # the `kind` of its exits
+KILL_SWITCH: ExitCause = "kill_switch"  # the `kind` of its exits
+CLOSE: ExitCause = "close"  # ... and of one bot's, closed from the Bots page
+_SELLING_KINDS = (KILL_SWITCH, CLOSE)
 
 
 class Stoppable(Protocol):
@@ -71,6 +77,7 @@ class _Selling:
     exchange: str
     symbol: str
     command_id: UUID | None  # None if the command is unknown (an old exit without one)
+    kind: ExitCause = KILL_SWITCH  # or CLOSE: one bot's, from the Bots page
 
 
 class KillSwitch:
@@ -139,6 +146,24 @@ class KillSwitch:
         log.warning("kill_switch.done", **reply.model_dump(mode="json"))
         return reply
 
+    async def close_bot(
+        self, bot_id: int, command_id: UUID
+    ) -> tuple[list[Closing], list[NotClosed]]:
+        """Sell bot `bot_id`'s open positions until they're gone, as the kill switch does,
+        with exits of kind `close`. Stop the bot first, so it doesn't buy them back."""
+        closing: list[Closing] = []
+        not_closed: list[NotClosed] = []
+        async with self._lock:
+            for selling in await self._open_positions(command_id, bot_id=bot_id, kind=CLOSE):
+                self._selling[(selling.bot_id, selling.symbol)] = selling
+                quote = await self._quotes.latest(selling.exchange, selling.symbol)
+                result = await self._sell_safely(selling, quote)
+                if isinstance(result, NotClosed):
+                    not_closed.append(result)
+                elif result is not None:
+                    closing.append(result)
+        return closing, not_closed
+
     async def on_price(self, update: PriceUpdate) -> None:
         """Sell on with `update` what's still being sold in its symbol.
 
@@ -160,11 +185,11 @@ class KillSwitch:
 
     async def resume(self) -> list[tuple[int, str]]:
         """At startup: carry on selling the positions whose latest exit is the kill
-        switch's. Returns them, as (bot, symbol)."""
+        switch's, or a close's. Returns them, as (bot, symbol)."""
         mode = self._risk.mode
         for selling in await self._open_positions(None):
             held = await load_held(self._db, selling.bot_id, selling.symbol, mode=mode)
-            if held is None or not held.exits or held.exits[-1].kind != KILL_SWITCH:
+            if held is None or not held.exits or held.exits[-1].kind not in _SELLING_KINDS:
                 continue
             latest = await self._risk.get_order(held.exits[-1].client_order_id)
             exit_ = None if latest is None else latest.reason.get("exit")
@@ -176,6 +201,7 @@ class KillSwitch:
                 selling.exchange,
                 selling.symbol,
                 UUID(command) if isinstance(command, str) else None,
+                held.exits[-1].kind,
             )
             log.info(
                 "kill_switch.resumed",
@@ -227,16 +253,20 @@ class KillSwitch:
         log.info("kill_switch.canceled", client_order_ids=canceled)
         return canceled
 
-    async def _open_positions(self, command_id: UUID | None) -> list[_Selling]:
+    async def _open_positions(
+        self, command_id: UUID | None, *, bot_id: int | None = None, kind: ExitCause = KILL_SWITCH
+    ) -> list[_Selling]:
         query = (
             select(PositionRow.bot_id, BotRow.name, PositionRow.exchange, PositionRow.symbol)
             .join(BotRow, BotRow.id == PositionRow.bot_id)
             .where(PositionRow.mode == self._risk.mode, PositionRow.closed_at.is_(None))
             .order_by(PositionRow.id)
         )
+        if bot_id is not None:
+            query = query.where(PositionRow.bot_id == bot_id)
         async with self._db.connect() as conn:
             rows = (await conn.execute(query)).all()
-        return [_Selling(r.bot_id, r.name, r.exchange, r.symbol, command_id) for r in rows]
+        return [_Selling(r.bot_id, r.name, r.exchange, r.symbol, command_id, kind) for r in rows]
 
     async def _sell_safely(
         self, selling: _Selling, quote: PriceUpdate | None
@@ -275,7 +305,7 @@ class KillSwitch:
             # Sold at the next fresh bid instead.
             log.info("kill_switch.waiting", **fields, reason="no fresh bid")
             return Closing(bot_id=bot_id, symbol=symbol, amount=position.amount)
-        if held.exits and held.exits[-1].kind == KILL_SWITCH:
+        if held.exits and held.exits[-1].kind in _SELLING_KINDS:
             latest = held.exits[-1]
             if isinstance(next_exit(held.exits, quote.bid), Wait):
                 order = await self._risk.get_order(latest.client_order_id)
@@ -310,7 +340,7 @@ class KillSwitch:
             return self._not_closed(selling, fields, planned.reason)
         reason: dict[str, JsonValue] = {
             "exit": {
-                "kind": KILL_SWITCH,
+                "kind": selling.kind,
                 "attempt": attempt,
                 "bid": str(quote.bid),
                 "price_ts": quote.ts.isoformat(),

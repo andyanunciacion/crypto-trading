@@ -1,13 +1,14 @@
 "use client";
 
 import { TriangleAlert } from "lucide-react";
+import Link from "next/link";
 import type { ReactNode } from "react";
 
+import { BotWhy, StatusBadge } from "@/components/bot-status";
 import { Money, Percent } from "@/components/money";
 import { ModeBadge } from "@/components/mode-badge";
 import { ageSeconds, feedStale, useFeed, useNow } from "@/components/overview-provider";
 import { Timestamp } from "@/components/timestamp";
-import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader } from "@/components/ui/card";
 import {
   Table,
@@ -18,7 +19,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { formatAge } from "@/lib/format";
-import { PRICE_STALE_SECONDS, type Bot, type BotStatus } from "@/lib/overview";
+import { PRICE_STALE_SECONDS } from "@/lib/overview";
 import { cn } from "@/lib/utils";
 
 /** Coins: up to 8 decimals, none forced. */
@@ -55,38 +56,6 @@ function Stat({
       </CardContent>
     </Card>
   );
-}
-
-const STATUS_STYLE: Record<BotStatus, string> = {
-  running: "border-profit text-profit",
-  paused: "border-stale text-stale",
-  stopped: "text-muted-foreground",
-};
-
-function StatusBadge({ status }: { status: BotStatus }) {
-  return (
-    <Badge variant="outline" className={STATUS_STYLE[status]}>
-      {status}
-    </Badge>
-  );
-}
-
-function why(bot: Bot): ReactNode {
-  if (bot.status === "paused" && bot.paused_at) {
-    return (
-      <>
-        {bot.paused_reason ?? "paused"} · since <Timestamp iso={bot.paused_at} />
-      </>
-    );
-  }
-  if (bot.status === "stopped" && bot.stopped_at) {
-    return (
-      <>
-        {bot.stopped_reason ?? "stopped"} · since <Timestamp iso={bot.stopped_at} />
-      </>
-    );
-  }
-  return null;
 }
 
 /** Overview (DESIGN §4): the account, open positions and every bot, live (D45). */
@@ -255,7 +224,11 @@ export default function OverviewPage() {
         </h2>
         {bots.length === 0 ? (
           <p className="text-muted-foreground text-sm">
-            No bots yet: <code>python -m engine.bots.create</code> adds one.
+            No bots yet: add one on the{" "}
+            <Link href="/bots" className="underline underline-offset-4">
+              Bots
+            </Link>{" "}
+            page.
           </p>
         ) : (
           <Card className={cn("py-2", disconnected && "opacity-60")}>
@@ -285,7 +258,7 @@ export default function OverviewPage() {
                     <TableCell>{bot.timeframe}</TableCell>
                     <TableCell>{bot.strategy ?? "—"}</TableCell>
                     <TableCell className="text-muted-foreground max-w-md truncate text-xs">
-                      {why(bot)}
+                      <BotWhy bot={bot} />
                     </TableCell>
                   </TableRow>
                 ))}

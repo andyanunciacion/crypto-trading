@@ -4,6 +4,7 @@
  * session cookie goes along by itself, and no CORS is needed (D44).
  */
 
+import type { BotReply, BotSetup, Catalog, NewBot } from "@/lib/bots";
 import type { Chart, TradeExplanation } from "@/lib/market";
 
 export class ApiError extends Error {
@@ -22,16 +23,24 @@ async function call(path: string, init?: RequestInit): Promise<Response> {
   });
   if (!response.ok) {
     const body: unknown = await response.json().catch(() => null);
-    const detail =
-      typeof body === "object" &&
-      body !== null &&
-      "detail" in body &&
-      typeof body.detail === "string"
-        ? body.detail
-        : `HTTP ${response.status}`;
-    throw new ApiError(response.status, detail);
+    throw new ApiError(response.status, detailOf(body) ?? `HTTP ${response.status}`);
   }
   return response;
+}
+
+/** FastAPI's `detail`: a message, or for a request that didn't validate, a list of them. */
+function detailOf(body: unknown): string | null {
+  if (typeof body !== "object" || body === null || !("detail" in body)) return null;
+  const { detail } = body;
+  if (typeof detail === "string") return detail;
+  if (!Array.isArray(detail)) return null;
+  const messages = detail.flatMap((problem: unknown) => {
+    if (typeof problem !== "object" || problem === null || !("msg" in problem)) return [];
+    const where =
+      "loc" in problem && Array.isArray(problem.loc) ? problem.loc.slice(1).join(".") : "";
+    return [where ? `${where}: ${String(problem.msg)}` : String(problem.msg)];
+  });
+  return messages.length > 0 ? messages.join("; ") : null;
 }
 
 export async function signIn(username: string, password: string, code: string): Promise<void> {
@@ -92,4 +101,36 @@ export async function kill(closePositions: boolean): Promise<KillReply> {
     body: JSON.stringify({ close_positions: closePositions }),
   });
   return (await response.json()) as KillReply;
+}
+
+/** What a new bot can be set up with, as the engine described it (D47). 503: not yet. */
+export async function catalog(): Promise<Catalog> {
+  return (await (await call("/strategies")).json()) as Catalog;
+}
+
+/** Every bot with its setup. */
+export async function bots(): Promise<BotSetup[]> {
+  return (await (await call("/bots")).json()) as BotSetup[];
+}
+
+/**
+ * The Bots page's commands, carried out by the engine (D47). Throws an ApiError: 422
+ * with the engine's reason when it refuses, 504 when it didn't answer in time (the
+ * command is then dropped).
+ */
+export async function createBot(bot: NewBot): Promise<BotReply> {
+  const response = await call("/bots", { method: "POST", body: JSON.stringify(bot) });
+  return (await response.json()) as BotReply;
+}
+
+export async function botCommand(
+  botId: number,
+  action: "start" | "pause" | "stop",
+  closePosition = false,
+): Promise<BotReply> {
+  const response = await call(`/bots/${botId}/${action}`, {
+    method: "POST",
+    body: JSON.stringify(action === "stop" ? { close_position: closePosition } : {}),
+  });
+  return (await response.json()) as BotReply;
 }

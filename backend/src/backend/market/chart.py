@@ -79,7 +79,8 @@ class TradeMarker(_Out):
     order_id: int
     client_order_id: str
     side: str
-    kind: str  # "signal", or the exit's: stop_loss, trailing_stop, take_profit, kill_switch
+    # "signal", or the exit's: stop_loss, trailing_stop, take_profit, kill_switch, close
+    kind: str
     ts: AwareDatetime  # its first fill
     price: Decimal  # the average fill price
     amount: Decimal  # filled so far

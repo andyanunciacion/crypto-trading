@@ -8,13 +8,17 @@ orders fill. Bots are loaded once, at startup, and orders left
 open from before the engine started are cancelled first (D38). The candle each bot's
 series is forming goes to Redis too, for the dashboard's chart (D46).
 
-It also listens for commands over Redis (control/listener.py, D43): the kill switch.
-Commands sent while it was down are carried out first, before any bot is loaded.
+It also listens for commands over Redis (control/listener.py, D43): the kill switch, and
+the Bots page's create, start, pause and stop (D47). Commands sent while it was down are
+carried out first, before any bot is loaded. A bot started later on a new symbol gets
+its price stream then (`Prices.ensure`). At startup it also writes what a new bot can be
+set up with (control/catalog.py), for the Bots page's form.
 """
 
 import asyncio
 import contextlib
 import signal
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -24,6 +28,8 @@ from redis.asyncio import Redis
 
 from engine.bots.runner import BotRunner
 from engine.bots.store import held_symbols, load_bots
+from engine.control.bots import BotControl
+from engine.control.catalog import publish as publish_catalog
 from engine.control.listener import CommandListener
 from engine.exchange.adapter import ExchangeAdapter
 from engine.marketdata.forming import RedisFormingSink
@@ -53,10 +59,12 @@ async def heartbeat(
     exchange: str,
     symbols: list[str],
     started_at: datetime,
+    bots: Callable[[], list[int]] = list,
 ) -> None:
     """Touch the file Docker's health check watches, and tell the dashboard (D45), every
-    beat: with the symbols whose prices it streams, so the dashboard knows which to
-    watch. Without Redis the file still beats: the engine itself is alive."""
+    beat: with the symbols whose prices it streams (`symbols` may grow), so the dashboard
+    knows which to watch, and the bots it runs (D47). Without Redis the file still
+    beats: the engine itself is alive."""
     beat = 0
     while not stop.is_set():
         beat += 1
@@ -68,7 +76,8 @@ async def heartbeat(
             mode=mode,
             beat=beat,
             exchange=exchange,
-            symbols=symbols,
+            symbols=list(symbols),
+            bots=bots(),
         )
         try:
             await redis.set(ENGINE_HEARTBEAT_KEY, payload.model_dump_json())
@@ -82,6 +91,47 @@ async def heartbeat(
         log.info("engine.heartbeat", beat=beat)
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(stop.wait(), timeout=HEARTBEAT_INTERVAL_SECONDS)
+
+
+class Prices:
+    """The live price streams (one per symbol) and the paper desk's feed of them, which
+    can grow while the engine runs: a bot started on a new symbol needs its prices."""
+
+    def __init__(
+        self,
+        tasks: asyncio.TaskGroup,
+        exchange: ExchangeAdapter,
+        sink: RedisPriceSink,
+        redis: Redis,
+        desk: PaperDesk,
+        then: Callable[[PriceUpdate], Awaitable[None]],
+    ) -> None:
+        self._tasks = tasks
+        self._exchange = exchange
+        self._sink = sink
+        self._redis = redis
+        self._desk = desk
+        self._then = then
+        self.symbols: list[str] = []  # streamed, in the order they were added
+        self._fed: set[str] = set()
+        self.workers: list[asyncio.Task[None]] = []
+
+    def ensure(self, symbol: str, *, feed: bool = True) -> None:
+        """Stream `symbol`'s prices into Redis if nothing does yet; with `feed`, also
+        fill paper orders and check stops on them."""
+        if symbol not in self.symbols:
+            self.symbols.append(symbol)
+            self.workers.append(
+                self._tasks.create_task(PriceStream(self._exchange, self._sink, symbol).run())
+            )
+        if feed and symbol not in self._fed:
+            self._fed.add(symbol)
+            exchange_id = self._exchange.exchange_id
+            self.workers.append(
+                self._tasks.create_task(
+                    self._desk.feed_prices(self._redis, exchange_id, [symbol], then=self._then)
+                )
+            )
 
 
 async def run(settings: Settings) -> None:
@@ -110,12 +160,14 @@ async def run(settings: Settings) -> None:
             quotes = RedisQuotes(redis)
             desk = PaperDesk(db, quotes, exchange)
             kill_switch = KillSwitch(desk.risk, db, exchange, quotes)
-            commands = CommandListener(redis, kill_switch)
+            bot_control = BotControl(db, desk, exchange, kill_switch)
+            commands = CommandListener(redis, kill_switch, bot_control)
+            await publish_catalog(redis, started_at)
             # Before the bots load: a kill sent while the engine was down stops them first.
             await commands.drain()
             bots = await load_bots(db, exchange.exchange_id)
             if not bots:
-                log.info("bots.none", hint="python -m engine.bots.create adds one")
+                log.info("bots.none", hint="start one from the Bots page")
             # dict.fromkeys drops repeats and keeps the order.
             bot_symbols = list(dict.fromkeys(bot.symbol for bot in bots))
             # Coins held by bots that aren't running too: equity values them at their bids,
@@ -123,53 +175,51 @@ async def run(settings: Settings) -> None:
             # The kill switch sells them at those prices too (D43).
             held = await held_symbols(db, mode="paper")
             traded = list(dict.fromkeys([*bot_symbols, *held]))
-            symbols = list(dict.fromkeys([*settings.price_symbols, *traded]))
-            runner = BotRunner(
-                bots,
-                desk.risk,
-                exchange,
-                quotes,
-                CandleStore(db),
-                db,
-                on_kline=RedisFormingSink(redis, exchange.exchange_id),
-            )
-            kill_switch.runner = runner
-            # Before prices are fed, so no order left from before can fill first (D38).
-            await runner.recover()
-            # After that, as it cancelled their exits: they're placed again on the next price.
-            await kill_switch.resume()
-
-            async def on_price(update: PriceUpdate) -> None:
-                # Each price, after its fills: the stops (D40), then the kill switch's sells.
-                await runner.on_price(update)
-                await kill_switch.on_price(update)
 
             # A TaskGroup runs the tasks side by side and waits for all of them to end.
             async with asyncio.TaskGroup() as tasks:
+
+                async def on_price(update: PriceUpdate) -> None:
+                    # Each price, after its fills: the stops (D40), then the kill switch's sells.
+                    await runner.on_price(update)
+                    await kill_switch.on_price(update)
+
+                prices = Prices(tasks, exchange, sink, redis, desk, on_price)
+                runner = BotRunner(
+                    bots,
+                    desk.risk,
+                    exchange,
+                    quotes,
+                    CandleStore(db),
+                    db,
+                    on_kline=RedisFormingSink(redis, exchange.exchange_id),
+                    on_new_symbol=prices.ensure,
+                )
+                kill_switch.runner = runner
+                bot_control.runner = runner
+                # Before prices are fed, so no order left from before can fill first (D38).
+                await runner.recover()
+                # After that, as it cancelled their exits: placed again on the next price.
+                await kill_switch.resume()
+
+                for symbol in settings.price_symbols:
+                    prices.ensure(symbol, feed=symbol in traded)
+                for symbol in traded:
+                    prices.ensure(symbol)
                 tasks.create_task(
                     heartbeat(
                         stop,
                         redis,
                         mode=settings.mode,
                         exchange=exchange.exchange_id,
-                        symbols=symbols,
+                        symbols=prices.symbols,
                         started_at=started_at,
+                        bots=lambda: runner.running,
                     )
                 )
-                workers = [
-                    tasks.create_task(PriceStream(exchange, sink, symbol).run())
-                    for symbol in symbols
-                ]
-                workers.append(tasks.create_task(runner.run()))
-                workers.append(tasks.create_task(commands.run()))
-                if traded:
-                    workers.append(
-                        tasks.create_task(
-                            desk.feed_prices(redis, exchange.exchange_id, traded, then=on_price)
-                        )
-                    )
+                workers = [tasks.create_task(runner.run()), tasks.create_task(commands.run())]
                 await stop.wait()
-                for worker in workers:
+                for worker in [*workers, *prices.workers]:
                     worker.cancel()
     finally:
         await redis.aclose()

@@ -5,7 +5,8 @@ import { newSecret } from "./totp";
 
 /**
  * Starts the e2e stack from scratch and creates its one user, `e2e`, with a random
- * password and TOTP secret, and one running paper bot, `e2e-bot`, for the kill switch.
+ * password and TOTP secret, and one running paper bot, `e2e-bot`, for the market chart
+ * and the kill switch (bots.spec.ts makes its own, from the dashboard).
  * Environment variables set here reach the tests.
  *
  * The engine connects to MEXC for prices and candles, so this needs the internet.

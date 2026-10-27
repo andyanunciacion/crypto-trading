@@ -48,7 +48,8 @@ Login (password + TOTP)
 | Login with TOTP | 5.1 | ✅ |
 | App shell + kill switch + Overview | 5.2 | ✅ |
 | Market chart with trade markers | 5.3 | ✅ |
-| Bots list and detail (create/start/pause/stop, edit params) | 5.4 | ⬜ |
+| Bots list (create/start/pause/stop, D47) | 5.4 | ✅ |
+| Bot detail and editing params (with history and rollback) | 6.1, 6.2 | ⬜ |
 | Backtests (run + results) | 5.5 | ⬜ |
 | History with filters and CSV export | 5.6 | ⬜ |
 | Logs | 5.6 | ⬜ |
@@ -84,7 +85,11 @@ A placeholder until (if ever) a brand is needed: shadcn/ui's neutral theme, syst
   - ✅ `OverviewProvider`: the one WebSocket a screen's header and body share (D45).
   - ✅ `CandleChart` (D46): Lightweight Charts with candles, volume, the strategy's lines (a legend shows the hovered candle's OHLC and each line's value; RSI gets its own pane), the forming candle drawn faint, and trade markers at the fill price (▲ buy / ▼ sell, labelled B, S, SL, TS, TP, KILL; ink-colored, so shape and label carry the meaning, not color). Line colors are the first two slots of the dataviz reference palette (blue, orange), validated for color-blind separation in both themes; candles use `profit`/`loss`.
   - ✅ `TradeExplainPanel` (UX9, D46): a side sheet with the signal and its indicator values, the risk decision (and on a resize, what was asked for and the account it was checked against), the strategy, sizing, stops or the exit, the fills, and everything stored. Opened by a marker or, from the keyboard, a row of the trades table.
-  - ⬜ `StrategyParamsForm` (rendered from the strategy's pydantic schema).
+  - ✅ `StrategyParamsForm` (D47): inputs for a list of settings the engine read from a pydantic model (a strategy's params, a sizing mode's, a stop's), each with its default, description and bounds, saying what's wrong as you type. Values stay strings.
+  - ✅ `NewBotSheet` (D47): a side sheet with the bot's name, cash, symbol and timeframe, the strategy and its params, sizing and stops; the engine's refusal is shown in it. Bots are created stopped.
+  - ✅ `StopBotDialog` (D47): like the kill switch's, focus on Cancel; "Stop" says the position is left with no one watching its stops, "Stop + close position" sells it until it's gone.
+  - ✅ `StatusBadge`, `BotWhy`: a bot's status as a word, and why it's paused or stopped (the Overview and Bots pages).
+  - ✅ `NativeSelect` (`components/ui/`): the browser's `<select>`, styled like `Input`.
 - **Freshness cutoffs (UX5):** the engine is stale after 30 s without a heartbeat (as Docker's health check), a price after 10 s (the PaperBroker won't fill on an older one), and the feed itself after 5 s without a snapshot. A stale number is greyed out, with a warning icon and the word "stale". The prices shown are the oldest of the ones the engine streams, so a stuck stream can't hide behind a busy one.
 - Money arrives from the API as **strings**, not JSON numbers, so Decimal precision survives (D9).
 

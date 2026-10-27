@@ -58,6 +58,9 @@ function barTime(iso: string, timeframe: string): UTCTimestamp {
  * and lower bands are one line's two edges, so they share a color.
  */
 const LINE_SLOTS = { light: ["#2a78d6", "#eb6834"], dark: ["#3987e5", "#d95926"] };
+
+/** How far from a marker's center a click still picks it: about the drawn arrow (size 1.5). */
+const MARKER_HIT_PX = { x: 8, y: 12 };
 const LINE_SLOT: Record<string, number> = {
   fast_ema: 0,
   slow_ema: 1,
@@ -265,21 +268,42 @@ export function CandleChart({
       forming: null,
     };
 
+    // Where a marker is drawn, in the price pane's pixels.
+    const pointOf = (marker: SeriesMarker<Time>) => {
+      if (marker.price === undefined) return null;
+      const x = chart.timeScale().timeToCoordinate(marker.time);
+      const y = candles.priceToCoordinate(marker.price);
+      return x === null || y === null ? null : { x, y };
+    };
     chart.subscribeClick((param: MouseEventParams<Time>) => {
       const hovered = param.hoveredInfo;
       if (hovered?.objectKind === "series-marker" && hovered.objectId !== undefined) {
         select.current(Number(hovered.objectId));
+        return;
       }
+      // Lightweight Charts hit-tests the series on top first, and the indicator lines
+      // are above the candles: a click on a marker an EMA passes through reports the
+      // line. So look for a marker under the click ourselves.
+      if (param.point === undefined || (param.paneIndex ?? 0) !== 0) return;
+      const { x, y } = param.point;
+      let nearest: { id: string; distance: number } | null = null;
+      for (const marker of markers.markers()) {
+        const at = pointOf(marker);
+        if (at === null || marker.id === undefined) continue;
+        const dx = Math.abs(at.x - x);
+        const dy = Math.abs(at.y - y);
+        if (dx > MARKER_HIT_PX.x || dy > MARKER_HIT_PX.y) continue;
+        const distance = Math.hypot(dx, dy);
+        if (nearest === null || distance < nearest.distance) nearest = { id: marker.id, distance };
+      }
+      if (nearest !== null) select.current(Number(nearest.id));
     });
     chart.subscribeCrosshairMove((param) => {
       setHoverTime(param.time === undefined ? null : Number(param.time));
     });
     element.markerPoint = (orderId) => {
       const marker = markers.markers().find((m) => m.id === String(orderId));
-      if (!marker || marker.price === undefined) return null;
-      const x = chart.timeScale().timeToCoordinate(marker.time);
-      const y = candles.priceToCoordinate(marker.price);
-      return x === null || y === null ? null : { x, y };
+      return marker === undefined ? null : pointOf(marker);
     };
 
     return () => {

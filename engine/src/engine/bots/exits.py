@@ -20,7 +20,8 @@ with something left, and so on. A retry never reuses a cancelled exit's ID.
 
 The kill switch closes positions with the same exits (risk/kill.py, D43), as kind
 `kill_switch`, so it carries on a stop's numbering, and from then on the position is
-sold until it's gone by the same rule (`next_exit`).
+sold until it's gone by the same rule (`next_exit`). So does stopping one bot with
+"Stop + close position" on the Bots page (D47), as kind `close`.
 """
 
 from collections.abc import Sequence
@@ -44,8 +45,9 @@ from engine.risk.stops import (
 from engine.strategies.base import Position
 from shared.db.models import OrderRow, PositionRow
 
-# Why an exit sells: one of the stops, or the kill switch closing everything (D43).
-ExitCause = ExitKind | Literal["kill_switch"]
+# Why an exit sells: one of the stops, the kill switch closing everything (D43), or one
+# bot stopped and closed from the Bots page (D47).
+ExitCause = ExitKind | Literal["kill_switch", "close"]
 
 
 @dataclass(frozen=True)

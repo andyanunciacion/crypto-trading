@@ -458,10 +458,28 @@ Done (D46):
 
 ### P5-4 · Bots page
 `frontend` `backend` · Depends on: P5-2, P3-3
-- [ ] Create, start, pause, stop via engine commands
-- [ ] Params form generated from the strategy schema
+- [x] Create, start, pause, stop via engine commands
+- [x] Params form generated from the strategy schema
 
 **Done when:** a Playwright test creates and starts a paper bot, then stops it.
+
+Done (D47):
+- `e2e/bots.spec.ts` (`pnpm e2e`): signs in, opens Bots from the nav, and opens New bot: the EMA crossover's params show their defaults (9, 21). With fast 30 the engine refuses ("fast (30) must be shorter than slow (21)") and the sheet shows it. With fast 9, a 3% stop-loss and ETH/USDT (a symbol nothing else trades), `e2e-eth` is created stopped with 1,000 USDT. Start: running at once, then "in the engine" once its heartbeat lists it, and ETH/USDT is among the streamed symbols. Stop, from the dialog (focus on Cancel): stopped, "stopped from dashboard". 5.7 s. The kill switch and login tests pass after it (2026-10-27).
+- `engine/tests/test_bot_control.py`: create (stopped, funded, sizing/stops/config stored; nine kinds of refusal, a name in use), start without a restart (twice is once), an unknown bot or a stale strategy version refused, pause blocks buys (`bot_paused`) and start resumes, stop cancels its orders and keeps its position (and the bot never acts again), stop + close sells until flat (start refused meanwhile), a restart carries on a close, over Redis, an expired command dropped unanswered, a start drained at startup, a listener without bot control.
+- `test_bot_runner.py`: a bot started on a streaming series joins with a whole window (REST lacked the newest candle; the series gave it) and both bots buy on the next cross; one on a new series starts its stream (with zero bots at first) and reports its symbol; one stopped while warming up never joins; a stopped bot started again starts its ended series anew. Two tests now stop `run()` themselves, as it stays up.
+- `test_bot_catalog.py` (every strategy, sizing mode and stop kind; each default builds), `shared/tests/test_catalog.py`, `shared/tests/test_commands.py`; `backend/tests/test_bots.py` (each route's command, 422/504/503, the list); `test_every_route_needs_auth.py` requires the six new routes. All 827 Python tests pass.
+- Found: `e2e/market.spec.ts` (P5-3) failed, on the base commit (`ef265f5`) too: the click landed on the B marker, but nothing opened. Lightweight Charts hit-tests the topmost series first, and the EMA lines are drawn above the candles; that day the slow EMA ran a few pixels from the marker, so the click reported the line, not the marker. Anyone clicking a marker under a line had the same problem. `CandleChart` now looks for a marker within the arrow's size of the click itself when the chart reports something else; the test is unchanged and passes. All 5 e2e tests pass (2026-10-27).
+- Checked by hand in Chrome (2026-10-27, the e2e stack on port 3100, live MEXC prices):
+  - New bot: RSI's params, ATR-risk sizing and an ATR stop-loss (with `atr_period`) drawn from the catalog; hints say what's wrong as you type ("above 0", "required"); Create stays disabled until it's all valid. `NOPE/USDT` is refused by the engine ("mexc does not have market symbol NOPE/USDT"); `rsi-hand` on SOL/USDT is created stopped in 65 ms.
+  - Start: `rsi-hand` (a new symbol: its price stream and feed started, 85 warm-up candles) and `e2e-bot` (its series had ended at the kill: started anew, 64 candles) answer in ~40 ms, show "warming up…", then "in the engine".
+  - Pause and Start again; Stop + close on `e2e-bot` with a seeded 0.001 BTC position, from the keyboard (focus on Cancel, Tab, Enter): exit `e2e-chart-x1` of kind `close` filled at the bid, the position closed (+0.0071 USDT realized, net of the fee). The chart shows its "S CLOSE" marker, and a click on it opens the panel ("from a close from the Bots page"; the sell is `reduces_exposure`, never blocked).
+  - With the engine stopped, Start answers the 504 message after 10 s; when the engine is back, the start is dropped (`command.expired`, 23 s old) and the bot stays stopped.
+  - Light theme; no console errors.
+- It found four things, fixed:
+  - The long "why" (the kill switch's command id) ran under the action buttons, and the table scrolled sideways: the text columns now wrap.
+  - Just after a command, the row showed the old status (and buttons) for up to a second, as the feed's snapshot was older than the answer: the engine's answer now wins for 3 s.
+  - After Pause, or a Stop from the dialog, focus fell to `<body>` (the button that sent it is replaced): the result message takes focus, and is read out.
+  - The close's label read badly in the panel ("from a stopped and closed from the Bots page") and its command was called "Kill switch command": now "close from the Bots page" and "Command".
 
 ### P5-5 · Backtests page
 `frontend` `backend` · Depends on: P5-1, P2-3

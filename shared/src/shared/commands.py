@@ -10,17 +10,22 @@ restarting waits in the list and is applied before any bot is loaded. It pushes 
 reply once it has acted, and the reply expires after `REPLY_TTL_SECONDS` if nobody
 reads it.
 
-The only command so far is the kill switch: stop every bot, cancel every open order,
-and, if asked, sell every open position.
+The commands:
+- `KillCommand`: the kill switch. Stop every bot, cancel every open order, and, if
+  asked, sell every open position. It never expires: one sent while the engine is down
+  runs when it starts (D43).
+- `CreateBotCommand` and `BotCommand` (start, pause, stop): the Bots page's (D47). They
+  expire at `expires_at`, when the sender stops waiting for the reply: a click nobody
+  saw answered must not take effect when the engine next starts, hours later.
 """
 
 import time
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Annotated, Literal, overload
 from uuid import UUID, uuid4
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 from redis.asyncio import Redis
 
 COMMANDS_KEY = "engine:commands"
@@ -88,16 +93,83 @@ class KillReply(_Frozen):
     took_ms: int  # from receiving the command to this reply
 
 
-async def send(redis: Redis, command: KillCommand, *, reply_within: float) -> KillReply | None:
+class _Expiring(_Frozen):
+    id: UUID = Field(default_factory=uuid4)
+    source: str = Field(min_length=1, max_length=64)
+    sent_at: AwareDatetime
+    expires_at: AwareDatetime  # the engine drops it unread after this
+
+    def expired(self, now: datetime) -> bool:
+        return now >= self.expires_at
+
+
+_ALL_IN: dict[str, JsonValue] = {"mode": "all_in"}
+
+
+class CreateBotCommand(_Expiring):
+    """Add a stopped paper bot and fund it with `cash` of the quote currency. The engine
+    checks everything (the strategy's params, sizing, stops, that the exchange lists the
+    symbol) and refuses with the reason."""
+
+    type: Literal["create_bot"] = "create_bot"
+    name: str = Field(min_length=1, max_length=64)
+    strategy: str = Field(min_length=1, max_length=64)
+    params: dict[str, JsonValue] = Field(default_factory=dict)
+    symbol: str = Field(min_length=3, max_length=32)  # CCXT format, e.g. BTC/USDT
+    timeframe: str = Field(min_length=1, max_length=8)
+    cash: Decimal = Field(gt=0)
+    # As bots.sizing and bots.stops store them; the engine reads them (risk/sizing.py, stops.py).
+    sizing: dict[str, JsonValue] = Field(default_factory=lambda: _ALL_IN.copy())
+    stops: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+BotAction = Literal["start", "pause", "stop"]
+
+
+class BotCommand(_Expiring):
+    """Start, pause or stop one bot; a stop with `close_position` also sells its position."""
+
+    type: Literal["bot"] = "bot"
+    action: BotAction
+    bot_id: int
+    close_position: bool = False  # stop only
+
+
+class BotReply(_Frozen):
+    id: UUID  # the command's
+    ok: bool
+    error: str | None = None  # when not ok: why it was refused, or what went wrong
+    bot_id: int | None = None
+    status: str | None = None  # the bot's status afterwards
+    canceled: list[str] = Field(default_factory=list)  # the orders a stop cancelled
+    closing: list[Closing] = Field(default_factory=list)  # a stop + close's sells
+    not_closed: list[NotClosed] = Field(default_factory=list)
+    took_ms: int
+
+
+Command = Annotated[KillCommand | CreateBotCommand | BotCommand, Field(discriminator="type")]
+COMMAND: TypeAdapter[Command] = TypeAdapter(Command)
+
+
+@overload
+async def send(redis: Redis, command: KillCommand, *, reply_within: float) -> KillReply | None: ...
+@overload
+async def send(
+    redis: Redis, command: CreateBotCommand | BotCommand, *, reply_within: float
+) -> BotReply | None: ...
+async def send(
+    redis: Redis, command: Command, *, reply_within: float
+) -> KillReply | BotReply | None:
     """Queue `command` for the engine and wait up to `reply_within` seconds for its reply
     (Redis does the waiting, in BLPOP, `BLOCK_SECONDS` at a time).
 
-    None if there's none by then; the command stays queued.
+    None if there's none by then; the command stays queued (a bot command until it expires).
     """
     await redis.lpush(COMMANDS_KEY, command.model_dump_json())
+    reply_type = KillReply if isinstance(command, KillCommand) else BotReply
     deadline = time.monotonic() + reply_within
     while (left := deadline - time.monotonic()) > 0:
         popped = await redis.blpop([reply_key(command.id)], timeout=min(BLOCK_SECONDS, left))
         if popped is not None:
-            return KillReply.model_validate_json(popped[1])
+            return reply_type.model_validate_json(popped[1])
     return None

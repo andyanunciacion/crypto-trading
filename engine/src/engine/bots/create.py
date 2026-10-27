@@ -6,8 +6,9 @@ Add `--params '{"fast": 9, "slow": 21}'` to change the strategy's settings, `--c
 the starting quote currency, `--sizing '{"mode": "percent_of_equity", "percent": 25}'`
 for how much each buy spends (default all-in), and
 `--stops '{"stop_loss": {"kind": "percent", "percent": 3}}'` for stops (default none).
-The engine loads running bots when it starts, so restart it afterwards:
-`docker compose restart engine`.
+The engine loads running bots when it starts, so restart it afterwards
+(`docker compose restart engine`), or press Start on the dashboard's Bots page, which
+starts it without a restart. The Bots page also creates bots (control/bots.py, D47).
 """
 
 import argparse
@@ -15,7 +16,7 @@ import asyncio
 import sys
 from collections.abc import Sequence
 from decimal import Decimal
-from typing import Any, get_args
+from typing import Any, Literal, Protocol, get_args
 
 import structlog
 from redis.asyncio import Redis
@@ -34,7 +35,7 @@ from engine.backtest.models import DEFAULT_INITIAL_CASH
 from engine.bots.store import create_bot
 from engine.exchange.adapter import ExchangeAdapter
 from engine.exchange.errors import ExchangeError
-from engine.exchange.models import Timeframe
+from engine.exchange.models import MarketRules, Timeframe
 from engine.marketdata.quotes import RedisQuotes
 from engine.risk.paper import PaperDesk
 from engine.risk.sizing import ALL_IN, SIZING, Sizing
@@ -48,10 +49,18 @@ from shared.logs import configure_logging
 log = structlog.get_logger()
 
 
+class Listings(Protocol):
+    """The part of ExchangeAdapter creating a bot uses: which markets it lists."""
+
+    exchange_id: str
+
+    async def market_rules(self, symbol: str) -> MarketRules: ...
+
+
 async def create_paper_bot(
     db: AsyncEngine,
     desk: PaperDesk,
-    exchange: ExchangeAdapter,
+    exchange: Listings,
     *,
     name: str,
     strategy: Strategy[Any],
@@ -60,8 +69,13 @@ async def create_paper_bot(
     cash: Decimal,
     sizing: Sizing = ALL_IN,
     stops: Stops = NO_STOPS,
+    status: Literal["running", "stopped"] = "running",
+    created_by: str = "cli",
 ) -> int:
-    """Add a running paper bot and fund it with `cash` of the quote currency. Returns its id."""
+    """Add a paper bot and fund it with `cash` of the quote currency. Returns its id.
+
+    The dashboard's (control/bots.py) start stopped; the CLI's start running.
+    """
     if cash <= 0:
         raise ValueError(f"cash must be positive, not {cash}")
     await exchange.market_rules(symbol)  # refuses a symbol the exchange doesn't list
@@ -74,7 +88,8 @@ async def create_paper_bot(
         strategy=strategy,
         sizing=sizing,
         stops=stops,
-        created_by="cli",
+        created_by=created_by,
+        status=status,
     )
     _, currency = symbol.split("/")
     await desk.fund(bot_id, currency, cash)
@@ -82,6 +97,8 @@ async def create_paper_bot(
         "bot.created",
         bot_id=bot_id,
         name=name,
+        status=status,
+        created_by=created_by,
         exchange=exchange.exchange_id,
         symbol=symbol,
         timeframe=timeframe,
@@ -122,7 +139,8 @@ async def run(args: argparse.Namespace, settings: Settings) -> None:
     print(
         f"Created paper bot {bot_id} ({args.name}): {strategy.name} on {args.symbol} "
         f"{args.timeframe} with {args.cash} {args.symbol.split('/')[1]}.\n"
-        "Restart the engine to run it: docker compose restart engine"
+        "The engine runs it from its next start (docker compose restart engine), or at once "
+        "if you press Start on the dashboard's Bots page."
     )
 
 
