@@ -92,6 +92,30 @@ services:
       retries: 3
       start_period: 10s
 
+  # Runs the dashboard's backtests (D48), apart from the engine: a long backtest is
+  # CPU-bound and must never hold up live prices, stops or the kill switch. Same image
+  # as the engine; it reads candles and writes backtest_runs, and never trades.
+  backtester:
+    build:
+      context: .
+      dockerfile: engine/Dockerfile
+    env_file: .env
+    command: ["python", "-m", "engine.backtest.worker"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # Its heartbeat file, touched every 10 s, also while a backtest runs.
+      test: ["CMD", "python", "-c", "import os, sys, time; sys.exit(time.time() - os.path.getmtime('/tmp/backtester-heartbeat') > 30)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   frontend:
     build:
       context: ./frontend

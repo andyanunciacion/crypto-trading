@@ -49,7 +49,8 @@ async def backtest(
     """Run `strategy` as `config` says and store the run. Returns the run's id and result."""
     warmup = warmup_needed(strategy, config)
     history = await load_candles(candles, config, warmup)
-    result = run_backtest(strategy, history, config)
+    # CPU-bound: in a thread, so the backtester's heartbeat keeps beating (worker.py).
+    result = await asyncio.to_thread(run_backtest, strategy, history, config)
     run_id = await runs.save(config, warmup, history, result)
     metrics = report(config, result)
     log.info(

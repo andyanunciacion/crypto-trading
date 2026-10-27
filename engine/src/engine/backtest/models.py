@@ -1,15 +1,33 @@
-"""What a backtest takes and what it gives back. Money is Decimal throughout (D9)."""
+"""What a backtest takes and what it gives back. Money is Decimal throughout (D9).
+
+The fills, equity curve, trades and report live in shared/backtest.py, so the dashboard
+can read a stored run and report on it without the engine (D48).
+"""
 
 from decimal import Decimal
 from typing import Self
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, JsonValue, model_validator
 
-from engine.exchange.models import MarketRules, OrderSide, Timeframe
+from engine.exchange.models import MarketRules, Timeframe
 from engine.marketdata.timeframes import floor
 from engine.risk.sizing import ALL_IN, Sizing
-from engine.risk.stops import NO_STOPS, ExitKind, Stops
+from engine.risk.stops import NO_STOPS, Stops
 from engine.strategies.base import Signal
+from shared.backtest import BacktestReport, EquityPoint, Fill, SkippedOrder, Trade
+
+__all__ = [
+    "DEFAULT_FEE_RATE",
+    "DEFAULT_INITIAL_CASH",
+    "BacktestConfig",
+    "BacktestReport",
+    "BacktestResult",
+    "EquityPoint",
+    "Fill",
+    "SkippedOrder",
+    "Trade",
+    "default_slippage",
+]
 
 DEFAULT_INITIAL_CASH = Decimal(1000)  # in the quote currency (USDT)
 # 0.1% a fill: conservative, since a fill at the next open acts like a taker order.
@@ -62,32 +80,10 @@ class BacktestConfig(_Frozen):
         return self
 
 
-class Fill(_Frozen):
-    ts: AwareDatetime  # open time of the candle it filled at
-    side: OrderSide
-    price: Decimal = Field(gt=0)  # after slippage
-    amount: Decimal = Field(gt=0)  # in the base currency
-    fee: Decimal = Field(ge=0)  # in the quote currency
-    cash_after: Decimal = Field(ge=0)
-    # The stop that sold it; None for a fill from a signal. Runs stored before stops
-    # existed have no such field and load as None.
-    exit: ExitKind | None = None
-
-
-class SkippedOrder(_Frozen):
-    """A BUY or SELL signal that didn't become a fill, and why."""
-
-    signal_ts: AwareDatetime
-    side: OrderSide
-    reason: str
-
-
-class EquityPoint(_Frozen):
-    ts: AwareDatetime  # the candle's open time; equity is valued at its close
-    equity: Decimal
-
-
 class BacktestResult(_Frozen):
+    """As stored in `backtest_runs.result`; shared.backtest.StoredResult reads it back
+    with the signals left as JSON."""
+
     signals: list[Signal]  # every signal that wasn't HOLD, in order
     fills: list[Fill]
     skipped: list[SkippedOrder]
@@ -95,35 +91,4 @@ class BacktestResult(_Frozen):
     final_cash: Decimal
     final_amount: Decimal  # coin still held at the end; 0 when flat
     final_equity: Decimal  # cash + coin at the last close
-    total_fees: Decimal
-
-
-class Trade(_Frozen):
-    """A round trip: a buy fill and the sell fill that closed it."""
-
-    entry_ts: AwareDatetime
-    exit_ts: AwareDatetime
-    amount: Decimal = Field(gt=0)
-    entry_price: Decimal = Field(gt=0)
-    exit_price: Decimal = Field(gt=0)
-    fees: Decimal = Field(ge=0)  # both fills' fees
-    pnl: Decimal  # net of both fees, in the quote currency
-    return_: Decimal  # pnl as a fraction of what the buy cost, fee included
-
-
-class BacktestReport(_Frozen):
-    """The metrics for judging a run (D30). Derived from a result, never stored.
-
-    Ratios are fractions (0.05 = 5%). A metric that can't be computed is None.
-    """
-
-    total_return: Decimal
-    max_drawdown: Decimal  # largest fall from a peak, as a fraction of that peak
-    sharpe: Decimal | None  # annualized, risk-free rate 0
-    trades: list[Trade]  # closed round trips only
-    trade_count: int
-    win_rate: Decimal | None  # None with no trades
-    profit_factor: Decimal | None  # gross profit / gross loss; None with no losing trades
-    open_trade: bool  # still holding at the end: in total_return, not in the trade stats
-    final_equity: Decimal
     total_fees: Decimal

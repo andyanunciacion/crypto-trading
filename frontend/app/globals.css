@@ -7,6 +7,7 @@
 /* shadcn/ui's neutral theme (DESIGN §7), plus the app's own meanings (DESIGN §8):
    profit, loss, live, paper and stale. Red is for danger only: losses, LIVE, the kill switch. */
 :root {
+  color-scheme: light;
   --radius: 0.625rem;
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
@@ -36,6 +37,8 @@
 }
 
 .dark {
+  /* The browser draws its own controls (a <select>'s list, scrollbars) dark too. */
+  color-scheme: dark;
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.205 0 0);

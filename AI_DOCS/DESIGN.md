@@ -50,7 +50,7 @@ Login (password + TOTP)
 | Market chart with trade markers | 5.3 | ✅ |
 | Bots list (create/start/pause/stop, D47) | 5.4 | ✅ |
 | Bot detail and editing params (with history and rollback) | 6.1, 6.2 | ⬜ |
-| Backtests (run + results) | 5.5 | ⬜ |
+| Backtests (run + results, D48) | 5.5 | ✅ |
 | History with filters and CSV export | 5.6 | ⬜ |
 | Logs | 5.6 | ⬜ |
 | Settings (keys, risk limits, alerts) | 5.7 | ⬜ |
@@ -90,6 +90,10 @@ A placeholder until (if ever) a brand is needed: shadcn/ui's neutral theme, syst
   - ✅ `StopBotDialog` (D47): like the kill switch's, focus on Cancel; "Stop" says the position is left with no one watching its stops, "Stop + close position" sells it until it's gone.
   - ✅ `StatusBadge`, `BotWhy`: a bot's status as a word, and why it's paused or stopped (the Overview and Bots pages).
   - ✅ `NativeSelect` (`components/ui/`): the browser's `<select>`, styled like `Input`.
+  - ✅ `StrategySetup` (D48): the strategy and its params, the sizing and the stops, drawn from the catalog; shared by `NewBotSheet` and `BacktestForm`, so a bot and a backtest are set up alike.
+  - ✅ `BacktestForm` (D48): the market, days, cash, fee rate and slippage with the CLI's defaults (each fraction's hint shows it as a percent), what's stored of the series, then `StrategySetup`. Run shows "Queued… / Running…" and opens the result; the backtester's refusal is an alert in the form. Refused for too little stored history, it says how many days fit and how far to backfill, with a "Use N days" button. (The form can't say beforehand: the warm-up depends on the params, sizing and stops, which only the engine reads.)
+  - ✅ `EquityChart` (D48): equity at each close (the first line slot, blue) with the starting cash dashed, and the drawdown in its own pane below (`loss`), never on a second scale. A legend shows the hovered candle's exact equity and drawdown; the trades table is the table view. One series, so no legend box.
+  - ✅ `Ratio`, `Plain`: a fraction from the API shown as a percent by moving the point in the string (`shiftPoint`), and a plain ratio to two places (Sharpe, profit factor); "—" when there's none.
 - **Freshness cutoffs (UX5):** the engine is stale after 30 s without a heartbeat (as Docker's health check), a price after 10 s (the PaperBroker won't fill on an older one), and the feed itself after 5 s without a snapshot. A stale number is greyed out, with a warning icon and the word "stale". The prices shown are the oldest of the ones the engine streams, so a stuck stream can't hide behind a busy one.
 - Money arrives from the API as **strings**, not JSON numbers, so Decimal precision survives (D9).
 

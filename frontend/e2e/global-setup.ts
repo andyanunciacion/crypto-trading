@@ -6,7 +6,8 @@ import { newSecret } from "./totp";
 /**
  * Starts the e2e stack from scratch and creates its one user, `e2e`, with a random
  * password and TOTP secret, and one running paper bot, `e2e-bot`, for the market chart
- * and the kill switch (bots.spec.ts makes its own, from the dashboard).
+ * and the kill switch (bots.spec.ts makes its own, from the dashboard). It backfills
+ * 120 days of BTC/USDT 4h candles for the backtests, and starts the backtester.
  * Environment variables set here reach the tests.
  *
  * The engine connects to MEXC for prices and candles, so this needs the internet.
@@ -32,7 +33,22 @@ export default function globalSetup(): void {
     "--cash",
     "1000",
   ]);
-  compose(["up", "-d", "--wait", "engine"]);
+  // For backtests.spec.ts: 4h candles, which no bot stores, so the range it runs over
+  // can't move between the dashboard's run and the CLI's.
+  compose([
+    "run",
+    "--rm",
+    "-T",
+    "engine",
+    "python",
+    "-m",
+    "engine.marketdata.backfill",
+    "BTC/USDT",
+    "4h",
+    "--days",
+    "120",
+  ]);
+  compose(["up", "-d", "--wait", "engine", "backtester"]);
 
   const password = randomBytes(18).toString("base64url");
   const secret = newSecret();
