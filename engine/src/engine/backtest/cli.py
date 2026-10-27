@@ -1,15 +1,17 @@
 """What the backtest CLIs share: their market and cost arguments, and a config built from them.
 
-Used by run, sweep and walk_forward, so all three build runs the same way.
+Used by run, sweep and walk_forward, and by the backtester service for the dashboard
+(worker.py, D48), so they all build runs the same way.
 """
 
 import argparse
 import json
-from datetime import timedelta
+import math
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any, get_args
+from typing import Any, Protocol, get_args
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from engine.backtest.models import (
     DEFAULT_FEE_RATE,
@@ -17,9 +19,9 @@ from engine.backtest.models import (
     BacktestConfig,
     default_slippage,
 )
-from engine.backtest.simulator import BacktestError
+from engine.backtest.simulator import BacktestError, warmup_needed
 from engine.exchange.adapter import ExchangeAdapter
-from engine.exchange.models import Timeframe
+from engine.exchange.models import MarketRules, Timeframe
 from engine.marketdata.store import CandleStore, Series
 from engine.marketdata.timeframes import STEP, floor
 from engine.risk.sizing import ALL_IN, SIZING, Sizing
@@ -103,34 +105,127 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--exchange", default="mexc")
 
 
-async def run_settings(
-    args: argparse.Namespace, candles: CandleStore, strategy: Strategy[Any]
+class RunSettings(BaseModel):
+    """A run's market, range and costs: everything but the strategy. What
+    `add_run_arguments` reads, and what the dashboard's Backtests page sends (D48), so
+    both build their runs with `build_config`."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    symbol: str
+    timeframe: Timeframe
+    days: int = Field(default=365, ge=1)
+    cash: Decimal = DEFAULT_INITIAL_CASH
+    fee_rate: Decimal = DEFAULT_FEE_RATE
+    slippage: Decimal | None = None  # None: default_slippage(symbol)
+    sizing: Sizing = ALL_IN
+    stops: Stops = NO_STOPS
+    exchange: str = "mexc"
+
+
+class MarketRulesSource(Protocol):
+    async def market_rules(self, symbol: str) -> MarketRules: ...
+
+
+async def build_config(
+    settings: RunSettings,
+    candles: CandleStore,
+    strategy: Strategy[Any],
+    exchange: MarketRulesSource,
 ) -> BacktestConfig:
-    """A config for `strategy` over the last `--days`, ending at the last stored candle.
+    """A config for `strategy` over the last `days`, ending at the last stored candle.
 
     The market's step sizes and minimums come from the exchange's public data.
     """
-    series = Series(args.exchange, args.symbol, args.timeframe)
+    series = Series(settings.exchange, settings.symbol, settings.timeframe)
     bounds = await candles.bounds(series)
     if bounds is None:
         raise BacktestError(f"no candles stored for {series}; run the backfill first")
-    end = bounds.last + STEP[args.timeframe]
-    # Public data only: no key, trading off (D22).
-    async with ExchangeAdapter(args.exchange) as exchange:
-        rules = await exchange.market_rules(args.symbol)
-    return BacktestConfig(
+    end = bounds.last + STEP[settings.timeframe]
+    rules = await exchange.market_rules(settings.symbol)
+    slippage = settings.slippage
+    config = BacktestConfig(
         strategy=strategy.name,
         strategy_version=strategy.version,
         params=strategy.params.model_dump(mode="json"),
-        exchange=args.exchange,
+        exchange=settings.exchange,
+        symbol=settings.symbol,
+        timeframe=settings.timeframe,
+        start=floor(end - timedelta(days=settings.days), settings.timeframe),
+        end=end,
+        initial_cash=settings.cash,
+        fee_rate=settings.fee_rate,
+        slippage_rate=default_slippage(settings.symbol) if slippage is None else slippage,
+        market_rules=rules,
+        sizing=settings.sizing,
+        stops=settings.stops,
+    )
+    _check_history(config, warmup_needed(strategy, config), series, bounds.first)
+    return config
+
+
+class NotEnoughHistory(BacktestError):
+    """The stored candles don't reach back far enough for the range plus its warm-up.
+
+    `max_days` is the longest range that fits what's stored (None if not even a day).
+    """
+
+    def __init__(self, message: str, max_days: int | None) -> None:
+        super().__init__(message)
+        self.max_days = max_days
+
+
+def _check_history(config: BacktestConfig, warmup: int, series: Series, first: datetime) -> None:
+    """Refuse a range whose warm-up would start before the first stored candle, saying
+    how many days do fit, and how far back a backfill must reach for this one."""
+    step = STEP[config.timeframe]
+    earliest = first + warmup * step  # the earliest start with a whole warm-up before it
+    if config.start >= earliest:
+        return
+    fits = (config.end - earliest).days  # whole days, as --days counts them
+    max_days = fits if fits >= 1 else None
+    reach = config.end - (config.start - warmup * step)
+    backfill = math.ceil(reach / timedelta(days=1))
+    advice = f"backfill more (--days {backfill})"
+    raise NotEnoughHistory(
+        f"needs {warmup} warm-up candles before the start ({config.start:%Y-%m-%d %H:%M} UTC),"
+        f" but the stored {series.exchange} {series.symbol} {series.timeframe} candles start"
+        f" at {first:%Y-%m-%d %H:%M} UTC: "
+        + (advice if max_days is None else f"use at most {max_days} days, or {advice}"),
+        max_days,
+    )
+
+
+class PublicRules:
+    """The exchange, opened only once the rules are asked for (each time, so they're
+    fresh): a series with no candles fails before anything goes over the network."""
+
+    def __init__(self, exchange_id: str) -> None:
+        self._exchange_id = exchange_id
+
+    async def market_rules(self, symbol: str) -> MarketRules:
+        # Public data only: no key, trading off (D22).
+        async with ExchangeAdapter(self._exchange_id) as exchange:
+            return await exchange.market_rules(symbol)
+
+
+async def run_settings(
+    args: argparse.Namespace,
+    candles: CandleStore,
+    strategy: Strategy[Any],
+    rules: MarketRulesSource | None = None,
+) -> BacktestConfig:
+    """`build_config` from the command line's arguments (`add_run_arguments`). The market
+    rules come from the exchange unless `rules` is given (tests)."""
+    settings = RunSettings(
         symbol=args.symbol,
         timeframe=args.timeframe,
-        start=floor(end - timedelta(days=args.days), args.timeframe),
-        end=end,
-        initial_cash=args.cash,
+        days=args.days,
+        cash=args.cash,
         fee_rate=args.fee_rate,
-        slippage_rate=default_slippage(args.symbol) if args.slippage is None else args.slippage,
-        market_rules=rules,
+        slippage=args.slippage,
         sizing=args.sizing,
         stops=args.stops,
+        exchange=args.exchange,
     )
+    return await build_config(settings, candles, strategy, rules or PublicRules(args.exchange))

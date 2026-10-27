@@ -13,6 +13,9 @@ function NativeSelect({ className, ...props }: ComponentProps<"select">) {
       className={cn(
         "dark:bg-input/30 border-input bg-background flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-base shadow-xs transition-[color,box-shadow] outline-none disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 md:text-sm",
         "focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]",
+        // The list it opens: the theme's popover colors, not the browser's white with our
+        // (in dark mode, white) text.
+        "[&_option]:bg-popover [&_option]:text-popover-foreground",
         className,
       )}
       {...props}

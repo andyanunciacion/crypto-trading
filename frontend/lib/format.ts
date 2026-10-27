@@ -28,6 +28,38 @@ export function formatDecimal(value: Decimal, { min = 2, max = 2, sign = false }
   }).format(value as Intl.StringNumericLiteral);
 }
 
+const DECIMAL_PARTS = /^([+-]?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/;
+
+/**
+ * `value` × 10^`places`, exactly, as a plain decimal string: a fraction as a percent
+ * ("0.07592", 2 → "7.592"). Moves the point in the digits, so no float is involved; also
+ * reads Python's exponent form ("1E-7").
+ */
+export function shiftPoint(value: Decimal, places: number): Decimal {
+  const parts = DECIMAL_PARTS.exec(value.trim());
+  if (parts === null) return value;
+  const [, sign = "", whole = "", fraction = "", exponent = "0"] = parts;
+  let digits = whole + fraction;
+  let point = whole.length + Number(exponent) + places;
+  if (point <= 0) {
+    digits = "0".repeat(1 - point) + digits;
+    point = 1;
+  }
+  if (point > digits.length) digits += "0".repeat(point - digits.length);
+  const before = digits.slice(0, point).replace(/^0+(?=\d)/, "");
+  const after = digits.slice(point);
+  return `${sign}${before}${after ? `.${after}` : ""}`;
+}
+
+/**
+ * Digits to show a price with: 2 for a price of 1 or more (USDT cents), up to 8 below
+ * that, so a small coin's price isn't shown as 0.00. Read from the string, not a float.
+ */
+export function priceDigits(value: Decimal): number {
+  const whole = value.trim().replace(/^[+-]/, "").split(".")[0].replace(/^0+/, "");
+  return whole === "" ? 8 : 2;
+}
+
 /** Whether a decimal string is below / above zero, without parsing it as a float. */
 export function signOf(value: Decimal): -1 | 0 | 1 {
   if (value.trim().startsWith("-")) return /[1-9]/.test(value) ? -1 : 0;

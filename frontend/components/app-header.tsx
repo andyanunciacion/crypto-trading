@@ -19,6 +19,7 @@ const NAV = [
   { href: "/", label: "Overview" },
   { href: "/market", label: "Market" },
   { href: "/bots", label: "Bots" },
+  { href: "/backtests", label: "Backtests" },
 ];
 
 /**
@@ -67,19 +68,24 @@ export function AppHeader() {
           )}
         </div>
         <nav aria-label="Main" className="flex items-center gap-1 text-sm">
-          {NAV.map((item) => (
-            <Link
-              key={item.href}
-              href={item.href}
-              aria-current={pathname === item.href ? "page" : undefined}
-              className={cn(
-                "hover:bg-accent rounded-md px-3 py-1.5",
-                pathname === item.href ? "bg-accent font-medium" : "text-muted-foreground",
-              )}
-            >
-              {item.label}
-            </Link>
-          ))}
+          {NAV.map((item) => {
+            // A screen's own pages count too: a run under /backtests/7 is in Backtests.
+            const here =
+              pathname === item.href || (item.href !== "/" && pathname.startsWith(`${item.href}/`));
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                aria-current={here ? "page" : undefined}
+                className={cn(
+                  "hover:bg-accent rounded-md px-3 py-1.5",
+                  here ? "bg-accent font-medium" : "text-muted-foreground",
+                )}
+              >
+                {item.label}
+              </Link>
+            );
+          })}
         </nav>
         <FreshnessIndicator />
         <div className="ml-auto flex items-center gap-2">

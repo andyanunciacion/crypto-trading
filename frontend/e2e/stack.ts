@@ -36,6 +36,16 @@ export function psql(sql: string): string {
   ).trim();
 }
 
+/** `docker compose -p crypto-trading-e2e <args>`, returning what it printed (stderr shown). */
+export function composeOutput(args: string[]): string {
+  return execFileSync("docker", ["compose", "-p", PROJECT, ...args], {
+    cwd: REPO_ROOT,
+    env: stackEnv(),
+    stdio: ["ignore", "pipe", "inherit"],
+    encoding: "utf8",
+  });
+}
+
 /** `docker compose -p crypto-trading-e2e <args>` from the repo root, its output shown. */
 export function compose(args: string[], input?: string): void {
   execFileSync("docker", ["compose", "-p", PROJECT, ...args], {

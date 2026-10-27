@@ -483,9 +483,36 @@ Done (D47):
 
 ### P5-5 · Backtests page
 `frontend` `backend` · Depends on: P5-1, P2-3
-- [ ] Run form; results with metrics, equity curve and trades
+- [x] Run form; results with metrics, equity curve and trades
 
 **Done when:** a backtest run from the UI shows the same metrics as the CLI run with the same inputs.
+
+Done (D48):
+- `e2e/backtests.spec.ts` (`pnpm e2e`): global setup backfills 120 days of BTC/USDT 4h, which no bot writes. The test runs EMA crossover (defaults) over 60 days from the Backtests page, waits for the run's page, and then runs `engine.backtest.run ema_crossover BTC/USDT 4h --days 60`. The CLI's printed return, max drawdown, Sharpe, trades, win rate and profit factor equal the page's values at the CLI's precision. In the database, both runs have the same range, candle hash, final equity and result (md5 of the JSON). 18 s. All 6 e2e tests pass (2026-10-27).
+- `engine/tests/test_backtest_worker.py`: a job stores a run whose config, candle hash and result equal the CLI's path with the same arguments. The job goes queued → running → done, and its record expires. Eight kinds of refusal (params, strategy, timeframe, sizing, stops, symbol format, no candles, too little warm-up) and a symbol the exchange doesn't list fail with the reason, storing nothing. A command that doesn't parse is dropped.
+- The metrics moved to `shared/backtest.py`. `test_backtest_report.py`'s hand calculations pass unchanged through the engine's `report()`. New: a stored result reads back with the same report without the engine, the shared literals equal the engine's, and a trade says which stop sold it. `shared/tests/test_backtest.py` reads a stored result.
+- `backend/tests/test_backtests.py`:
+  - a run is queued as a job with every field; a bad body is a 422 and queues nothing;
+  - the job reads back as it moves on; an unknown one is a 404;
+  - the list is newest first with `metrics()`'s numbers, and pages back;
+  - a run shows trades with their exits, drawdowns per point and skipped orders; an unknown one is a 404, and one whose result doesn't read is shown without metrics;
+  - the candle range.
+  - `test_every_route_needs_auth.py` requires the five new routes. All 855 Python tests pass.
+- Checked by hand in Chrome (2026-10-27, the e2e stack on port 3100, 119 days of BTC/USDT 1h):
+  - From the keyboard: Enter in the form with the default 365 days was refused ("needs 64 warm-up candles before start (2025-10-27 10:00 UTC), has 0"), with focus on the alert. With 90 days, a 3% stop-loss and a 2R take-profit, it showed "Queued… / Running…" and opened run #1 in about 3 s.
+  - Run #1: −12.25%, 13.83% max drawdown, Sharpe −2.20, 51 trades (3 sold by the take-profit), 21.6% won, profit factor 0.63, 98.08 USDT fees. `engine.backtest.report 1` printed the same numbers.
+  - The equity legend follows the cursor; the drawdown hangs from 0% in its own pane; dark and light themes re-color the chart without a reload.
+  - With the engine stopped, an RSI run still ran (2.9 s), its form drawn from the backtester's catalog.
+  - With the backtester stopped, a run said "Queued, 11 s: is the backtester running?", then ran 4.7 s after the backtester started.
+  - The kill switch answered in 23 ms (10 ms in the engine) while a backtest ran.
+  - The runs list shows all four runs, newest first. No console errors.
+- It found two things, fixed:
+  - Fill prices showed every digit of their slippage ("64,341.784815 USDT"): prices of 1 or more now show 2 decimals (smaller ones up to 8), the exact value on hover.
+  - The button read "Running…" while the job was only queued: it says "Queued…" until it runs.
+- The owner found two more, fixed:
+  - In dark mode a dropdown's list was white with white text (every `NativeSelect`, the Bots page's too): Chrome drew it light because the page never said it was dark. `globals.css` now sets `color-scheme` per theme, and `NativeSelect` gives its options the popover colors.
+  - Only a run's `#id` opened it: the whole row does now (the link stays the keyboard's way in).
+  - 365 days on 120 days of candles said only "needs 85 warm-up candles … has 0". `build_config()` now checks the history first, for the CLI too, and says how many days fit and how far to backfill ("use at most 367 days, or backfill more (--days 403)"); the job carries `max_days`, and the form offers "Use 367 days" (tested in `test_backtest_worker.py`; checked by hand: run #8).
 
 ### P5-6 · History and Logs
 `frontend` `backend` · Depends on: P5-2

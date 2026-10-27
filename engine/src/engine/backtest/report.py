@@ -1,7 +1,9 @@
 """The metrics for judging a backtest (D30), and a CLI that shows them for a stored run.
 
 They're computed from a run's config and result alone, so every stored run can be
-reported on, and a corrected formula applies to old runs too. Run inside the stack:
+reported on, and a corrected formula applies to old runs too. The formulas live in
+shared/backtest.py, which the dashboard uses too, so both show the same numbers (D48).
+Run inside the stack:
     docker compose run --rm engine python -m engine.backtest.report 7
     docker compose run --rm -T engine python -m engine.backtest.report 7 --equity-csv
 The second prints the equity curve as CSV (ts, equity, drawdown), to chart in a
@@ -14,114 +16,23 @@ import json
 import sys
 from collections import Counter
 from collections.abc import Sequence
-from datetime import UTC, timedelta
+from datetime import UTC
 from decimal import Decimal
-from itertools import pairwise
 
-from engine.backtest.models import (
-    BacktestConfig,
-    BacktestReport,
-    BacktestResult,
-    EquityPoint,
-    Fill,
-    Trade,
-)
+from engine.backtest.models import BacktestConfig, BacktestReport, BacktestResult, EquityPoint
 from engine.backtest.store import BacktestRunStore, StoredRun
-from engine.exchange.models import Timeframe
-from engine.marketdata.timeframes import STEP
 from engine.risk.sizing import SIZING
 from engine.risk.stops import NO_STOPS, STOPS
+from shared.backtest import drawdowns, metrics, sharpe, trades
 from shared.config import Settings, load_settings
 from shared.db.session import make_engine
 from shared.logs import configure_logging
 
-# Crypto trades every day of the year, so a year is 365 days of candles, not the 252
-# trading days used for stocks.
-YEAR = timedelta(days=365)
-
-
-def trades(fills: Sequence[Fill]) -> list[Trade]:
-    """Pair each buy with the sell after it. A buy still open at the end isn't a trade yet."""
-    closed: list[Trade] = []
-    entry: Fill | None = None
-    for fill in fills:
-        if fill.side == "buy":
-            if entry is not None:
-                raise ValueError(f"buy at {fill.ts} while the buy at {entry.ts} is still open")
-            entry = fill
-            continue
-        if entry is None:
-            raise ValueError(f"sell at {fill.ts} with no buy before it")
-        if fill.amount != entry.amount:
-            raise ValueError(f"sell of {fill.amount} at {fill.ts} doesn't close {entry.amount}")
-        cost = entry.price * entry.amount + entry.fee
-        pnl = fill.price * fill.amount - fill.fee - cost
-        closed.append(
-            Trade(
-                entry_ts=entry.ts,
-                exit_ts=fill.ts,
-                amount=entry.amount,
-                entry_price=entry.price,
-                exit_price=fill.price,
-                fees=entry.fee + fill.fee,
-                pnl=pnl,
-                return_=pnl / cost,
-            )
-        )
-        entry = None
-    return closed
-
-
-def drawdowns(initial_cash: Decimal, curve: Sequence[EquityPoint]) -> list[Decimal]:
-    """Each point's fall from the highest equity so far, as a fraction of that high.
-
-    The high starts at the starting cash: losing from the first candle is a drawdown too.
-    """
-    peak = initial_cash
-    falls: list[Decimal] = []
-    for point in curve:
-        peak = max(peak, point.equity)
-        falls.append((peak - point.equity) / peak)
-    return falls
-
-
-def sharpe(
-    initial_cash: Decimal, curve: Sequence[EquityPoint], timeframe: Timeframe
-) -> Decimal | None:
-    """Annualized Sharpe ratio of the per-candle returns, with a risk-free rate of 0.
-
-    The mean return per unit of its volatility (sample standard deviation), scaled by
-    the square root of the candles in a year. None with fewer than two returns or no
-    variation at all.
-    """
-    equities = [initial_cash, *(point.equity for point in curve)]
-    returns = [b / a - 1 for a, b in pairwise(equities)]
-    if len(returns) < 2:
-        return None
-    mean = sum(returns, Decimal(0)) / len(returns)
-    variance = sum(((r - mean) ** 2 for r in returns), Decimal(0)) / (len(returns) - 1)
-    if variance == 0:
-        return None
-    per_year = Decimal(YEAR // STEP[timeframe])
-    return mean / variance.sqrt() * per_year.sqrt()
+__all__ = ["describe", "drawdowns", "equity_csv", "report", "sharpe", "trades"]
 
 
 def report(config: BacktestConfig, result: BacktestResult) -> BacktestReport:
-    closed = trades(result.fills)
-    wins = [t.pnl for t in closed if t.pnl > 0]
-    losses = [t.pnl for t in closed if t.pnl < 0]  # break-even trades are neither
-    return BacktestReport(
-        total_return=result.final_equity / config.initial_cash - 1,
-        max_drawdown=max(drawdowns(config.initial_cash, result.equity_curve), default=Decimal(0)),
-        sharpe=sharpe(config.initial_cash, result.equity_curve, config.timeframe),
-        trades=closed,
-        trade_count=len(closed),
-        win_rate=Decimal(len(wins)) / len(closed) if closed else None,
-        profit_factor=sum(wins, Decimal(0)) / -sum(losses, Decimal(0)) if losses else None,
-        open_trade=result.final_amount > 0,
-        final_equity=result.final_equity,
-        total_fees=result.total_fees,
-    )
+    return metrics(config.initial_cash, config.timeframe, result)
 
 
 def describe(run_id: int, config: BacktestConfig, result: BacktestResult) -> str:

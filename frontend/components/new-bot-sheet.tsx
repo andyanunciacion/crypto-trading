@@ -3,7 +3,7 @@
 import { Plus } from "lucide-react";
 import { useState, type FormEvent } from "react";
 
-import { StrategyParamsForm } from "@/components/strategy-params-form";
+import { StrategySetup, initialSetup, setupPayload, type Setup } from "@/components/strategy-setup";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -17,21 +17,7 @@ import {
   SheetTrigger,
 } from "@/components/ui/sheet";
 import { ApiError, catalog as fetchCatalog, createBot } from "@/lib/api";
-import {
-  STOP_SLOTS,
-  fieldProblem,
-  initialValues,
-  toSettings,
-  type BotReply,
-  type Catalog,
-  type Choice,
-  type FieldSpec,
-  type NewBot,
-  type Settings,
-} from "@/lib/bots";
-
-type Values = Record<string, string>;
-type SlotKey = (typeof STOP_SLOTS)[number]["key"];
+import { fieldProblem, type BotReply, type Catalog, type FieldSpec, type NewBot } from "@/lib/bots";
 
 const CASH: FieldSpec = {
   name: "cash",
@@ -44,16 +30,6 @@ const CASH: FieldSpec = {
   description: null,
 };
 const NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
-const NO_STOPS: Record<SlotKey, string> = { stop_loss: "", take_profit: "", trailing: "" };
-
-function choice(choices: Choice[], name: string): Choice | undefined {
-  return choices.find((c) => c.name === name);
-}
-
-/** Every value shown is valid (the hints under each input say what's wrong). */
-function allValid(fields: FieldSpec[], values: Values): boolean {
-  return fields.every((f) => fieldProblem(f, values[f.name] ?? "") === null);
-}
 
 /**
  * "New bot" (D47): a side sheet with the engine's own choices, each strategy's params
@@ -133,47 +109,19 @@ function NewBotForm({
   onCancel: () => void;
   onCreated: (reply: BotReply, name: string) => void;
 }) {
-  const first = catalog.strategies[0];
   const [name, setName] = useState("");
-  const [strategy, setStrategy] = useState(first?.name ?? "");
-  const [params, setParams] = useState<Values>(first ? initialValues(first.fields) : {});
   const [symbol, setSymbol] = useState("BTC/USDT");
   const [timeframe, setTimeframe] = useState(
     catalog.timeframes.includes("1h") ? "1h" : (catalog.timeframes[0] ?? ""),
   );
   const [cash, setCash] = useState(CASH.default ?? "");
-  const [sizingMode, setSizingMode] = useState("all_in");
-  const [sizing, setSizing] = useState<Values>(
-    initialValues(choice(catalog.sizing, "all_in")?.fields ?? []),
-  );
-  const [stopKinds, setStopKinds] = useState<Record<SlotKey, string>>(NO_STOPS);
-  const [stopValues, setStopValues] = useState<Record<SlotKey, Values>>({
-    stop_loss: {},
-    take_profit: {},
-    trailing: {},
-  });
-  const [stopsShared, setStopsShared] = useState<Values>(initialValues(catalog.stops_fields));
+  const [setup, setSetup] = useState<Setup>(() => initialSetup(catalog));
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const strategyChoice = choice(catalog.strategies, strategy);
-  const sizingChoice = choice(catalog.sizing, sizingMode);
-  const usesAtr = Object.values(stopKinds).includes("atr");
-  const stopChoices = STOP_SLOTS.map(({ key }) => ({
-    key,
-    chosen: stopKinds[key] === "" ? undefined : choice(catalog.stops[key] ?? [], stopKinds[key]),
-  }));
   const cashProblem = fieldProblem(CASH, cash);
-  const valid =
-    NAME.test(name) &&
-    symbol.includes("/") &&
-    cashProblem === null &&
-    strategyChoice !== undefined &&
-    allValid(strategyChoice.fields, params) &&
-    sizingChoice !== undefined &&
-    allValid(sizingChoice.fields, sizing) &&
-    stopChoices.every(({ key, chosen }) => !chosen || allValid(chosen.fields, stopValues[key])) &&
-    (!usesAtr || allValid(catalog.stops_fields, stopsShared));
+  const payload = setupPayload(catalog, setup);
+  const valid = NAME.test(name) && symbol.includes("/") && cashProblem === null && payload !== null;
 
   function sendingNow(value: boolean) {
     setSending(value);
@@ -182,21 +130,13 @@ function NewBotForm({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (!valid || !strategyChoice || !sizingChoice) return;
-    const stops: Record<string, Settings | number> = {};
-    for (const { key, chosen } of stopChoices) {
-      if (chosen) stops[key] = { kind: chosen.name, ...toSettings(chosen.fields, stopValues[key]) };
-    }
-    if (usesAtr) Object.assign(stops, toSettings(catalog.stops_fields, stopsShared));
+    if (!valid || payload === null) return;
     const bot: NewBot = {
+      ...payload,
       name: name.trim(),
-      strategy,
-      params: toSettings(strategyChoice.fields, params),
       symbol: symbol.trim().toUpperCase(),
       timeframe,
       cash: cash.trim(),
-      sizing: { mode: sizingMode, ...toSettings(sizingChoice.fields, sizing) },
-      stops,
     };
     sendingNow(true);
     setError(null);
@@ -280,110 +220,12 @@ function NewBotForm({
         </div>
       </fieldset>
 
-      <fieldset className="flex flex-col gap-3">
-        <legend className="mb-2 text-sm font-semibold">Strategy</legend>
-        <NativeSelect
-          aria-label="Strategy"
-          value={strategy}
-          onChange={(event) => {
-            setStrategy(event.target.value);
-            setParams(initialValues(choice(catalog.strategies, event.target.value)?.fields ?? []));
-          }}
-        >
-          {catalog.strategies.map((s) => (
-            <option key={s.name} value={s.name}>
-              {s.title}
-            </option>
-          ))}
-        </NativeSelect>
-        {strategyChoice && (
-          <StrategyParamsForm
-            idPrefix="param"
-            fields={strategyChoice.fields}
-            values={params}
-            onChange={setParams}
-          />
-        )}
-      </fieldset>
-
-      <fieldset className="flex flex-col gap-3">
-        <legend className="mb-2 text-sm font-semibold">Sizing</legend>
-        <p className="text-muted-foreground -mt-2 text-xs">
-          How much each buy spends. The risk limits cap it (by default, no coin above 25% of the
-          account).
-        </p>
-        <NativeSelect
-          aria-label="Sizing"
-          value={sizingMode}
-          onChange={(event) => {
-            setSizingMode(event.target.value);
-            setSizing(initialValues(choice(catalog.sizing, event.target.value)?.fields ?? []));
-          }}
-        >
-          {catalog.sizing.map((m) => (
-            <option key={m.name} value={m.name}>
-              {m.title}
-            </option>
-          ))}
-        </NativeSelect>
-        {sizingChoice && sizingChoice.fields.length > 0 && (
-          <StrategyParamsForm
-            idPrefix="sizing"
-            fields={sizingChoice.fields}
-            values={sizing}
-            onChange={setSizing}
-          />
-        )}
-      </fieldset>
-
-      <fieldset className="flex flex-col gap-4">
-        <legend className="mb-2 text-sm font-semibold">Stops</legend>
-        {STOP_SLOTS.map(({ key, label, hint }) => {
-          const chosen = stopChoices.find((s) => s.key === key)?.chosen;
-          return (
-            <div key={key} className="flex flex-col gap-2">
-              <Label htmlFor={`stop-${key}`}>{label}</Label>
-              <NativeSelect
-                id={`stop-${key}`}
-                value={stopKinds[key]}
-                aria-describedby={`stop-${key}-hint`}
-                onChange={(event) => {
-                  const kind = event.target.value;
-                  setStopKinds({ ...stopKinds, [key]: kind });
-                  const fields = choice(catalog.stops[key] ?? [], kind)?.fields ?? [];
-                  setStopValues({ ...stopValues, [key]: initialValues(fields) });
-                }}
-              >
-                <option value="">None</option>
-                {(catalog.stops[key] ?? []).map((k) => (
-                  <option key={k.name} value={k.name}>
-                    {k.title}
-                  </option>
-                ))}
-              </NativeSelect>
-              <p id={`stop-${key}-hint`} className="text-muted-foreground text-xs">
-                {hint}
-              </p>
-              {chosen && (
-                <StrategyParamsForm
-                  idPrefix={`stop-${key}`}
-                  fields={chosen.fields}
-                  values={stopValues[key]}
-                  onChange={(values) => setStopValues({ ...stopValues, [key]: values })}
-                />
-              )}
-            </div>
-          );
-        })}
-        {usesAtr && (
-          <StrategyParamsForm
-            idPrefix="stops"
-            fields={catalog.stops_fields}
-            values={stopsShared}
-            onChange={setStopsShared}
-          />
-        )}
-      </fieldset>
+      <StrategySetup
+        catalog={catalog}
+        setup={setup}
+        onChange={setSetup}
+        sizingNote="How much each buy spends. The risk limits cap it (by default, no coin above 25% of the account)."
+      />
 
       {error !== null && (
         <p role="alert" className="text-loss text-sm">

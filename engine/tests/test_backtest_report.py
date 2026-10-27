@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 
@@ -10,8 +10,10 @@ from engine.backtest.models import BacktestConfig, BacktestResult, EquityPoint, 
 from engine.backtest.report import describe, drawdowns, equity_csv, report, sharpe, trades
 from engine.backtest.simulator import run_backtest
 from engine.exchange.models import Candle, MarketRules, OrderSide, Timeframe
-from engine.risk.stops import Percent, Stops
+from engine.risk.stops import ExitKind, Percent, Stops
 from engine.strategies.ema_crossover import EmaCrossover, EmaCrossoverParams
+from shared.backtest import ExitKind as SharedExitKind
+from shared.backtest import Side, StoredResult, metrics
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 HOUR = timedelta(hours=1)
@@ -274,6 +276,31 @@ def test_report_agrees_with_a_real_run() -> None:
     assert r.trades[0].pnl == run.final_equity - cfg.initial_cash  # bought 110, sold 90
     assert r.trades[0].pnl < 0
     assert r.win_rate == 0
+
+
+def test_a_trade_says_which_stop_sold_it() -> None:
+    first, second, third, fourth = TWO_TRADES.fills
+    fills = [first, second.model_copy(update={"exit": "stop_loss"}), third, fourth]
+
+    assert [t.exit for t in trades(fills)] == ["stop_loss", None]
+
+
+# --- Read back without the engine (D48) -------------------------------------------------
+
+
+def test_a_stored_result_reports_the_same_without_the_engine() -> None:
+    # The dashboard reads backtest_runs.result as a StoredResult and reports on it with
+    # shared.backtest.metrics: it must get exactly what the CLI's report() gets.
+    fills = [*WIN, LOSS[0], LOSS[1].model_copy(update={"exit": "take_profit"})]
+    run = result(fills, EQUITY)
+    stored = StoredResult.model_validate(run.model_dump(mode="json"))
+
+    assert metrics(D(1000), "1h", stored) == report(config(), run)
+
+
+def test_the_shared_literals_match_the_engines() -> None:
+    assert get_args(Side) == get_args(OrderSide)
+    assert get_args(SharedExitKind) == get_args(ExitKind)
 
 
 # --- Output -----------------------------------------------------------------------------

@@ -4,6 +4,7 @@
  * session cookie goes along by itself, and no CORS is needed (D44).
  */
 
+import type { BacktestJob, CandleRange, NewBacktest, RunDetail, RunSummary } from "@/lib/backtests";
 import type { BotReply, BotSetup, Catalog, NewBot } from "@/lib/bots";
 import type { Chart, TradeExplanation } from "@/lib/market";
 
@@ -121,6 +122,36 @@ export async function bots(): Promise<BotSetup[]> {
 export async function createBot(bot: NewBot): Promise<BotReply> {
   const response = await call("/bots", { method: "POST", body: JSON.stringify(bot) });
   return (await response.json()) as BotReply;
+}
+
+/**
+ * Queue a backtest for the backtester (D48); answers at once with the job, `queued`.
+ * Follow it with `backtestJob`: the backtester checks everything and fails the job
+ * with the reason.
+ */
+export async function runBacktest(backtest: NewBacktest): Promise<BacktestJob> {
+  const response = await call("/backtests", { method: "POST", body: JSON.stringify(backtest) });
+  return (await response.json()) as BacktestJob;
+}
+
+export async function backtestJob(jobId: string): Promise<BacktestJob> {
+  return (await (await call(`/backtests/jobs/${jobId}`)).json()) as BacktestJob;
+}
+
+/** The stored runs, newest first, with their metrics. */
+export async function backtests(limit?: number): Promise<RunSummary[]> {
+  const query = limit === undefined ? "" : `?limit=${limit}`;
+  return (await (await call(`/backtests${query}`)).json()) as RunSummary[];
+}
+
+export async function backtest(runId: number): Promise<RunDetail> {
+  return (await (await call(`/backtests/${runId}`)).json()) as RunDetail;
+}
+
+/** What's stored of a series, so the run form can say how far back it goes. */
+export async function candleRange(symbol: string, timeframe: string): Promise<CandleRange> {
+  const query = new URLSearchParams({ symbol, timeframe });
+  return (await (await call(`/candles/range?${query.toString()}`)).json()) as CandleRange;
 }
 
 export async function botCommand(

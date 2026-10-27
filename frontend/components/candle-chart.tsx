@@ -41,7 +41,7 @@ const STEP_S: Record<string, number> = {
   "1d": 86400,
 };
 
-function chartTime(iso: string): UTCTimestamp {
+export function chartTime(iso: string): UTCTimestamp {
   return (Date.parse(iso) / 1000 + MANILA_OFFSET_S) as UTCTimestamp;
 }
 
@@ -57,7 +57,7 @@ function barTime(iso: string, timeframe: string): UTCTimestamp {
  * orange), a pair validated for color-blind separation in both themes. Bollinger's upper
  * and lower bands are one line's two edges, so they share a color.
  */
-const LINE_SLOTS = { light: ["#2a78d6", "#eb6834"], dark: ["#3987e5", "#d95926"] };
+export const LINE_SLOTS = { light: ["#2a78d6", "#eb6834"], dark: ["#3987e5", "#d95926"] };
 
 /** How far from a marker's center a click still picks it: about the drawn arrow (size 1.5). */
 const MARKER_HIT_PX = { x: 8, y: 12 };
@@ -87,7 +87,7 @@ type Colors = {
 let probe: CanvasRenderingContext2D | null = null;
 
 /** A CSS color variable (an oklch() in globals.css) as rgba(), which the chart reads. */
-function token(name: string, alpha = 1): string {
+export function token(name: string, alpha = 1): string {
   const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   probe ??= document.createElement("canvas").getContext("2d", { willReadFrequently: true });
   if (probe === null) return value;
