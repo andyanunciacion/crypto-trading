@@ -6,10 +6,10 @@ append-only: changing a bot's strategy or params adds a row (P6), so every order
 """
 
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import structlog
-from sqlalchemy import insert, select, update
+from sqlalchemy import Select, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from engine.brokers.base import Mode
@@ -54,10 +54,12 @@ async def create_bot(
     created_by: str,
     sizing: Sizing = ALL_IN,
     stops: Stops = NO_STOPS,
+    status: Literal["running", "stopped"] = "running",
 ) -> int:
-    """Add a running paper bot with `strategy` as its first config. Returns the bot's id.
+    """Add a paper bot with `strategy` as its first config. Returns the bot's id.
 
-    One transaction: a bot never exists without its config.
+    One transaction: a bot never exists without its config. The CLI's bots start
+    running; the dashboard's start stopped, until someone starts them (D47).
     """
     async with db.begin() as conn:
         bot_id: int = (
@@ -69,7 +71,7 @@ async def create_bot(
                     symbol=symbol,
                     timeframe=timeframe,
                     mode="paper",
-                    status="running",
+                    status=status,
                     sizing=SIZING.dump_python(sizing, mode="json"),
                     stops=STOPS.dump_python(stops, mode="json"),
                 )
@@ -93,15 +95,8 @@ async def create_bot(
     return bot_id
 
 
-async def load_bots(db: AsyncEngine, exchange: str) -> list[Bot]:
-    """The bots with status "running" or "paused" that this engine can run, oldest first.
-
-    A paused bot (D42) still runs: its sells go through and its stops are watched, but
-    the RiskManager blocks its buys until it's set running again. A bot it can't run is
-    logged (`bot.refused`, with the reason) and left out, so one bad row doesn't stop
-    the others.
-    """
-    query = (
+def _bots_query() -> Select[Any]:
+    return (
         select(
             BotRow.id,
             BotRow.name,
@@ -120,9 +115,18 @@ async def load_bots(db: AsyncEngine, exchange: str) -> list[Bot]:
         )
         .select_from(BotRow)
         .outerjoin(StrategyConfigRow, StrategyConfigRow.id == BotRow.active_strategy_config_id)
-        .where(BotRow.status.in_(("running", "paused")))
-        .order_by(BotRow.id)
     )
+
+
+async def load_bots(db: AsyncEngine, exchange: str) -> list[Bot]:
+    """The bots with status "running" or "paused" that this engine can run, oldest first.
+
+    A paused bot (D42) still runs: its sells go through and its stops are watched, but
+    the RiskManager blocks its buys until it's set running again. A bot it can't run is
+    logged (`bot.refused`, with the reason) and left out, so one bad row doesn't stop
+    the others.
+    """
+    query = _bots_query().where(BotRow.status.in_(("running", "paused"))).order_by(BotRow.id)
     async with db.connect() as conn:
         rows = (await conn.execute(query)).all()
     bots: list[Bot] = []
@@ -150,6 +154,23 @@ async def load_bots(db: AsyncEngine, exchange: str) -> list[Bot]:
         ],
     )
     return bots
+
+
+class UnknownBot(ValueError):
+    pass
+
+
+async def load_bot(db: AsyncEngine, exchange: str, bot_id: int) -> tuple[Bot, str]:
+    """Bot `bot_id`, whatever its status, built as `load_bots` builds one, and its status.
+
+    Raises UnknownBot if there's no such bot, and ValueError (with the reason) if this
+    engine can't run it.
+    """
+    async with db.connect() as conn:
+        row = (await conn.execute(_bots_query().where(BotRow.id == bot_id))).one_or_none()
+    if row is None:
+        raise UnknownBot(f"there's no bot {bot_id}")
+    return _bot(row, exchange), row.status
 
 
 async def held_symbols(db: AsyncEngine, *, mode: Mode) -> list[str]:

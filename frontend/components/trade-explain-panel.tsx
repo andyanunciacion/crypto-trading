@@ -103,7 +103,9 @@ function Explanation({ trade }: { trade: TradeExplanation }) {
           </p>
           {exit.levels && <Rows rows={entries(exit.levels)} />}
           {exit.command && (
-            <p className="text-muted-foreground text-xs">Kill switch command {exit.command}</p>
+            <p className="text-muted-foreground text-xs">
+              {exit.kind === "kill_switch" ? "Kill switch command" : "Command"} {exit.command}
+            </p>
           )}
         </Section>
       )}

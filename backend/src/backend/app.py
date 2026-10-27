@@ -24,6 +24,7 @@ from sqlalchemy import URL
 from backend.auth import routes as auth_routes
 from backend.auth.crypto import Secrets
 from backend.auth.deps import current_user
+from backend.bots import routes as bot_routes
 from backend.dashboard import routes as dashboard_routes
 from backend.market import routes as market_routes
 from backend.settings import ApiSettings
@@ -97,6 +98,7 @@ def create_app(
     protected.include_router(auth_routes.router)
     protected.include_router(dashboard_routes.router)
     protected.include_router(market_routes.router)
+    protected.include_router(bot_routes.router)
 
     app.include_router(public)
     app.include_router(auth_routes.public)

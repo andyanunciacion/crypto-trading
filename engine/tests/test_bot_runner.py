@@ -12,7 +12,9 @@ first, then the runner checks the stops. The BUY at candle 30 buys 9.0768 BTC at
 leaving 0.553552 USDT.
 """
 
-from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+import asyncio
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -77,6 +79,7 @@ class FakeMarket:
 
     rest: list[Candle] = field(default_factory=lambda: list(HISTORY))
     exchange_id: str = "mexc"
+    gate: asyncio.Event | None = None  # if set, the next fetch waits for it once
 
     async def fetch_candles(
         self,
@@ -86,6 +89,9 @@ class FakeMarket:
         limit: int | None = None,
     ) -> list[Candle]:
         assert (symbol, timeframe) == (BTC, "1m")
+        if self.gate is not None:
+            gate, self.gate = self.gate, None
+            await gate.wait()
         rows = [c for c in self.rest if since is None or c.ts >= since]
         return rows[:limit]
 
@@ -232,6 +238,18 @@ async def setup(db_url: URL) -> AsyncIterator[Setup]:
 
 def usdt(free: str, used: str = "0") -> Balance:
     return Balance(currency="USDT", free=d(free), used=d(used), total=d(free) + d(used))
+
+
+async def run_until(runner: BotRunner, done: asyncio.Event) -> None:
+    """`runner.run()`, which only cancelling ends, until `done` is set."""
+    task = asyncio.create_task(runner.run())
+    try:
+        async with asyncio.timeout(5):
+            await done.wait()
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
 
 # --- Trading -----------------------------------------------------------------------------
@@ -456,14 +474,16 @@ async def test_warm_up_when_rest_lacks_the_newest_candle(setup: Setup) -> None:
 async def test_run_follows_the_stream(setup: Setup) -> None:
     bot = await setup.ema_bot()
     asked: list[tuple[str, Timeframe, datetime]] = []
+    done = asyncio.Event()
 
     async def stream(symbol: str, timeframe: Timeframe, last: datetime) -> AsyncGenerator[Candle]:
         asked.append((symbol, timeframe, last))
         setup.tick()
         setup.quotes.set(ask="110", bid="109.9")
         yield candle(30, "110")
+        done.set()  # the runner has acted on the candle
 
-    await setup.runner([bot], stream=stream).run()  # returns when the stream ends
+    await run_until(setup.runner([bot], stream=stream), done)
 
     assert asked == [(BTC, "1m", candle(29).ts)]
     buy = await setup.desk.risk.get_order("b1-202610221230-b")
@@ -580,6 +600,7 @@ class BuysWhenFlat(Strategy[StrategyParams]):
 async def test_after_an_outage_a_bot_acts_on_the_newest_candle_only(setup: Setup) -> None:
     strategy = BuysWhenFlat(StrategyParams())
     bot = replace(await setup.ema_bot(), strategy=strategy)
+    done = asyncio.Event()
 
     async def stream(symbol: str, timeframe: Timeframe, last: datetime) -> AsyncGenerator[Candle]:
         # The network was out for 5 minutes: candles 30-34 arrive at once, just after
@@ -588,9 +609,10 @@ async def test_after_an_outage_a_bot_acts_on_the_newest_candle_only(setup: Setup
         setup.quotes.set(ask="110", bid="109.9")
         for i in range(30, 35):
             yield candle(i, "110")
+        done.set()
 
     with capture_logs() as logs:
-        await setup.runner([bot], stream=stream).run()
+        await run_until(setup.runner([bot], stream=stream), done)
 
     caught_up = [log for log in logs if log["event"] == "bot.caught_up"]
     assert [log["candle_ts"] for log in caught_up] == [
@@ -988,3 +1010,152 @@ async def test_a_bot_without_stops_is_left_alone(setup: Setup) -> None:
     assert await setup.order_rows() == 1
     held = await setup.held(bot)
     assert held is not None and (held.levels, held.plan) == (None, None)
+
+
+# --- Bots started while the others run (D47) ----------------------------------------------
+
+
+@dataclass
+class Streams:
+    """The live candle stream: a new one each time a series starts, all fed from one
+    queue. Each candle is acknowledged once the runner has acted on it."""
+
+    candles: asyncio.Queue[Candle] = field(default_factory=asyncio.Queue)
+    acted: asyncio.Queue[datetime] = field(default_factory=asyncio.Queue)
+    started: list[datetime] = field(default_factory=list)  # the `last` each one was asked for
+
+    async def __call__(
+        self, symbol: str, timeframe: Timeframe, last: datetime
+    ) -> AsyncGenerator[Candle]:
+        self.started.append(last)
+        while True:
+            closed = await self.candles.get()
+            yield closed
+            self.acted.put_nowait(closed.ts)
+
+    async def feed(self, closed: Candle) -> None:
+        self.candles.put_nowait(closed)
+        async with asyncio.timeout(5):
+            assert await self.acted.get() == closed.ts
+
+
+@asynccontextmanager
+async def running(runner: BotRunner) -> AsyncIterator[None]:
+    task = asyncio.create_task(runner.run())
+    await asyncio.sleep(0)  # run() under way, so add() works
+    try:
+        yield
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+async def until(check: Callable[[], bool]) -> None:
+    async with asyncio.timeout(5):
+        while not check():  # noqa: ASYNC110 (waiting on the runner's tasks)
+            await asyncio.sleep(0.01)
+
+
+async def test_a_bot_started_on_a_streaming_series_joins_with_a_whole_window(
+    setup: Setup,
+) -> None:
+    a = await setup.ema_bot("btc-a")
+    streams = Streams()
+    runner = setup.runner([a], stream=streams)
+    async with running(runner):
+        await until(lambda: runner.running == [a.id])
+        setup.tick()
+        await streams.feed(candle(30))  # flat; REST won't have it when b warms up
+
+        b = await setup.ema_bot("btc-b")
+        with capture_logs() as logs:
+            assert runner.add(b)
+            assert not runner.add(b)  # once is enough
+            await until(lambda: runner.running == [a.id, b.id])
+        # REST gave b candles 14-29, and candle 30 came from the series: a whole window,
+        # so it can trade at the next candle (a gap would hold it for 16 candles).
+        (started,) = [log for log in logs if log["event"] == "bot.started"]
+        assert started["candles"] == 16
+
+        # Candle 31 crosses up: both buy.
+        setup.tick()
+        setup.quotes.set(ask="110", bid="109.9")
+        await streams.feed(candle(31, "110"))
+
+    for buy in ("b1-202610221231-b", "b2-202610221231-b"):
+        order = await setup.desk.risk.get_order(buy)
+        assert order is not None and order.status == "closed", buy
+    assert len(streams.started) == 1  # b joined a's stream
+
+
+async def test_a_bot_started_on_a_new_series_starts_its_stream(setup: Setup) -> None:
+    symbols: list[str] = []
+    streams = Streams()
+    runner = setup.runner([], stream=streams, on_new_symbol=symbols.append)
+    async with running(runner):  # with no bots, it waits for one
+        bot = await setup.ema_bot()
+        assert runner.add(bot)
+        assert symbols == [BTC]  # told first, so the price is streamed by its first order
+        await until(lambda: runner.running == [bot.id])
+        assert streams.started == [candle(29).ts]
+
+        setup.tick()
+        setup.quotes.set(ask="110", bid="109.9")
+        await streams.feed(candle(30, "110"))
+
+    order = await setup.desk.risk.get_order("b1-202610221230-b")
+    assert order is not None and order.status == "closed"
+
+
+async def test_a_bot_stopped_while_warming_up_never_joins(setup: Setup) -> None:
+    a = await setup.ema_bot("btc-a")
+    streams = Streams()
+    runner = setup.runner([a], stream=streams)
+    async with running(runner):
+        await until(lambda: runner.running == [a.id])
+        gate = asyncio.Event()
+        setup.market.gate = gate  # b's warm-up hangs on REST
+        b = await setup.ema_bot("btc-b")
+        assert runner.add(b)
+        await until(lambda: setup.market.gate is None)
+
+        assert await runner.stop([b.id]) == [b.id]  # at once: it doesn't wait for REST
+        with capture_logs() as logs:
+            gate.set()
+            await until(lambda: any(log["event"] == "bot.start_abandoned" for log in logs))
+
+        setup.tick()
+        setup.quotes.set(ask="110", bid="109.9")
+        await streams.feed(candle(30, "110"))
+        assert runner.running == [a.id]
+
+    assert await setup.desk.risk.get_order("b2-202610221230-b") is None
+    assert await setup.desk.risk.get_order("b1-202610221230-b") is not None
+
+
+async def test_a_stopped_bot_started_again_starts_afresh(setup: Setup) -> None:
+    bot = await setup.ema_bot()
+    streams = Streams()
+    runner = setup.runner([bot], stream=streams)
+    async with running(runner):
+        await until(lambda: runner.running == [bot.id])
+        assert await runner.stop([bot.id]) == [bot.id]
+        with capture_logs() as logs:
+            setup.tick()
+            streams.candles.put_nowait(candle(30))
+            await until(lambda: any(log["event"] == "bots.series_ended" for log in logs))
+        assert runner.running == []
+
+        # Started again: its series starts anew, warmed up from REST, which has 30 now.
+        setup.market.rest.append(candle(30))
+        assert runner.add(bot)
+        await until(lambda: runner.running == [bot.id])
+        assert streams.started == [candle(29).ts, candle(30).ts]
+
+        setup.tick()
+        setup.quotes.set(ask="110", bid="109.9")
+        await streams.feed(candle(31, "110"))
+
+    order = await setup.desk.risk.get_order("b1-202610221231-b")
+    assert order is not None and order.status == "closed"

@@ -13,6 +13,8 @@ export type EngineHeartbeat = {
   beat: number;
   exchange: string;
   symbols: string[];
+  /** The bots it runs, warmed up (D47): a bot just started is here seconds later. */
+  bots: number[];
 };
 
 export type Account = {

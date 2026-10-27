@@ -20,7 +20,8 @@ class ApiSettings(Settings):
     # How often the Overview WebSocket sends a fresh snapshot (D45). DESIGN §9 wants a
     # price change on screen within 1 s.
     feed_seconds: float = Field(default=1, gt=0, le=60)
-    # How long the kill switch waits for the engine's reply (as the CLI's default).
+    # How long the kill switch waits for the engine's reply (as the CLI's default), and
+    # the Bots page's commands too: they expire then, unread (D47).
     kill_reply_seconds: float = Field(default=10, gt=0, le=60)
 
     @field_validator("jwt_secret")

@@ -21,3 +21,6 @@ class EngineHeartbeat(BaseModel):
     beat: int = Field(ge=1)  # beats since it started
     exchange: str  # CCXT id of the exchange it streams prices from, e.g. "mexc"
     symbols: list[str]  # the symbols it streams prices for (shared/prices.py)
+    # The bots it's running, warmed up (D47): a bot just started is "running" in the
+    # database a few seconds before it's here. Empty in a beat from before P5-4.
+    bots: list[int] = Field(default_factory=list)

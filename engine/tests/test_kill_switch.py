@@ -347,16 +347,31 @@ async def test_a_buy_under_way_when_the_kill_comes_is_blocked(setup: Setup) -> N
 
 async def test_a_series_whose_bots_are_all_stopped_ends_its_stream(setup: Setup) -> None:
     a = await setup.bot("btc-a")
+    next_candle = asyncio.Event()
+    closed = asyncio.Event()
 
     async def stream(symbol: str, timeframe: Timeframe, last: datetime) -> AsyncGenerator[Candle]:
-        yield candle(30, "110")  # a BUY, had the bot been running
-        await asyncio.Event().wait()  # no more candles: only stopping ends this
+        try:
+            await next_candle.wait()
+            yield candle(30, "110")  # a BUY, had the bot been running
+            await asyncio.Event().wait()  # no more candles: only stopping ends this
+        finally:
+            closed.set()
 
     runner = setup.runner([a], stream=stream)
-    assert await runner.stop([a.id]) == [a.id]
-    assert await runner.stop([a.id]) == []  # once is enough
-    async with asyncio.timeout(5):
-        await runner.run()
+    task = asyncio.create_task(runner.run())
+    try:
+        async with asyncio.timeout(5):
+            while runner.running != [a.id]:  # noqa: ASYNC110 (waiting on its warm-up)
+                await asyncio.sleep(0.01)
+            assert await runner.stop([a.id]) == [a.id]
+            assert await runner.stop([a.id]) == []  # once is enough
+            next_candle.set()
+            await closed.wait()
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
     assert await setup.desk.risk.get_order(BUY_1) is None
 

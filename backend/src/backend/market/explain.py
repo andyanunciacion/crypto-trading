@@ -53,7 +53,7 @@ class StopsPart(_Part):
 
 
 class ExitPart(_Part):
-    kind: str  # stop_loss, trailing_stop, take_profit, kill_switch
+    kind: str  # stop_loss, trailing_stop, take_profit, kill_switch, close (D47)
     attempt: int
     bid: Decimal  # the bid it fired at
     price_ts: AwareDatetime
