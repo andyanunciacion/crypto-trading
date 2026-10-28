@@ -50,7 +50,7 @@ Login (password + TOTP)
 | Market chart with trade markers | 5.3 | ✅ |
 | Bots list (create/start/pause/stop, D47) | 5.4 | ✅ |
 | Switching a bot's strategy or params (Edit on the Bots list, D51) | 6.1 | ✅ |
-| Bot detail (config history and rollback) | 6.2 | ⬜ |
+| Bot detail (setup, strategy history and rollback, D52) | 6.2 | ✅ |
 | Backtests (run + results, D48) | 5.5 | ✅ |
 | History with filters and CSV export (orders and fills, D49) | 5.6 | ✅ |
 | Logs (engine log and risk events, D49) | 5.6 | ✅ |
@@ -90,7 +90,9 @@ A placeholder until (if ever) a brand is needed: shadcn/ui's neutral theme, syst
   - ✅ `StrategyParamsForm` (D47): inputs for a list of settings the engine read from a pydantic model (a strategy's params, a sizing mode's, a stop's), each with its default, description and bounds, saying what's wrong as you type. Values stay strings.
   - ✅ `NewBotSheet` (D47): a side sheet with the bot's name, cash, symbol and timeframe, the strategy and its params, sizing and stops; the engine's refusal is shown in it. Bots are created stopped.
   - ✅ `StopBotDialog` (D47): like the kill switch's, focus on Cancel; "Stop" says the position is left with no one watching its stops, "Stop + close position" sells it until it's gone.
-  - ✅ `EditStrategySheet` (D51): "Edit" on a bot's row. A side sheet starting from the strategy and params it runs now, and the switch policy as three radios (keep / close first / hand over), each saying in a line what happens to the open position, and whether it holds one now. "Switch" is disabled while nothing changed; a policy alone saves as "Save policy". The engine's refusal is shown in it; its reply says when the switch applies (the next candle, or at Start) and whether the position is being sold. The list's Strategy column shows the policy ("on a switch: keep").
+  - ✅ `EditStrategySheet` (D51): "Edit" on a bot's row. A side sheet starting from the strategy and params it runs now, and the switch policy as three radios (keep / close first / hand over), each saying in a line what happens to the open position, and whether it holds one now. "Switch" is disabled while nothing changed; a policy alone saves as "Save policy". The engine's refusal is shown in it; its reply says when the switch applies (the next candle, or at Start) and whether the position is being sold. The list's Strategy column shows the policy ("on a switch: keep"). The policy radios are `SwitchPolicyFields`, shared with `RollbackDialog`.
+  - ✅ Bot detail (D52, `/bots/[id]`, opened from a bot's name on the list, always underlined so it reads as a link): the bot's name, status, mode and market, Edit, and its setup (strategy and params, switch policy, sizing, stops, cash, why it's paused or stopped). Then "Strategy history": every config it has had, newest first, numbered per bot (#), with its strategy and version, params, when (Manila) and by whom it was made, and a note ("running now", "rollback to #1", "same as running now", or why it can't be rolled back to: its strategy has a new version now). Roll back isn't offered on a row identical to the running config. The result of a command takes the focus, as on the Bots list.
+  - ✅ `RollbackDialog` (D52): "Roll back" on every config but the active one. A dialog like `StopBotDialog`, focus on Cancel: "Roll back e2e-eth to #1?", what it runs now and what it goes back to, and `SwitchPolicyFields` starting from the bot's policy. It says the settings are added to the history as a new config and nothing is deleted. The engine's refusal is shown in it.
   - ✅ `StatusBadge`, `BotWhy`: a bot's status as a word, and why it's paused or stopped (the Overview and Bots pages).
   - ✅ `NativeSelect` (`components/ui/`): the browser's `<select>`, styled like `Input`.
   - ✅ `StrategySetup` (D48): the strategy and its params, the sizing and the stops, drawn from the catalog; shared by `NewBotSheet` and `BacktestForm`, so a bot and a backtest are set up alike.

@@ -19,6 +19,8 @@ The commands:
   saw answered must not take effect when the engine next starts, hours later.
 - `SwitchStrategyCommand`: change a bot's strategy or params while it runs, with a
   policy for its open position (P6-1, D51). It expires like the bot commands.
+- `RollbackCommand`: switch a bot back to one of its earlier strategy configs, as a new
+  config copying it (P6-2, D52). The engine reads the config; it expires like a switch.
 """
 
 import time
@@ -159,6 +161,19 @@ class SwitchStrategyCommand(_Expiring):
     policy: SwitchPolicy
 
 
+class RollbackCommand(_Expiring):
+    """Switch bot `bot_id` back to its strategy config `config_id` (P6-2).
+
+    The engine adds a config copying that one's strategy and params (`restored_from`),
+    then switches to it exactly as a `SwitchStrategyCommand` would, with `policy`.
+    """
+
+    type: Literal["rollback_strategy"] = "rollback_strategy"
+    bot_id: int
+    config_id: int
+    policy: SwitchPolicy
+
+
 class BotReply(_Frozen):
     id: UUID  # the command's
     ok: bool
@@ -168,12 +183,12 @@ class BotReply(_Frozen):
     canceled: list[str] = Field(default_factory=list)  # the orders a stop cancelled
     closing: list[Closing] = Field(default_factory=list)  # a stop + close's sells
     not_closed: list[NotClosed] = Field(default_factory=list)
-    # A switch's new strategy config; None if only the policy changed.
+    # A switch's (or rollback's) new strategy config; None if only the policy changed.
     strategy_config_id: int | None = None
     took_ms: int
 
 
-BotCommands = CreateBotCommand | BotCommand | SwitchStrategyCommand
+BotCommands = CreateBotCommand | BotCommand | SwitchStrategyCommand | RollbackCommand
 Command = Annotated[KillCommand | BotCommands, Field(discriminator="type")]
 COMMAND: TypeAdapter[Command] = TypeAdapter(Command)
 

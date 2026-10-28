@@ -1,6 +1,7 @@
 """The Bots page's API (backend/bots/, D47): the list and the catalog are read from the
-database and Redis; create, start, pause, stop and a strategy switch (D51) are commands
-to the engine, over the Redis command list, answered with its reply.
+database and Redis, as is a bot's detail with its config history (D52); create, start,
+pause, stop, a strategy switch (D51) and a rollback (D52) are commands to the engine,
+over the Redis command list, answered with its reply.
 
 A stand-in for the engine pops each command and replies; the engine's side is tested in
 engine/tests/test_bot_control.py.
@@ -23,6 +24,7 @@ from shared.commands import (
     Closing,
     Command,
     CreateBotCommand,
+    RollbackCommand,
     SwitchStrategyCommand,
     reply_key,
 )
@@ -175,6 +177,46 @@ async def test_the_engines_refusal_of_a_switch_is_a_422(api: Api) -> None:
     assert (response.status_code, response.json()["detail"]) == (422, why)
 
 
+async def test_a_rollback_sends_the_config_and_policy(api: Api) -> None:
+    await api.login()
+    engine = asyncio.create_task(
+        engine_replies(api, bot_id=3, status="running", strategy_config_id=9)
+    )
+
+    response = await api.client.post("/bots/3/rollback", json={"config_id": 5, "policy": "keep"})
+    command = await engine
+
+    assert (response.status_code, response.json()["strategy_config_id"]) == (200, 9)
+    assert isinstance(command, RollbackCommand)
+    assert (command.bot_id, command.config_id, command.policy) == (3, 5, "keep")
+    assert (command.source, command.expires_at) == ("dashboard", T0 + timedelta(seconds=1))
+
+
+async def test_a_bad_rollback_never_reaches_the_engine(api: Api) -> None:
+    await api.login()
+    good = {"config_id": 5, "policy": "keep"}
+
+    for body in (
+        {**good, "policy": "sell_all"},
+        {**good, "strategy": "ema_crossover"},  # the engine reads the config itself
+        {"policy": "keep"},
+        {**good, "config_id": "five"},
+    ):
+        assert (await api.client.post("/bots/3/rollback", json=body)).status_code == 422, body
+    assert await api.redis.llen(COMMANDS_KEY) == 0
+
+
+async def test_the_engines_refusal_of_a_rollback_is_a_422(api: Api) -> None:
+    await api.login()
+    why = "can't roll back to config 1: ema_crossover is now version 2, not version 1"
+    engine = asyncio.create_task(engine_replies(api, ok=False, error=why))
+
+    response = await api.client.post("/bots/3/rollback", json={"config_id": 1, "policy": "keep"})
+    await engine
+
+    assert (response.status_code, response.json()["detail"]) == (422, why)
+
+
 async def test_with_no_reply_the_command_expires(api: Api) -> None:
     await api.login()
 
@@ -248,6 +290,52 @@ async def test_the_list_has_each_bots_setup(api: Api) -> None:
         None,
         "0",
     )
+
+
+async def test_a_bots_detail_has_its_config_history(api: Api) -> None:
+    await clean(api)
+    ema = {"strategy": "ema_crossover", "version": 1, "params": {"fast": 9, "slow": 21}}
+    async with api.db.begin() as conn:
+        bot = {"exchange": "mexc", "symbol": "BTC/USDT", "timeframe": "1h"}
+        await conn.execute(insert(BotRow), [{**bot, "name": "btc-ema"}, {**bot, "name": "other"}])
+        await conn.execute(
+            insert(StrategyConfigRow),
+            [
+                {"bot_id": 1, **ema, "created_by": "cli"},  # 1
+                {"bot_id": 2, **ema, "created_by": "cli"},  # 2: the other bot's
+                {
+                    "bot_id": 1,
+                    "strategy": "rsi_mean_reversion",
+                    "version": 1,
+                    "params": {"period": 7},
+                    "created_by": "dashboard",
+                },  # 3
+            ],
+        )
+        await conn.execute(
+            insert(StrategyConfigRow).values(
+                bot_id=1, **ema, created_by="dashboard", restored_from=1
+            )
+        )  # 4: the rollback
+        await conn.execute(update(BotRow).where(BotRow.id == 1).values(active_strategy_config_id=4))
+    await api.login()
+
+    response = await api.client.get("/bots/1")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["bot"]["name"], body["bot"]["params"]) == ("btc-ema", {"fast": 9, "slow": 21})
+    configs = [
+        (c["id"], c["number"], c["strategy"], c["created_by"], c["restored_from"], c["active"])
+        for c in body["configs"]
+    ]
+    assert configs == [
+        (4, 3, "ema_crossover", "dashboard", 1, True),
+        (3, 2, "rsi_mean_reversion", "dashboard", None, False),
+        (1, 1, "ema_crossover", "cli", None, False),
+    ]
+    assert body["configs"][1]["params"] == {"period": 7}
+    assert (await api.client.get("/bots/99")).status_code == 404
 
 
 async def test_the_catalog_is_the_engines(api: Api) -> None:
