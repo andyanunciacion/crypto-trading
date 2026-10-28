@@ -652,6 +652,14 @@ Done (D50):
 
 **Done when:** an auto-switching backtest runs end to end and produces a full report.
 
+**Note: the regime detector's lag (from P6-3, D53).** ADX is smoothed twice, so the detector recognises a new trend or range about 2 × `adx_period` candles late. On 1d that's 2–4 weeks: summer 2023 read `trending_up` until Jul 25, though BTC had flattened out by late June. Most of the lag is in *leaving* a trend, because ADX takes weeks to fall below 20. Once this backtest exists, try two candidate fixes against the current rules:
+- **Kaufman's efficiency ratio** (net change ÷ the sum of absolute changes over 20 candles) as the strength measure. It has a fixed window and no smoothing tail.
+- **A fast trend exit:** `unclear` as soon as the DI lines cross or the EMA slope flips, rather than waiting for ADX < 20. "ADX falling" was considered and dropped: in July 2023 ADX bounced back up mid-fade, so that rule would flicker.
+
+Judge them in two steps:
+- **First, a lag/flip report over the 2019–2023 fixture:** days until each labeled span is recognised, and label changes per year. Faster labels also flip more, which means a longer minimum hold.
+- **Then this combined backtest:** keep a variant only if it makes more money net of switching. Don't tune to the 9 labeled spans. A shorter `adx_period` is the fallback: easy, but noisier everywhere.
+
 ### P6-6 · Grid and DCA strategies
 `strategy` · Depends on: P2-2
 - [ ] Grid (range, number of grids); DCA (amount, interval, dip trigger)
