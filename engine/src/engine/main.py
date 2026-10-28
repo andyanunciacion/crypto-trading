@@ -12,7 +12,9 @@ It also listens for commands over Redis (control/listener.py, D43): the kill swi
 the Bots page's create, start, pause and stop (D47). Commands sent while it was down are
 carried out first, before any bot is loaded. A bot started later on a new symbol gets
 its price stream then (`Prices.ensure`). At startup it also writes what a new bot can be
-set up with (control/catalog.py), for the Bots page's form.
+set up with (control/catalog.py), for the Bots page's form. A bot with auto-switching on
+switches strategy when the regime calls for it (P6-4, D54), through the same BotControl
+as the Bots page's switches.
 
 Its log lines go to stdout and, from INFO up, to the Redis stream the dashboard's Logs
 page reads (shared/logs.py, D49).
@@ -200,6 +202,7 @@ async def run(settings: Settings, mirror: LogMirror | None = None) -> None:
                     on_kline=RedisFormingSink(redis, exchange.exchange_id),
                     on_new_symbol=prices.ensure,
                     selling=kill_switch.sells_for,  # a switch that closes first (D51)
+                    on_regime=bot_control.auto_switch,  # auto-switching (P6-4, D54)
                 )
                 kill_switch.runner = runner
                 bot_control.runner = runner

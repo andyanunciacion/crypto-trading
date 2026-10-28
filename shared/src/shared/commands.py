@@ -21,6 +21,8 @@ The commands:
   policy for its open position (P6-1, D51). It expires like the bot commands.
 - `RollbackCommand`: switch a bot back to one of its earlier strategy configs, as a new
   config copying it (P6-2, D52). The engine reads the config; it expires like a switch.
+- `AutoSwitchCommand`: turn a bot's auto-switching on, with its regime -> strategy
+  mapping, or off (P6-4, D54). It expires like a switch.
 """
 
 import time
@@ -174,6 +176,19 @@ class RollbackCommand(_Expiring):
     policy: SwitchPolicy
 
 
+class AutoSwitchCommand(_Expiring):
+    """Turn bot `bot_id`'s auto-switching on with `settings`, or off with None (P6-4).
+
+    `settings` is a `shared.regime.AutoSwitchSettings` as JSON, mapping each regime to a
+    strategy and params; the engine checks each one, as a switch checks its config, and
+    stores it with the strategy's version.
+    """
+
+    type: Literal["auto_switch"] = "auto_switch"
+    bot_id: int
+    settings: dict[str, JsonValue] | None
+
+
 class BotReply(_Frozen):
     id: UUID  # the command's
     ok: bool
@@ -188,7 +203,9 @@ class BotReply(_Frozen):
     took_ms: int
 
 
-BotCommands = CreateBotCommand | BotCommand | SwitchStrategyCommand | RollbackCommand
+BotCommands = (
+    CreateBotCommand | BotCommand | SwitchStrategyCommand | RollbackCommand | AutoSwitchCommand
+)
 Command = Annotated[KillCommand | BotCommands, Field(discriminator="type")]
 COMMAND: TypeAdapter[Command] = TypeAdapter(Command)
 

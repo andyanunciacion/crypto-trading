@@ -50,6 +50,59 @@ def test_migrations_match_the_models(db_url: URL) -> None:
     assert run_on(db_url, schema_drift) == []
 
 
+def test_0014_records_the_earlier_switches_from_the_config_history(db_url: URL) -> None:
+    # Two bots: one switched by hand and then rolled back, one never switched.
+    downgrade(db_url, "0013")
+    try:
+
+        def history(conn: Connection) -> None:
+            # Other tests' rows may still be here; the ids below must start at 1.
+            conn.execute(text("TRUNCATE bots, strategy_configs RESTART IDENTITY CASCADE"))
+            conn.execute(
+                text(
+                    "INSERT INTO bots (name, exchange, symbol, timeframe)"
+                    " VALUES ('a', 'mexc', 'BTC/USDT', '1h'), ('b', 'mexc', 'ETH/USDT', '1h')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO strategy_configs (bot_id, strategy, version, params, created_by,"
+                    " restored_from) VALUES"
+                    " (1, 'ema_crossover', 1, '{}', 'cli', NULL),"
+                    " (2, 'ema_crossover', 1, '{}', 'cli', NULL),"
+                    " (1, 'rsi_mean_reversion', 1, '{}', 'dashboard', NULL),"
+                    " (1, 'ema_crossover', 1, '{}', 'dashboard', 1)"
+                )
+            )
+            conn.commit()
+
+        run_on(db_url, history)
+        upgrade(db_url)
+
+        def switches(conn: Connection) -> list[tuple[Any, ...]]:
+            rows = conn.execute(
+                text(
+                    "SELECT s.bot_id, s.from_config, s.to_config, s.trigger, s.policy, s.source,"
+                    " s.ts = c.created_at FROM strategy_switches s"
+                    " JOIN strategy_configs c ON c.id = s.to_config ORDER BY s.id"
+                )
+            )
+            return [tuple(row) for row in rows]
+
+        assert run_on(db_url, switches) == [
+            (1, 1, 3, "manual", None, "dashboard", True),
+            (1, 3, 4, "rollback", None, "dashboard", True),
+        ]
+    finally:
+        upgrade(db_url)
+
+        def empty(conn: Connection) -> None:
+            conn.execute(text("TRUNCATE bots, strategy_configs, strategy_switches CASCADE"))
+            conn.commit()
+
+        run_on(db_url, empty)
+
+
 def test_downgrade_and_upgrade_again(db_url: URL) -> None:
     downgrade(db_url, "base")
     assert run_on(db_url, hypertables) == []

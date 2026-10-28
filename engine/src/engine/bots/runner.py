@@ -56,6 +56,12 @@ reaches its window twice. Until it's ready, the old config carries on, and each 
 - `close_first`: the kill switch sells it (kind `switch`). While it does, the bot only
   takes in candles, and its stops are left alone (`selling`), so nothing sells twice.
 - `hand_over`: the new config's SELL sells it. The trade keeps its stops.
+
+A bot with auto-switching on (P6-4, D54) also has its regime checked after each live
+candle it acts on (regime/switcher.py). When the regime calls for another config,
+`on_regime` (BotControl.auto_switch) makes the switch, as the Bots page's Edit would,
+in the background: the candle loop never waits for it. The new config then warms up
+and takes over at a later candle, like any switch. Until it has, no second one is sent.
 """
 
 import asyncio
@@ -93,6 +99,7 @@ from engine.marketdata.candle_stream import CandleSource, CandleStream, KlineHoo
 from engine.marketdata.quotes import MAX_QUOTE_AGE, QuoteSource
 from engine.marketdata.store import CandleStore, Series
 from engine.marketdata.timeframes import STEP, floor
+from engine.regime.switcher import RegimeCheck
 from engine.risk.manager import RiskManager
 from engine.risk.sizing import SIZING, atr_for, atr_of, lookback
 from engine.risk.stops import NO_STOPS, ExitState, NoLevels, levels_at_entry, reentry
@@ -107,6 +114,8 @@ log = structlog.get_logger()
 StreamFactory = Callable[[str, Timeframe, datetime], AsyncGenerator[Candle]]
 # A series' newest candles, for a bot joining it: enough for the seconds its warm-up takes.
 RECENT_CANDLES = 5
+# Makes the switch an auto-switching bot's regime calls for (BotControl.auto_switch).
+RegimeHook = Callable[[Bot, RegimeCheck], Awaitable[None]]
 
 
 class MarketSource(CandleSource, Protocol):
@@ -156,6 +165,7 @@ class BotRunner:
         on_kline: KlineHook | None = None,
         on_new_symbol: Callable[[str], None] | None = None,
         selling: Callable[[int], bool] | None = None,
+        on_regime: RegimeHook | None = None,
         clock: Callable[[], datetime] = _utcnow,
         fee_rate: Decimal = DEFAULT_FEE_RATE,
     ) -> None:
@@ -171,6 +181,7 @@ class BotRunner:
         # Whether the kill switch is selling a bot's position for it (a `close_first`
         # switch, D51): the bot is held back until it's gone.
         self._selling = selling or (lambda bot_id: False)
+        self._on_regime = on_regime
         self._clock = clock
         self._fee_rate = fee_rate  # the fee the PaperBroker charges, left room for when buying
         self._series: dict[Series, list[_Running]] = {}
@@ -185,6 +196,7 @@ class BotRunner:
         self._joining: dict[int, asyncio.Task[None]] = {}  # bots added, still warming up
         self._switching: dict[int, asyncio.Task[None]] = {}  # switches still warming up
         self._switches: dict[int, _Switch] = {}  # ... and warmed up, for the next candle
+        self._regime_switching: dict[int, asyncio.Task[None]] = {}  # on_regime, still running
         for bot in bots:
             self._enlist(_running(bot))
             self._locks[bot.id] = asyncio.Lock()
@@ -202,8 +214,9 @@ class BotRunner:
 
     @property
     def switching(self) -> list[int]:
-        """The bots whose switch (D51) is still warming up: their old config still acts."""
-        return sorted(self._switching)
+        """The bots whose switch (D51) is still being made by the regime (P6-4) or warming
+        up: their old config still acts."""
+        return sorted({*self._switching, *self._regime_switching})
 
     async def run(self) -> None:
         """Run every bot until cancelled. With no bots, it waits for `add()`."""
@@ -353,6 +366,7 @@ class BotRunner:
                         self._hold(running, candle)
                     elif closed_ago < step:
                         await self._step(running, candle)
+                        self._regime(running, candle)
                     else:
                         await self._catch_up(running, candle, closed_ago)
             except Exception as exc:
@@ -742,6 +756,56 @@ class BotRunner:
             if held is not None and held.plan is not None:
                 await self._levels(bot, held)
 
+    def _regime(self, running: _Running, candle: Candle) -> None:
+        """Check an auto-switching bot's regime at `candle`, and send the switch it calls
+        for (module docstring). No await: the switch is made in the background."""
+        bot = running.bot
+        auto = bot.auto
+        if auto is None:
+            return
+        check = auto.check(running.signals.window, bot.strategy, STEP[bot.timeframe])
+        switch = check.switch
+        fields = {
+            "bot_id": bot.id,
+            "name": bot.name,
+            "candle_ts": candle.ts.isoformat(),
+            "regime": check.reading.regime,
+            "held": check.held,
+            "min_hold": auto.settings.min_hold,
+            "reason": check.reading.reason,
+            "indicators": check.reading.indicators,
+            "strategy_config_id": bot.strategy_config_id,
+            "switch_to": None if switch is None else switch.target.name,
+        }
+        # Every candle while a regime builds up or calls for a switch; once it has held,
+        # the same line every candle would only crowd the Logs page (D49).
+        settled = check.held >= auto.settings.min_hold and switch is None
+        (log.debug if settled else log.info)("bot.regime", **fields)
+        if switch is None or self._on_regime is None or self._tasks is None:
+            return
+        if bot.id in self._switching or bot.id in self._switches:
+            return  # a switch is warming up, or waiting for the next candle: it decides
+        if bot.id in self._regime_switching:
+            return  # the last candle's is still being made
+        self._regime_switching[bot.id] = self._tasks.create_task(self._send_switch(bot, check))
+
+    async def _send_switch(self, bot: Bot, check: RegimeCheck) -> None:
+        assert self._on_regime is not None  # _regime checked
+        try:
+            await self._on_regime(bot, check)
+        except Exception as exc:
+            # The next candle checks again; one failure must not end the runner's tasks.
+            log.error(
+                "bot.auto_switch_failed",
+                bot_id=bot.id,
+                name=bot.name,
+                candle_ts=check.reading.ts.isoformat(),
+                error=type(exc).__name__,
+                detail=str(exc),
+            )
+        finally:
+            self._regime_switching.pop(bot.id, None)
+
     async def _watch(self, bot: Bot, update: PriceUpdate, bid: Decimal) -> None:
         held = await load_held(self._db, bot.id, bot.symbol, mode=self._risk.mode)
         if held is None or held.plan is None:
@@ -853,8 +917,8 @@ class BotRunner:
 
 def _running(bot: Bot) -> _Running:
     """`bot`, with its signal runners, not seeded yet."""
-    # ATR sizing or stops may need more candles than the strategy: the runner keeps them.
-    signals = SignalRunner(bot.strategy, bot.symbol, bot.timeframe, keep=_atr_window(bot))
+    # ATR sizing, stops or the regime may need more candles than the strategy: it keeps them.
+    signals = SignalRunner(bot.strategy, bot.symbol, bot.timeframe, keep=_extra_window(bot))
     keeper = None
     if bot.keeper is not None:
         kept = SignalRunner(bot.keeper.strategy, bot.symbol, bot.timeframe)
@@ -869,19 +933,22 @@ def _seed(running: _Running, candles: Sequence[Candle]) -> None:
 
 
 def _candles_needed(running: _Running) -> int:
-    """Closed candles the bot needs to warm up: its strategy's, ATR's, its keeper's."""
+    """Closed candles the bot needs to warm up: its strategy's, ATR's, the regime's, its
+    keeper's."""
     keeper = running.keeper
     return max(
         running.signals.strategy.warmup_candles,
-        _atr_window(running.bot),
+        _extra_window(running.bot),
         0 if keeper is None else keeper.signals.strategy.warmup_candles,
         1,
     )
 
 
-def _atr_window(bot: Bot) -> int:
-    """Closed candles the bot needs for its ATR sizing or stops: 0 if neither uses ATR."""
-    return max(lookback(bot.sizing), stops_lookback(bot.stops))
+def _extra_window(bot: Bot) -> int:
+    """Closed candles the bot needs besides its strategy's: for its ATR sizing or stops,
+    and its auto-switching's regime readings. 0 if it needs none."""
+    regime = 0 if bot.auto is None else bot.auto.window
+    return max(lookback(bot.sizing), stops_lookback(bot.stops), regime)
 
 
 def _config_json(strategy_config_id: int, signals: SignalRunner[Any]) -> dict[str, JsonValue]:

@@ -7,8 +7,8 @@ here runs.
   indicators, the forming candle and its trades (chart.py).
 - `WS /ws/bots/{bot_id}/chart?after=&since=`: what changed, every `feed_seconds`: candles
   closed after `after` (the browser's newest) with their indicators, the forming candle,
-  and the trades from `since` (its oldest candle) when they changed. The session is
-  checked again before each message, as on `/ws/overview`.
+  and the trades and strategy switches from `since` (its oldest candle) when they
+  changed. The session is checked again before each message, as on `/ws/overview`.
 - `GET /orders/{order_id}/explain`: why a trade happened (explain.py).
 """
 
@@ -29,6 +29,7 @@ from backend.market.chart import (
     DEFAULT_CANDLES,
     MAX_CANDLES,
     Chart,
+    SwitchMarker,
     TradeMarker,
     lines_of,
     read_bot,
@@ -79,6 +80,7 @@ async def chart_feed(
         return
     lines = lines_of(bot)
     sent: list[TradeMarker] | None = None
+    sent_switches: list[SwitchMarker] | None = None
     try:
         while True:
             if await signed_in(websocket) is None:
@@ -93,6 +95,7 @@ async def chart_feed(
                     after=after,
                     since=since,
                     sent=sent,
+                    sent_switches=sent_switches,
                     now=_now(state),
                 )
             await websocket.send_text(update.model_dump_json())
@@ -101,6 +104,8 @@ async def chart_feed(
                 since = since or update.candles[0].ts
             if update.trades is not None:
                 sent = update.trades
+            if update.switches is not None:
+                sent_switches = update.switches
             # Waits out the interval, but returns at once if the browser goes away.
             with contextlib.suppress(TimeoutError):
                 async with asyncio.timeout(cast(ApiSettings, state.settings).feed_seconds):

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
+import { AutoSwitchSheet } from "@/components/auto-switch-sheet";
 import { BotWhy, StatusBadge } from "@/components/bot-status";
 import { EditStrategySheet } from "@/components/edit-strategy-sheet";
 import { Money } from "@/components/money";
@@ -12,6 +13,7 @@ import { ModeBadge } from "@/components/mode-badge";
 import { useFeed } from "@/components/overview-provider";
 import { RollbackDialog } from "@/components/rollback-dialog";
 import { Timestamp } from "@/components/timestamp";
+import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
   Table,
@@ -21,16 +23,20 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { ApiError, bot as fetchBot, catalog as fetchCatalog } from "@/lib/api";
+import { ApiError, bot as fetchBot, catalog as fetchCatalog, setAutoSwitch } from "@/lib/api";
 import {
+  REGIMES,
   describeParams,
   describeSizing,
   describeStops,
   policyLabel,
+  regimeLabel,
   switchedText,
   type BotDetail,
+  type BotSetup,
   type Catalog,
   type ConfigEntry,
+  type SwitchEntry,
 } from "@/lib/bots";
 import { cn } from "@/lib/utils";
 
@@ -41,6 +47,10 @@ type Message = { kind: "status" | "alert"; text: string };
  * Configs are append-only, so the history is complete: each row is when that config
  * became the bot's, and Roll back on an earlier one makes a copy of it the bot's config
  * (a switch, as Edit makes, with a policy for the open position).
+ *
+ * Its auto-switching (P6-4, D54): a strategy for each regime, set up here. While it's
+ * on, Edit and Roll back are off, since the regime would switch it back. The switch log
+ * lists every switch, by hand or by the regime, with why.
  */
 export default function BotPage() {
   const { id } = useParams<{ id: string }>();
@@ -144,6 +154,7 @@ export default function BotPage() {
             setMessage({ kind: "status", text });
             setReloads((n) => n + 1);
           }}
+          onFailed={(text) => setMessage({ kind: "alert", text })}
         />
       )}
     </section>
@@ -155,15 +166,18 @@ function Detail({
   catalog,
   holding,
   onDone,
+  onFailed,
 }: {
   detail: BotDetail;
   catalog: Catalog | null;
   holding: boolean;
   onDone: (text: string) => void;
+  onFailed: (text: string) => void;
 }) {
-  const { bot, configs } = detail;
+  const { bot, configs, switches } = detail;
   const numbers = new Map(configs.map((c) => [c.id, c.number]));
   const running = configs.find((c) => c.active);
+  const auto = bot.auto_switch !== null;
   return (
     <>
       <div className="flex flex-wrap items-center gap-3">
@@ -175,11 +189,17 @@ function Detail({
         <span className="text-muted-foreground text-sm">
           {bot.symbol} · {bot.timeframe}
         </span>
-        <div className="ml-auto">
+        <div className="ml-auto flex items-center gap-2">
+          {auto && (
+            <span className="text-muted-foreground text-xs">
+              Auto-switching is on: turn it off to switch by hand.
+            </span>
+          )}
           <EditStrategySheet
             bot={bot}
             holding={holding}
-            disabled={false}
+            // While the regime switches it, a switch by hand would be undone.
+            disabled={auto}
             onSwitched={(reply, change) => onDone(switchedText(bot, change, reply, holding))}
           />
         </div>
@@ -206,6 +226,14 @@ function Detail({
         </dl>
       </Card>
 
+      <AutoSwitching
+        bot={bot}
+        catalog={catalog}
+        holding={holding}
+        onDone={onDone}
+        onFailed={onFailed}
+      />
+
       <h2 id="history" className="text-lg font-semibold">
         Strategy history
       </h2>
@@ -230,7 +258,9 @@ function Detail({
           </TableHeader>
           <TableBody>
             {configs.map((config) => {
-              const blocked = cantBuild(config, catalog);
+              const blocked = auto
+                ? "turn auto-switching off to roll back"
+                : cantBuild(config, catalog);
               // Rolling back to what it runs now would change nothing (the engine refuses it).
               const same = !config.active && running !== undefined && sameSetup(config, running);
               const restored =
@@ -294,7 +324,174 @@ function Detail({
           </TableBody>
         </Table>
       </Card>
+
+      <SwitchLog switches={switches} />
     </>
+  );
+}
+
+/** The bot's auto-switching (P6-4, D54): off, with Set up; or its mapping, with Change and Turn off. */
+function AutoSwitching({
+  bot,
+  catalog,
+  holding,
+  onDone,
+  onFailed,
+}: {
+  bot: BotSetup;
+  catalog: Catalog | null;
+  holding: boolean;
+  onDone: (text: string) => void;
+  onFailed: (text: string) => void;
+}) {
+  const [sending, setSending] = useState(false);
+  const settings = bot.auto_switch;
+  const title = (name: string) =>
+    catalog?.strategies.find((s) => s.name === name)?.title.split(":")[0] ?? name;
+
+  async function turnOff() {
+    setSending(true);
+    try {
+      const reply = await setAutoSwitch(bot.id, null);
+      onDone(
+        `Auto-switching is off for ${bot.name} (${reply.took_ms} ms): it keeps the strategy it runs now.`,
+      );
+    } catch (problem) {
+      onFailed(
+        problem instanceof ApiError
+          ? `Couldn't turn auto-switching off: ${problem.message}`
+          : "Couldn't reach the API.",
+      );
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <section aria-labelledby="auto" className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 id="auto" className="text-lg font-semibold">
+          Auto-switching
+        </h2>
+        <span className="text-muted-foreground text-sm">{settings === null ? "off" : "on"}</span>
+        <div className="ml-auto flex gap-2">
+          <AutoSwitchSheet
+            bot={bot}
+            holding={holding}
+            onSaved={(reply, saved) =>
+              onDone(
+                `Auto-switching is ${settings === null ? "on" : "changed"} for ${bot.name} (${reply.took_ms} ms): ` +
+                  `it switches once a new regime has held for ${candles(saved.min_hold)} in a row.`,
+              )
+            }
+          />
+          {settings !== null && (
+            <Button size="sm" variant="outline" disabled={sending} onClick={turnOff}>
+              Turn off
+            </Button>
+          )}
+        </div>
+      </div>
+      <p className="text-muted-foreground -mt-1 text-sm">
+        {settings === null
+          ? "Switch strategy by itself when the market changes: a trend-follower in a trend, mean reversion in a range, nothing in a crash."
+          : `Switches once a new regime has held for ${candles(settings.min_hold, "closed ")} in a row; on a switch, ${policyLabel(settings.policy).toLowerCase()} its position.`}
+      </p>
+      {settings !== null && (
+        <Card className="py-2">
+          <Table aria-labelledby="auto">
+            <TableHeader>
+              <TableRow>
+                <TableHead>Regime</TableHead>
+                <TableHead>Strategy</TableHead>
+                <TableHead>Params</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {REGIMES.map(({ value, label }) => {
+                const mapped = settings.mapping[value];
+                return (
+                  <TableRow key={value} data-regime={value}>
+                    <TableCell>{label}</TableCell>
+                    <TableCell>{title(mapped.strategy)}</TableCell>
+                    <TableCell className="font-mono text-xs whitespace-normal">
+                      {describeParams(mapped.params)}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        </Card>
+      )}
+    </section>
+  );
+}
+
+/** "1 candle", "3 closed candles". */
+function candles(n: number, kind = ""): string {
+  return `${n} ${kind}candle${n === 1 ? "" : "s"}`;
+}
+
+const TRIGGERS: Record<SwitchEntry["trigger"], string> = {
+  manual: "by hand",
+  rollback: "rollback",
+  regime: "regime",
+};
+
+/** Every switch of the bot's config, newest first (P6-4, D54). */
+function SwitchLog({ switches }: { switches: SwitchEntry[] }) {
+  return (
+    <section aria-labelledby="switches" className="flex flex-col gap-2">
+      <h2 id="switches" className="text-lg font-semibold">
+        Switch log
+      </h2>
+      <p className="text-muted-foreground -mt-1 text-sm">
+        Each switch, by hand or by the regime, and why. The new strategy trades from the bot&apos;s
+        next candle.
+      </p>
+      {switches.length === 0 ? (
+        <p className="text-muted-foreground text-sm">No switches yet.</p>
+      ) : (
+        <Card className="py-2">
+          <Table aria-labelledby="switches">
+            <TableHeader>
+              <TableRow>
+                <TableHead>When</TableHead>
+                <TableHead>Config</TableHead>
+                <TableHead>By</TableHead>
+                <TableHead>On a switch</TableHead>
+                <TableHead>Why</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {switches.map((s) => (
+                <TableRow key={s.id} data-switch={s.to_number}>
+                  <TableCell>
+                    <Timestamp iso={s.ts} />
+                  </TableCell>
+                  <TableCell className="font-mono tabular-nums">
+                    {s.from_number === null ? "—" : `#${s.from_number}`} → #{s.to_number}
+                  </TableCell>
+                  <TableCell>
+                    {TRIGGERS[s.trigger]}
+                    {s.regime !== null && (
+                      <span className="text-muted-foreground block text-xs">
+                        {regimeLabel(s.regime)}
+                      </span>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground text-xs">
+                    {s.policy === null ? "—" : policyLabel(s.policy).toLowerCase()}
+                  </TableCell>
+                  <TableCell className="min-w-60 text-xs whitespace-normal">{s.reason}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Card>
+      )}
+    </section>
   );
 }
 

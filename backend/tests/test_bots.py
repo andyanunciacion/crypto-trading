@@ -19,6 +19,7 @@ from shared.catalog import CATALOG_KEY, Catalog, Choice, FieldSpec
 from shared.commands import (
     COMMAND,
     COMMANDS_KEY,
+    AutoSwitchCommand,
     BotCommand,
     BotReply,
     Closing,
@@ -28,7 +29,7 @@ from shared.commands import (
     SwitchStrategyCommand,
     reply_key,
 )
-from shared.db.models import BotRow, PaperBalanceRow, StrategyConfigRow
+from shared.db.models import BotRow, PaperBalanceRow, StrategyConfigRow, StrategySwitchRow
 
 
 async def engine_replies(api: Api, **reply: Any) -> Command:
@@ -46,7 +47,7 @@ async def clean(api: Api) -> None:
         await conn.execute(
             text(
                 "TRUNCATE bots, strategy_configs, orders, fills, positions, paper_balances,"
-                " risk_events RESTART IDENTITY"
+                " risk_events, strategy_switches RESTART IDENTITY"
             )
         )
 
@@ -217,6 +218,60 @@ async def test_the_engines_refusal_of_a_rollback_is_a_422(api: Api) -> None:
     assert (response.status_code, response.json()["detail"]) == (422, why)
 
 
+AUTO = {
+    "mapping": {
+        "trending_up": {"strategy": "ema_crossover", "params": {"fast": 9, "slow": 21}},
+        "trending_down": {"strategy": "stay_flat"},
+        "ranging": {"strategy": "rsi_mean_reversion", "params": {"period": 7}},
+        "high_volatility": {"strategy": "stay_flat"},
+    },
+    "min_hold": 3,
+    "policy": "hand_over",
+}
+
+
+async def test_auto_switching_sends_the_mapping_or_off(api: Api) -> None:
+    await api.login()
+    for body, mapped in [({"settings": AUTO}, True), ({"settings": None}, False)]:
+        engine = asyncio.create_task(engine_replies(api, bot_id=3, status="running"))
+
+        response = await api.client.post("/bots/3/auto-switch", json=body)
+        command = await engine
+
+        assert response.status_code == 200, body
+        assert isinstance(command, AutoSwitchCommand)
+        assert (command.bot_id, command.source) == (3, "dashboard")
+        if not mapped:
+            assert command.settings is None
+            continue
+        assert command.settings is not None
+        assert command.settings["min_hold"] == 3
+        assert command.settings["policy"] == "hand_over"
+        assert command.settings["mapping"]["ranging"] == {  # type: ignore[index,call-overload]
+            "strategy": "rsi_mean_reversion",
+            "params": {"period": 7},
+            "version": None,  # the engine fills it in
+        }
+
+
+async def test_a_bad_auto_switch_never_reaches_the_engine(api: Api) -> None:
+    await api.login()
+    mapping: dict[str, Any] = AUTO["mapping"]  # type: ignore[assignment]
+    missing = {k: v for k, v in mapping.items() if k != "ranging"}
+
+    for settings in (
+        {**AUTO, "mapping": missing},  # every regime needs a strategy
+        {**AUTO, "mapping": {**mapping, "unclear": {"strategy": "stay_flat"}}},
+        {**AUTO, "min_hold": 0},
+        {**AUTO, "policy": "sell_all"},
+        {**AUTO, "x": 1},
+    ):
+        response = await api.client.post("/bots/3/auto-switch", json={"settings": settings})
+        assert response.status_code == 422, settings
+    assert (await api.client.post("/bots/3/auto-switch", json={})).status_code == 422
+    assert await api.redis.llen(COMMANDS_KEY) == 0
+
+
 async def test_with_no_reply_the_command_expires(api: Api) -> None:
     await api.login()
 
@@ -335,7 +390,76 @@ async def test_a_bots_detail_has_its_config_history(api: Api) -> None:
         (1, 1, "ema_crossover", "cli", None, False),
     ]
     assert body["configs"][1]["params"] == {"period": 7}
+    assert body["switches"] == []  # none recorded
     assert (await api.client.get("/bots/99")).status_code == 404
+
+
+async def test_a_bots_detail_has_its_switches_newest_first(api: Api) -> None:
+    await clean(api)
+    ema = {"strategy": "ema_crossover", "version": 1, "params": {"fast": 9, "slow": 21}}
+    reading = {"regime": "ranging", "held": 3, "min_hold": 3, "indicators": {"adx": 14.2}}
+    async with api.db.begin() as conn:
+        bot = {"exchange": "mexc", "symbol": "BTC/USDT", "timeframe": "1h"}
+        await conn.execute(insert(BotRow), [{**bot, "name": "btc-ema"}, {**bot, "name": "other"}])
+        await conn.execute(
+            insert(StrategyConfigRow),
+            [
+                {"bot_id": 1, **ema, "created_by": "cli"},  # 1
+                {"bot_id": 2, **ema, "created_by": "cli"},  # 2: the other bot's
+                {
+                    "bot_id": 1,
+                    "strategy": "rsi_mean_reversion",
+                    "version": 1,
+                    "params": {"period": 7},
+                    "created_by": "regime",
+                },  # 3
+            ],
+        )
+        await conn.execute(
+            update(BotRow)
+            .where(BotRow.id == 1)
+            .values(active_strategy_config_id=3, auto_switch={"min_hold": 3})
+        )
+        await conn.execute(
+            insert(StrategySwitchRow).values(
+                bot_id=1,
+                ts=T0,
+                from_config=1,
+                to_config=3,
+                trigger="regime",
+                policy="keep",
+                regime="ranging",
+                candle_ts=T0 - timedelta(hours=1),
+                reading=reading,
+                reason="ranging for 3 candles in a row",
+                source="regime",
+            )
+        )
+        await conn.execute(
+            insert(StrategySwitchRow).values(
+                bot_id=2,
+                from_config=2,
+                to_config=2,
+                trigger="manual",
+                reason="the other bot's",
+                source="test",
+            )
+        )
+    await api.login()
+
+    body = (await api.client.get("/bots/1")).json()
+
+    assert body["bot"]["auto_switch"] == {"min_hold": 3}
+    (switch,) = body["switches"]
+    assert {k: switch[k] for k in ("from_number", "to_number", "trigger", "regime", "policy")} == {
+        "from_number": 1,
+        "to_number": 2,
+        "trigger": "regime",
+        "regime": "ranging",
+        "policy": "keep",
+    }
+    assert (switch["reason"], switch["reading"]) == ("ranging for 3 candles in a row", reading)
+    assert (await api.client.get("/bots")).json()[1]["auto_switch"] is None
 
 
 async def test_the_catalog_is_the_engines(api: Api) -> None:

@@ -11,6 +11,8 @@ is stored, and it works with the engine down.
   stream (shared/candles.py), when it's newer than the last closed one. Display only.
 - `trades`: the bot's orders that filled at all, each at its first fill's time and its
   average fill price, with what placed it: a signal, a stop, or the kill switch.
+- `switches`: each switch of its strategy config, by hand or by the regime (P6-4), at
+  the time it was made, with the strategy it switched to.
 
 Money and prices are Decimal, sent as strings (D9); indicator values are floats, as
 the strategies compute them.
@@ -30,7 +32,14 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from shared.candles import TIMEFRAME_STEPS, FormingCandle, forming_key
 from shared.chart import ChartLines, Pane, chart_lines, line_points
-from shared.db.models import BotRow, CandleRow, FillRow, OrderRow, StrategyConfigRow
+from shared.db.models import (
+    BotRow,
+    CandleRow,
+    FillRow,
+    OrderRow,
+    StrategyConfigRow,
+    StrategySwitchRow,
+)
 
 DEFAULT_CANDLES = 1000
 MAX_CANDLES = 5000  # DESIGN §9: the chart pans and zooms smoothly with this many
@@ -91,6 +100,17 @@ class TradeMarker(_Out):
     status: str
 
 
+class SwitchMarker(_Out):
+    """A switch of the bot's strategy config (P6-4, D54)."""
+
+    id: int
+    ts: AwareDatetime  # when it was made; the new config decides from the next close on
+    trigger: str  # manual, rollback or regime
+    regime: str | None  # the regime's switches: which regime called for it
+    strategy: str  # the strategy it switched to
+    reason: str
+
+
 class Chart(_Out):
     server_time: AwareDatetime  # ages are worked out against this, not the browser's clock
     bot: ChartBot
@@ -98,6 +118,7 @@ class Chart(_Out):
     indicators: IndicatorsView | None  # None: no strategy, or one the chart can't draw
     forming: FormingCandle | None
     trades: list[TradeMarker]
+    switches: list[SwitchMarker]
 
 
 class ChartUpdate(_Out):
@@ -108,6 +129,7 @@ class ChartUpdate(_Out):
     points: list[PointView]  # the indicators at those candles
     forming: FormingCandle | None
     trades: list[TradeMarker] | None  # every trade again, or None when they haven't changed
+    switches: list[SwitchMarker] | None  # likewise, the switches
 
 
 async def read_bot(conn: AsyncConnection, bot_id: int) -> ChartBot | None:
@@ -233,6 +255,28 @@ async def read_trades(
     return [TradeMarker.model_validate(row._asdict()) for row in (await conn.execute(query)).all()]
 
 
+async def read_switches(
+    conn: AsyncConnection, bot_id: int, *, since: datetime | None
+) -> list[SwitchMarker]:
+    """The bot's switches (from `since` on), oldest first."""
+    query = (
+        select(
+            StrategySwitchRow.id,
+            StrategySwitchRow.ts,
+            StrategySwitchRow.trigger,
+            StrategySwitchRow.regime,
+            StrategyConfigRow.strategy,
+            StrategySwitchRow.reason,
+        )
+        .join(StrategyConfigRow, StrategyConfigRow.id == StrategySwitchRow.to_config)
+        .where(StrategySwitchRow.bot_id == bot_id)
+        .order_by(StrategySwitchRow.id)
+    )
+    if since is not None:
+        query = query.where(StrategySwitchRow.ts >= since)
+    return [SwitchMarker.model_validate(row._asdict()) for row in (await conn.execute(query)).all()]
+
+
 async def read_forming(
     redis: Redis, bot: ChartBot, last_closed: datetime | None
 ) -> FormingCandle | None:
@@ -265,6 +309,7 @@ async def read_chart(
         indicators=indicators,
         forming=await read_forming(redis, bot, candles[-1].ts if candles else None),
         trades=await read_trades(conn, bot.id, since=since),
+        switches=await read_switches(conn, bot.id, since=since),
     )
 
 
@@ -277,19 +322,25 @@ async def read_update(
     after: datetime | None,
     since: datetime | None,
     sent: Sequence[TradeMarker] | None,
+    sent_switches: Sequence[SwitchMarker] | None = None,
     now: datetime,
 ) -> ChartUpdate:
-    """What's new since the candle `after` and the trades `sent` (None: none sent yet)."""
+    """What's new since the candle `after`, the trades `sent` and the switches
+    `sent_switches` (None: none sent yet)."""
     if after is None:  # the browser had no candles: start it off
         candles, points = await read_candles(conn, bot, lines, after=None, limit=DEFAULT_CANDLES)
     else:
         candles, points = await read_candles(conn, bot, lines, after=after, limit=MAX_CANDLES)
     last_closed = candles[-1].ts if candles else after
     trades = await read_trades(conn, bot.id, since=since)
+    switches = await read_switches(conn, bot.id, since=since)
     return ChartUpdate(
         server_time=now,
         candles=candles,
         points=points,
         forming=await read_forming(redis, bot, last_closed),
         trades=None if sent is not None and list(sent) == trades else trades,
+        switches=(
+            None if sent_switches is not None and list(sent_switches) == switches else switches
+        ),
     )

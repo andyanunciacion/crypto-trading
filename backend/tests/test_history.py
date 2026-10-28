@@ -89,7 +89,7 @@ async def seeded(api: Api) -> Api:
         await conn.execute(
             text(
                 "TRUNCATE bots, strategy_configs, orders, fills, positions, paper_balances,"
-                " risk_events RESTART IDENTITY"
+                " risk_events, strategy_switches RESTART IDENTITY"
             )
         )
         await conn.execute(

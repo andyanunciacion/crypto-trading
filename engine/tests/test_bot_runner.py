@@ -226,7 +226,7 @@ async def setup(db_url: URL) -> AsyncIterator[Setup]:
         await conn.execute(
             text(
                 "TRUNCATE bots, strategy_configs, orders, fills, positions, paper_balances,"
-                " risk_events, candles RESTART IDENTITY"
+                " risk_events, strategy_switches, candles RESTART IDENTITY"
             )
         )
     await set_limits(db)  # off, unless a test is about them

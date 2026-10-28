@@ -33,6 +33,14 @@ with a reason the dashboard shows. Each gets a `BotReply`:
   (`restored_from` names it), built at the version it was made with, then switches to
   it exactly as a switch does, with the command's policy. Refused when the strategy's
   version has moved on, and when the bot already runs those params.
+- **auto switch** (`AutoSwitchCommand`, P6-4, D54): turn auto-switching on, with a
+  config for each regime (each checked as a switch checks one, and stored with its
+  strategy's version), a minimum hold and a policy; or off. A running or paused bot is
+  reloaded (runner.switch, with no new config), so it keeps enough candles to read the
+  regime. While it's on, a switch or a rollback is refused: the regime would undo it.
+
+Every switch, a rollback, or one the regime makes (`auto_switch`, called by the bot
+runner) is recorded in `strategy_switches`, in the transaction that adds the config.
 
 While the engine drains the commands sent while it was down (before any bot loads),
 there's no runner: only the database changes, and `load_bots` then picks them up. A bot
@@ -43,7 +51,8 @@ import time
 from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Protocol, cast, get_args
+from typing import Any, Literal, Protocol, cast, get_args
+from uuid import UUID, uuid4
 
 import structlog
 from pydantic import JsonValue, ValidationError
@@ -55,6 +64,7 @@ from engine.bots.create import Listings, create_paper_bot
 from engine.bots.store import Bot, UnknownBot, load_bot, open_orders
 from engine.exchange.errors import ExchangeError
 from engine.exchange.models import Timeframe
+from engine.regime.switcher import AutoSwitcher, RegimeCheck
 from engine.risk.kill import SWITCH, KillSwitch
 from engine.risk.paper import PaperDesk
 from engine.risk.sizing import SIZING
@@ -62,6 +72,7 @@ from engine.risk.stops import STOPS
 from engine.strategies.base import Strategy
 from engine.strategies.registry import build, strategy_class
 from shared.commands import (
+    AutoSwitchCommand,
     BotCommand,
     BotCommands,
     BotReply,
@@ -69,9 +80,16 @@ from shared.commands import (
     CreateBotCommand,
     NotClosed,
     RollbackCommand,
+    SwitchPolicy,
     SwitchStrategyCommand,
 )
-from shared.db.models import BotRow, StrategyConfigRow
+from shared.db.models import BotRow, StrategyConfigRow, StrategySwitchRow
+from shared.regime import AutoSwitchSettings, MappedConfig
+
+# Who switched a bot's config (strategy_switches.trigger).
+Trigger = Literal["manual", "rollback", "regime"]
+# What a switch the regime makes records as its source (strategy_configs.created_by too).
+REGIME = "regime"
 
 log = structlog.get_logger()
 
@@ -104,6 +122,21 @@ class _Done:
     closing: list[Closing] = field(default_factory=list)
     not_closed: list[NotClosed] = field(default_factory=list)
     strategy_config_id: int | None = None
+
+
+@dataclass(frozen=True)
+class _Switching:
+    """Who asks for a switch, and why: what `strategy_switches` records."""
+
+    command_id: UUID
+    source: str
+    policy: SwitchPolicy
+    trigger: Trigger
+    restored_from: int | None = None  # a rollback's: the config it copies (D52)
+    check: RegimeCheck | None = None  # the regime's (P6-4)
+    # The regime's: the settings it was decided under, as stored. If they changed
+    # meanwhile, the switch is dropped; the next candle decides under the new ones.
+    auto_switch: dict[str, Any] | None = None
 
 
 class BotControl:
@@ -140,6 +173,8 @@ class BotControl:
                 done = await self._switch(command)
             elif isinstance(command, RollbackCommand):
                 done = await self._rollback(command)
+            elif isinstance(command, AutoSwitchCommand):
+                done = await self._auto(command)
             elif command.action == "start":
                 done = await self._start(command)
             elif command.action == "pause":
@@ -283,7 +318,10 @@ class BotControl:
 
     async def _switch(self, command: SwitchStrategyCommand) -> _Done:
         strategy = _strategy(command.strategy, command.params)
-        return await self._apply_switch(command, strategy)
+        switching = _Switching(command.id, command.source, command.policy, "manual")
+        done = await self._apply_switch(command.bot_id, strategy, switching)
+        assert done is not None  # only the regime's switches are dropped
+        return done
 
     async def _rollback(self, command: RollbackCommand) -> _Done:
         bot_id, config_id = command.bot_id, command.config_id
@@ -308,21 +346,100 @@ class BotControl:
             raise Refused(f"can't roll back to config {config_id}: {describe(exc)}") from None
         except ValueError as exc:
             raise Refused(f"can't roll back to config {config_id}: {exc}") from None
-        return await self._apply_switch(command, strategy, restored_from=config_id)
+        switching = _Switching(
+            command.id, command.source, command.policy, "rollback", restored_from=config_id
+        )
+        done = await self._apply_switch(bot_id, strategy, switching)
+        assert done is not None  # only the regime's switches are dropped
+        return done
+
+    async def auto_switch(self, bot: Bot, check: RegimeCheck) -> None:
+        """Make the switch `check` calls for (the bot runner's `on_regime`, P6-4).
+
+        Like a switch from the Bots page, with the policy in the bot's auto-switching
+        settings, recorded with the regime and why. Dropped, and logged, if the bot
+        already runs that config, or its settings changed or were turned off meanwhile;
+        a refusal (its position is being sold, say) is logged too. The next candle checks
+        again either way.
+        """
+        switch, auto = check.switch, bot.auto
+        if switch is None or auto is None:
+            return
+        switching = _Switching(
+            uuid4(),
+            REGIME,
+            auto.settings.policy,
+            "regime",
+            check=check,
+            auto_switch=auto.settings.model_dump(mode="json"),
+        )
+        try:
+            await self._apply_switch(bot.id, switch.target, switching)
+        except Refused as exc:
+            log.warning(
+                "bot.auto_switch_refused",
+                bot_id=bot.id,
+                name=bot.name,
+                candle_ts=check.reading.ts.isoformat(),
+                regime=switch.regime,
+                reason=str(exc),
+            )
+
+    async def _auto(self, command: AutoSwitchCommand) -> _Done:
+        bot_id = command.bot_id
+        stored: dict[str, Any] | None = None
+        if command.settings is not None:
+            stored = _auto_settings(command.settings).model_dump(mode="json")
+        if self.runner is not None and self.runner.starting(bot_id):
+            raise Refused("it's still warming up: set it up once it's in the engine")
+        async with self._db.begin() as conn:
+            row = (
+                await conn.execute(
+                    select(BotRow.status, BotRow.mode, BotRow.exchange, BotRow.auto_switch)
+                    .where(BotRow.id == bot_id)
+                    .with_for_update()
+                )
+            ).one_or_none()
+            if row is None:
+                raise Refused(f"there's no bot {bot_id}")
+            if row.mode != "paper":
+                raise Refused(f"{row.mode} bots can't auto-switch yet: only paper bots until P9")
+            if row.exchange != self._exchange.exchange_id:
+                raise Refused(
+                    f"the engine trades on {self._exchange.exchange_id}, not {row.exchange}"
+                )
+            if row.auto_switch == stored:
+                raise Refused(
+                    "nothing to change: auto-switching is already off"
+                    if stored is None
+                    else "nothing to change: auto-switching already has those settings"
+                )
+            await conn.execute(update(BotRow).where(BotRow.id == bot_id).values(auto_switch=stored))
+        reloading = False
+        if self.runner is not None and row.status != "stopped":
+            # Loaded as a restart would load it: with its regime window, or without.
+            bot, _ = await load_bot(self._db, self._exchange.exchange_id, bot_id)
+            reloading = self.runner.switch(bot)
+        log.info(
+            "bot.auto_switch_set",
+            bot_id=bot_id,
+            settings=stored,
+            old=row.auto_switch,
+            reloading=reloading,
+        )
+        return _Done(bot_id, row.status)
 
     async def _apply_switch(
-        self,
-        command: SwitchStrategyCommand | RollbackCommand,
-        strategy: Strategy[Any],
-        *,
-        restored_from: int | None = None,
-    ) -> _Done:
-        """Make `strategy` bot `command.bot_id`'s active config, with `command.policy`.
+        self, bot_id: int, strategy: Strategy[Any], switching: _Switching
+    ) -> _Done | None:
+        """Make `strategy` bot `bot_id`'s active config, with `switching.policy`.
 
-        A rollback (`restored_from`, the config it copies) always adds a config: one that
-        changes nothing is refused rather than read as a change of policy alone.
+        A rollback always adds a config: one that changes nothing is refused rather than
+        read as a change of policy alone. A switch the regime calls for returns None when
+        it's dropped (`auto_switch`).
         """
-        bot_id, policy = command.bot_id, command.policy
+        policy, restored_from = switching.policy, switching.restored_from
+        by_regime = switching.trigger == "regime"
         if self._kill_switch.sells_for(bot_id):
             raise Refused(
                 "its position is still being sold (kill switch, stop + close, or a switch "
@@ -341,6 +458,7 @@ class BotControl:
                         BotRow.exchange,
                         BotRow.symbol,
                         BotRow.switch_policy,
+                        BotRow.auto_switch,
                         BotRow.active_strategy_config_id,
                         StrategyConfigRow.strategy,
                         StrategyConfigRow.version,
@@ -367,6 +485,16 @@ class BotControl:
                 strategy.version,
                 params,
             )
+            if by_regime:
+                dropped = _dropped(row, same, switching)
+                if dropped is not None:
+                    log.info("bot.auto_switch_dropped", bot_id=bot_id, reason=dropped)
+                    return None
+            elif row.auto_switch is not None:
+                raise Refused(
+                    "auto-switching is on, and the regime would switch it back: turn "
+                    "auto-switching off first"
+                )
             if same and restored_from is not None:
                 raise Refused(
                     "nothing to change: it already runs that config's strategy and params"
@@ -386,12 +514,20 @@ class BotControl:
                         strategy=strategy.name,
                         version=strategy.version,
                         params=params,
-                        created_by=command.source,
+                        created_by=switching.source,
                         restored_from=restored_from,
                     )
                     .returning(StrategyConfigRow.id)
                 )
                 values["active_strategy_config_id"] = config_id
+                await conn.execute(
+                    insert(StrategySwitchRow).values(
+                        bot_id=bot_id,
+                        from_config=row.active_strategy_config_id,
+                        to_config=config_id,
+                        **_switch_record(switching),
+                    )
+                )
             await conn.execute(update(BotRow).where(BotRow.id == bot_id).values(**values))
         position = await self._desk.risk.position(bot_id, row.symbol)
         fields: dict[str, JsonValue] = {
@@ -406,15 +542,16 @@ class BotControl:
             },
             "position": None if position is None else position.model_dump(mode="json"),
         }
-        switching = False
+        in_runner = False
         if self.runner is not None and row.status != "stopped":
             # Loaded as a restart would load it. A new policy alone can still start or
             # end a keeper for a trade bought before an earlier switch (store.py).
             bot, _ = await load_bot(self._db, self._exchange.exchange_id, bot_id)
-            switching = self.runner.switch(bot)
+            in_runner = self.runner.switch(bot)
         if config_id is None:
-            log.info("bot.switch_policy_set", **fields, switching=switching)
+            log.info("bot.switch_policy_set", **fields, switching=in_runner)
             return _Done(bot_id, row.status)
+        check = switching.check
         log.info(
             "bot.switch",
             **fields,
@@ -424,14 +561,18 @@ class BotControl:
                 "version": strategy.version,
                 "params": params,
             },
+            trigger=switching.trigger,
+            source=switching.source,
             restored_from=restored_from,  # a rollback's: the config it copies (D52)
+            # The regime's: why it switched (P6-4).
+            reason=None if check is None or check.switch is None else check.switch.reason,
             # False: the database alone changed; a Start or a restart loads it.
-            switching=switching,
+            switching=in_runner,
         )
         done = _Done(bot_id, row.status, strategy_config_id=config_id)
         if policy == "close_first" and position is not None:
             done.closing, done.not_closed = await self._kill_switch.close_bot(
-                bot_id, command.id, kind=SWITCH
+                bot_id, switching.command_id, kind=SWITCH
             )
         return done
 
@@ -441,6 +582,69 @@ class BotControl:
         if status is None:
             raise Refused(f"there's no bot {bot_id}")
         return status
+
+
+def _dropped(row: Any, same: bool, switching: _Switching) -> str | None:
+    """Why a switch the regime called for is no longer wanted, read under the bot's row
+    lock; None if it still is."""
+    if row.status == "stopped":
+        return "the bot was stopped"
+    if row.auto_switch != switching.auto_switch:
+        return "its auto-switching settings changed, or it was turned off"
+    if same:
+        return "it already runs that config"
+    return None
+
+
+def _switch_record(switching: _Switching) -> dict[str, Any]:
+    """What `strategy_switches` records about a switch, besides the bot and its configs."""
+    check = switching.check
+    if check is None or check.switch is None:
+        what = "rolled back" if switching.trigger == "rollback" else "switched"
+        return {
+            "trigger": switching.trigger,
+            "policy": switching.policy,
+            "reason": f"{what} by hand ({switching.source})",
+            "source": switching.source,
+        }
+    assert switching.auto_switch is not None  # the regime's, with the settings it used
+    return {
+        "trigger": switching.trigger,
+        "policy": switching.policy,
+        "regime": check.switch.regime,
+        "candle_ts": check.reading.ts,
+        "reading": {
+            **check.reading.model_dump(mode="json"),
+            "held": check.held,
+            "min_hold": switching.auto_switch["min_hold"],
+        },
+        "reason": check.switch.reason,
+        "source": switching.source,
+    }
+
+
+def _auto_settings(raw: dict[str, JsonValue]) -> AutoSwitchSettings:
+    """Auto-switching settings as sent, each regime's config checked as a switch checks
+    one, at its strategy's version now, which is stored with it. Refused with what's
+    wrong."""
+    try:
+        settings = AutoSwitchSettings.model_validate(raw)
+    except ValidationError as exc:
+        raise Refused(describe(exc)) from None
+    mapping = {}
+    for regime, mapped in settings.mapping.items():
+        try:
+            strategy = _strategy(mapped.strategy, mapped.params)
+        except Refused as exc:
+            raise Refused(f"{regime}: {exc}") from None
+        mapping[regime] = MappedConfig(
+            strategy=strategy.name,
+            version=strategy.version,
+            params=strategy.params.model_dump(mode="json"),
+        )
+    checked = settings.model_copy(update={"mapping": mapping})
+    AutoSwitcher(checked)  # builds, as the bot will when it loads
+    return checked
 
 
 def _strategy(name: str, params: dict[str, JsonValue]) -> Strategy[Any]:

@@ -6,6 +6,7 @@
 
 import type { BacktestJob, CandleRange, NewBacktest, RunDetail, RunSummary } from "@/lib/backtests";
 import type {
+  AutoSwitchSettings,
   BotDetail,
   BotReply,
   BotSetup,
@@ -163,6 +164,21 @@ export async function rollback(botId: number, change: Rollback): Promise<BotRepl
   const response = await call(`/bots/${botId}/rollback`, {
     method: "POST",
     body: JSON.stringify(change),
+  });
+  return (await response.json()) as BotReply;
+}
+
+/**
+ * Turn a bot's auto-switching on with `settings`, or off with null (P6-4, D54). The
+ * engine checks each regime's params and stores them with the strategy's version.
+ */
+export async function setAutoSwitch(
+  botId: number,
+  settings: AutoSwitchSettings | null,
+): Promise<BotReply> {
+  const response = await call(`/bots/${botId}/auto-switch`, {
+    method: "POST",
+    body: JSON.stringify({ settings }),
   });
   return (await response.json()) as BotReply;
 }

@@ -224,6 +224,11 @@ export default function BotsPage() {
                         <span className="text-muted-foreground text-xs">
                           on a switch: {policyLabel(bot.switch_policy).toLowerCase()}
                         </span>
+                        {bot.auto_switch !== null && (
+                          <span className="text-xs font-medium">
+                            auto-switching by regime (Edit is off)
+                          </span>
+                        )}
                       </div>
                     </TableCell>
                     <TableCell className="text-muted-foreground min-w-40 text-xs whitespace-normal">
@@ -241,7 +246,8 @@ export default function BotsPage() {
                         <EditStrategySheet
                           bot={bot}
                           holding={position !== undefined}
-                          disabled={busy !== null}
+                          // While the regime switches it, a switch by hand would be undone.
+                          disabled={busy !== null || bot.auto_switch !== null}
                           onSwitched={(reply, change) => {
                             setMessage({
                               kind: "status",
