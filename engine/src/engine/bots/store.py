@@ -7,6 +7,9 @@ order's `reason` can name the exact config behind it.
 A bot switched with the policy `keep` while it held a position still has that trade
 sold by the config that bought it: its `keeper`. It isn't stored: it's worked out on
 loading, from the opening buy's `reason`, for as long as that position is open.
+
+A bot with auto-switching on (`bots.auto_switch`, P6-4, D54) carries its `auto`
+switcher, which says at each candle whether the regime calls for another config.
 """
 
 from dataclasses import dataclass, replace
@@ -20,11 +23,13 @@ from engine.bots.exits import opening_buy
 from engine.brokers.base import Mode
 from engine.exchange.models import Timeframe
 from engine.marketdata.store import Series
+from engine.regime.switcher import AutoSwitcher
 from engine.risk.sizing import ALL_IN, SIZING, Sizing
 from engine.risk.stops import NO_STOPS, STOPS, Stops
 from engine.strategies.base import Strategy
 from engine.strategies.registry import build
 from shared.db.models import BotRow, OrderRow, PositionRow, StrategyConfigRow
+from shared.regime import AutoSwitchSettings
 
 log = structlog.get_logger()
 
@@ -52,6 +57,8 @@ class Bot:
     stops: Stops = NO_STOPS  # when a position is sold whatever the strategy says (D40)
     # Sells the open position instead of `strategy`, after a switch with `keep` (D51).
     keeper: Keeper | None = None
+    # Switches its strategy when the regime changes (P6-4, D54); None when that's off.
+    auto: AutoSwitcher | None = None
 
     @property
     def series(self) -> Series:
@@ -123,6 +130,7 @@ def _bots_query() -> Select[Any]:
             BotRow.sizing,
             BotRow.stops,
             BotRow.switch_policy,
+            BotRow.auto_switch,
             StrategyConfigRow.id.label("config_id"),
             StrategyConfigRow.bot_id.label("config_bot_id"),
             StrategyConfigRow.strategy,
@@ -168,6 +176,7 @@ async def load_bots(db: AsyncEngine, exchange: str) -> list[Bot]:
                 "params": b.strategy.params.model_dump(mode="json"),
                 "stops": STOPS.dump_python(b.stops, mode="json", exclude_none=True),
                 "keeper": _keeper_json(b.keeper),
+                "auto_switch": b.auto is not None,
             }
             for b in bots
         ],
@@ -247,7 +256,22 @@ def _bot(row: Any, exchange: str) -> Bot:
         strategy=build(row.strategy, row.version, row.params),
         sizing=SIZING.validate_python(row.sizing),
         stops=STOPS.validate_python(row.stops),
+        auto=_auto(row),
     )
+
+
+def _auto(row: Any) -> AutoSwitcher | None:
+    """The bot's auto-switcher, or None if it's off, or if its stored mapping no longer
+    builds (a strategy's version moved on): then the bot runs on, on the config it has,
+    and `bot.auto_switch_invalid` says why. Turning auto-switching off and on again from
+    the bot's page stores the mapping afresh."""
+    if row.auto_switch is None:
+        return None
+    try:
+        return AutoSwitcher(AutoSwitchSettings.model_validate(row.auto_switch))
+    except ValueError as exc:  # includes pydantic's ValidationError
+        log.error("bot.auto_switch_invalid", bot_id=row.id, name=row.name, reason=str(exc))
+        return None
 
 
 async def _with_keeper(conn: AsyncConnection, bot: Bot, switch_policy: str) -> Bot:

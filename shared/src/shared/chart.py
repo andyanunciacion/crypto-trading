@@ -96,10 +96,16 @@ def _rsi_mean_reversion(params: Mapping[str, Any]) -> ChartLines:
     )
 
 
+def _stay_flat(params: Mapping[str, Any]) -> ChartLines:
+    # No indicators: it only sells what it holds (P6-4).
+    return ChartLines(warmup=1, pane="price", names=(), guides={}, at=lambda closes: {})
+
+
 _LINES: dict[str, Callable[[Mapping[str, Any]], ChartLines]] = {
     "ema_crossover": _ema_crossover,
     "bollinger_breakout": _bollinger_breakout,
     "rsi_mean_reversion": _rsi_mean_reversion,
+    "stay_flat": _stay_flat,
 }
 
 

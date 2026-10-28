@@ -18,45 +18,19 @@ strategy, so a backtest, a live bot and a bot that just restarted agree.
 """
 
 from collections.abc import Sequence
-from typing import ClassVar, Literal, Self
+from typing import ClassVar
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from engine.exchange.models import Candle
 from shared.indicators import adx, atr, ema
+from shared.regime import Regime, RegimeParams
 
-Regime = Literal["trending_up", "trending_down", "ranging", "high_volatility", "unclear"]
+__all__ = ["Regime", "RegimeDetector", "RegimeParams", "RegimeReading"]
 
 
 class _Frozen(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
-
-
-class RegimeParams(_Frozen):
-    adx_period: int = Field(default=14, ge=1, description="ADX and DI period, in candles")
-    trend_adx: float = Field(
-        default=25, gt=0, le=100, description="ADX at or above this is a trend"
-    )
-    range_adx: float = Field(default=20, gt=0, le=100, description="ADX below this is a range")
-    ema_period: int = Field(default=50, ge=2, description="EMA period for the slope, in candles")
-    slope_candles: int = Field(
-        default=10, ge=1, description="How many candles back the EMA's slope is measured"
-    )
-    atr_period: int = Field(default=14, ge=1, description="ATR period, in candles")
-    vol_lookback: int = Field(
-        default=100, ge=1, description="Candles of ATR% the current one is compared with"
-    )
-    vol_multiple: float = Field(
-        default=1.5, gt=1, description="ATR% at this many times its average is high volatility"
-    )
-
-    @model_validator(mode="after")
-    def _range_below_trend(self) -> Self:
-        if self.range_adx > self.trend_adx:
-            raise ValueError(
-                f"range_adx ({self.range_adx}) can't be above trend_adx ({self.trend_adx})"
-            )
-        return self
 
 
 class RegimeReading(_Frozen):

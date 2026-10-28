@@ -60,6 +60,8 @@ export type BotSetup = {
   paused_at: string | null;
   stopped_reason: string | null;
   stopped_at: string | null;
+  /** Its auto-switching (P6-4, D54), as stored; null when it's off. */
+  auto_switch: AutoSwitchSettings | null;
 };
 
 /** The engine's answer to a Bots page command (`BotReply`). */
@@ -135,10 +137,81 @@ export type ConfigEntry = {
   active: boolean;
 };
 
-/** The bot detail page (`GET /bots/{id}`): the bot, and its configs, newest first. */
+/** One switch of a bot's config (P6-4, D54): by hand, a rollback, or the regime. */
+export type SwitchEntry = {
+  id: number;
+  ts: string;
+  from_config: number | null;
+  /** The bot's own counts, as its configs are numbered. */
+  from_number: number | null;
+  to_config: number;
+  to_number: number;
+  trigger: SwitchTrigger;
+  /** null for switches recorded from the config history (made before P6-4). */
+  policy: SwitchPolicy | null;
+  regime: Regime | null;
+  /** The candle that confirmed the regime. */
+  candle_ts: string | null;
+  reading: Record<string, unknown> | null;
+  reason: string;
+  source: string;
+};
+
+export type SwitchTrigger = "manual" | "rollback" | "regime";
+
+/** The bot detail page (`GET /bots/{id}`): the bot, its configs and its switches, newest first. */
 export type BotDetail = {
   bot: BotSetup;
   configs: ConfigEntry[];
+  switches: SwitchEntry[];
+};
+
+/** The market's state, as the regime detector reads it (D53). Mirrors `shared/regime.py`. */
+export type Regime = "trending_up" | "trending_down" | "ranging" | "high_volatility" | "unclear";
+/** Every regime but `unclear`, on which the bot keeps the config it has. */
+export type MappedRegime = Exclude<Regime, "unclear">;
+
+export const REGIMES: { value: MappedRegime; label: string; hint: string }[] = [
+  {
+    value: "trending_up",
+    label: "Trending up",
+    hint: "a strong rise: ADX at or above 25, with +DI above −DI and the EMA rising",
+  },
+  {
+    value: "trending_down",
+    label: "Trending down",
+    hint: "a strong fall: ADX at or above 25, with −DI above +DI and the EMA falling",
+  },
+  {
+    value: "ranging",
+    label: "Ranging",
+    hint: "no trend: ADX below 20, the price going sideways",
+  },
+  {
+    value: "high_volatility",
+    label: "High volatility",
+    hint: "candles 1.5× wider than usual (ATR), as in a crash",
+  },
+];
+
+export function regimeLabel(regime: string): string {
+  return REGIMES.find((r) => r.value === regime)?.label ?? regime;
+}
+
+/** A regime's strategy config, as stored (with the strategy's version) or sent (without). */
+export type MappedConfig = {
+  strategy: string;
+  params: Settings | Record<string, unknown>;
+  version?: number | null;
+};
+
+/** A bot's auto-switching (`bots.auto_switch`, `shared/regime.py`). */
+export type AutoSwitchSettings = {
+  mapping: Record<MappedRegime, MappedConfig>;
+  min_hold: number;
+  policy: SwitchPolicy;
+  /** The detector's settings: the defaults, not edited from the dashboard yet. */
+  detector?: Record<string, unknown>;
 };
 
 export function policyLabel(policy: string): string {
@@ -293,7 +366,7 @@ export function describeStops(stops: Record<string, unknown>): string {
   return parts.length === 0 ? "none" : parts.join("; ");
 }
 
-/** "fast 9, slow 21". */
+/** "fast 9, slow 21"; "none" for a strategy with nothing to set (stay flat). */
 export function describeParams(params: Record<string, unknown> | null): string {
-  return params === null ? "—" : settingsText(params, "") || "defaults";
+  return params === null ? "—" : settingsText(params, "") || "none";
 }

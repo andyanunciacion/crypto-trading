@@ -72,7 +72,7 @@ async def seeded(api: Api) -> Api:
         await conn.execute(
             text(
                 "TRUNCATE bots, strategy_configs, orders, fills, positions, paper_balances,"
-                " risk_events RESTART IDENTITY"
+                " risk_events, strategy_switches RESTART IDENTITY"
             )
         )
         # Every row with every key: an insert of many rows takes its columns from the first.
@@ -261,7 +261,7 @@ async def test_an_empty_account(api: Api) -> None:
         await conn.execute(
             text(
                 "TRUNCATE bots, strategy_configs, orders, fills, positions, paper_balances,"
-                " risk_events RESTART IDENTITY"
+                " risk_events, strategy_switches RESTART IDENTITY"
             )
         )
     body = await get_overview(api)

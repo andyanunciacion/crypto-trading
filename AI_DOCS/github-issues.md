@@ -641,10 +641,49 @@ Done (D50):
 
 ### P6-4 · Auto-switcher
 `engine` `frontend` · Depends on: P6-1, P6-3
-- [ ] Regime → strategy mapping; minimum hold time
-- [ ] `strategy_switches` table; switch markers on chart and switch log
+- [x] Regime → strategy mapping; minimum hold time
+- [x] `strategy_switches` table; switch markers on chart and switch log
 
 **Done when:** a replay shows switches only after the minimum hold, each logged with a reason.
+
+**Done** (D54):
+- **The owner's choices:** the mapping is per bot (on its page), Edit and rollback are refused while auto-switching is on, and "stay flat" is a strategy (`stay_flat`).
+- `test_auto_switch_replay.py` (done-when): the BTC/USDT 1d 2019–2023 fixture, replayed through `AutoSwitcher.check()` with trend → EMA 9/21, range → RSI, down and volatile → stay flat, a bot starting on EMA.
+  - With a hold of 3 and 5, every switch comes after that many identical readings (checked against the detector's own labels), has a reason ("ranging for 3 candles in a row (ADX 18.1, below 20: no trend): switch to rsi_mean_reversion v1 {…}"), and is at least the hold after the last.
+  - 57, 41 and 34 switches for a hold of 1, 3 and 5: about 9, 9 and 7 a year. That's the lag/flip trade-off P6-5's note is about.
+- `test_regime_switcher.py` (pure, a scripted detector): confirms only after `min_hold` identical readings; `unclear` never confirms and breaks a run; a regime the bot already runs, or two regimes on one config, never switch; warming up and a gap start the readings over; every regime must be mapped (and `unclear` can't be); a mapping that doesn't build is refused.
+- `test_bot_control.py` (real database, PaperDesk, kill switch and runner; a scripted detector):
+  - A bot on EMA 3/5 reads ranging for 1, 2, then 3 candles: only the third sends the switch. It takes over at the next candle. One `strategy_switches` row: `regime`, ranging, the confirming candle, the reason, the reading with its hold, source `regime`.
+  - A crash with `hand_over` switches a holding bot to stay flat, whose SELL sells it whole, as config 2.
+  - A restart mid-hold neither switches early nor starts the count over: the third candle after it switches.
+  - One at a time: a second confirming candle sends nothing while the first switch is still being made.
+  - Edit and rollback are refused while it's on, work once it's off, and write `manual` and `rollback` rows.
+  - Turning it on reloads a running bot with no config added; off, the bot stops reading regimes.
+  - Refusals: an unknown bot, bad params or strategy in a regime (named), `min_hold` 0, nothing to change.
+  - A regime switch is dropped if the settings changed or the bot was stopped before it was made.
+- `test_bot_store.py`: a bot loads with its switcher; a mapping whose strategy version moved on loads with auto-switching off (`bot.auto_switch_invalid`); `strategy_switches` refuses UPDATE and DELETE.
+- `test_migrations.py`: 0014 records the earlier switches from the config history (a manual one and a rollback, at their configs' times, policy NULL).
+- `test_stay_flat.py`; the chart parity test covers `stay_flat` (no lines).
+- Backend:
+  - `test_bots.py`: `POST /bots/{id}/auto-switch` sends the mapping (version left to the engine), or off. A missing regime, `unclear`, `min_hold` 0, a bad policy or an extra field never reaches the engine. `GET /bots/{id}` has the switches with per-bot numbers.
+  - `test_market.py`: the chart's switches start at its first candle; the WebSocket sends them first, then only when they change.
+  - `test_every_route_needs_auth.py` requires the new route.
+- `bots.spec.ts`:
+  - On `e2e-eth`'s page, the switch log lists the manual switch and the rollback.
+  - Auto-switching is set up from the keyboard (every regime on EMA 9/21, so a closing candle can't switch it; a min hold of 0 disables Turn on). The mapping and "held for 5 closed candles" show.
+  - Edit and Roll back are disabled with the reason; no config is added. Turned off, Edit works again. All 10 e2e tests pass (2026-10-29).
+- Checked by hand in Chrome (2026-10-28, the main stack after `up --build`, migration 0014 applied):
+  - 0014 recorded `chrome-switch-test`'s four earlier switches (three by hand, one rollback). Its switch log lists them with policy "—".
+  - Set up from its page with a hold of 1 and hand over, then started. **A real switch:** on the 23:42 (Manila) BTC/USDT 1m candle the regime read `trending_down` (ADX 26.2, −DI 38.8 above +DI 22.7, the EMA falling). The engine switched the bot from EMA 2/3 to stay flat as config #6, `created_by` regime, and the new config warmed up in 0.3 s.
+  - The switch log shows "#5 → #6, regime, Trending down, hand over" with the reason. The Market chart shows "auto → FLAT" above that candle, in both themes, with no console errors.
+  - The bot was stopped and auto-switching turned off afterwards.
+- The hand check found four things, fixed:
+  - In the sheet, each regime's description was pulled up into its heading, overlapping it (the heading had no bottom margin).
+  - "1 candles": the page's message and summary, and the engine's reason, now say "1 candle".
+  - Stay flat's params read "defaults"; a strategy with nothing to set now reads "none", everywhere params are shown.
+  - DESIGN said switch markers stand out by colour. In the neutral theme `primary` is close to the trades' ink, so it now says they're told apart by shape, place and label.
+- The e2e test found one more, fixed: after Turn on, Radix gave focus back to the sheet's "Set up" button, which the reloaded page replaces with "Change", so the result message lost it (as P6-2's Roll back did). The sheet now keeps focus off the button after a save; Cancel still returns it.
+- Seen, not changed: right after a rebuild, the bot's page answered HTTP 500 for a few seconds while the API container was still starting (Next's `/api` rewrite had nothing to reach). The engine took about 45 s to log its first line after the rebuild; that fits Avast holding new executables.
 
 ### P6-5 · Combined auto-switching backtest
 `strategy` · Depends on: P6-4

@@ -23,7 +23,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useDarkTheme } from "@/components/theme-toggle";
 import type { Live } from "@/components/use-live-chart";
 import { formatDecimal } from "@/lib/format";
-import { decimalsOf, tradeLabel, type Candle, type TradeMarker } from "@/lib/market";
+import {
+  decimalsOf,
+  switchLabel,
+  tradeLabel,
+  type Candle,
+  type SwitchMarker,
+  type TradeMarker,
+} from "@/lib/market";
 
 /**
  * Manila is UTC+8 all year (no daylight saving). The chart labels its axis in UTC, so
@@ -81,6 +88,7 @@ type Colors = {
   downForming: string;
   volume: string;
   marker: string;
+  switchMarker: string;
   lines: string[];
 };
 
@@ -111,6 +119,7 @@ function readColors(dark: boolean): Colors {
     downForming: token("--loss", 0.4),
     volume: token("--muted-foreground", 0.25),
     marker: token("--foreground"),
+    switchMarker: token("--primary"),
     lines: dark ? LINE_SLOTS.dark : LINE_SLOTS.light,
   };
 }
@@ -135,23 +144,36 @@ function volumeBar(candle: Candle, colors: Colors | null) {
   return { time: chartTime(candle.ts), value: Number(candle.volume), color: colors?.volume };
 }
 
+/**
+ * The trades, at their price, and the strategy switches (P6-4), as squares above the
+ * candle they were made in. A switch has no id or price, so a click never picks one:
+ * the switch log on the bot's page is where each is explained.
+ */
 function markersOf(
   trades: TradeMarker[],
+  switches: SwitchMarker[],
   timeframe: string,
   colors: Colors | null,
 ): SeriesMarker<Time>[] {
-  return trades
-    .map((trade): SeriesMarker<Time> => ({
-      id: String(trade.order_id),
-      time: barTime(trade.ts, timeframe),
-      position: "atPriceMiddle",
-      price: Number(trade.price),
-      shape: trade.side === "buy" ? "arrowUp" : "arrowDown",
-      color: colors?.marker ?? "#888",
-      text: tradeLabel(trade),
-      size: 1.5,
-    }))
-    .sort((a, b) => Number(a.time) - Number(b.time));
+  const tradeMarkers = trades.map((trade): SeriesMarker<Time> => ({
+    id: String(trade.order_id),
+    time: barTime(trade.ts, timeframe),
+    position: "atPriceMiddle",
+    price: Number(trade.price),
+    shape: trade.side === "buy" ? "arrowUp" : "arrowDown",
+    color: colors?.marker ?? "#888",
+    text: tradeLabel(trade),
+    size: 1.5,
+  }));
+  const switchMarkers = switches.map((s): SeriesMarker<Time> => ({
+    time: barTime(s.ts, timeframe),
+    position: "aboveBar",
+    shape: "square",
+    color: colors?.switchMarker ?? "#888",
+    text: switchLabel(s),
+    size: 1,
+  }));
+  return [...tradeMarkers, ...switchMarkers].sort((a, b) => Number(a.time) - Number(b.time));
 }
 
 type Drawn = {
@@ -344,7 +366,7 @@ export function CandleChart({
       d.candles.update(bar(d.forming, c, true));
       d.volume.update(volumeBar(d.forming, c));
     }
-    d.markers.setMarkers(markersOf(live.trades, bot.timeframe, c));
+    d.markers.setMarkers(markersOf(live.trades, live.switches, bot.timeframe, c));
     // Only on a theme change; the data effect below keeps everything else current.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dark]);
@@ -400,8 +422,10 @@ export function CandleChart({
   }, [live.candles, live.points, live.forming]);
 
   useEffect(() => {
-    drawn.current?.markers.setMarkers(markersOf(live.trades, bot.timeframe, colors.current));
-  }, [live.trades, bot.timeframe]);
+    drawn.current?.markers.setMarkers(
+      markersOf(live.trades, live.switches, bot.timeframe, colors.current),
+    );
+  }, [live.trades, live.switches, bot.timeframe]);
 
   // The legend: the candle under the cursor, or the newest.
   const byTime = useMemo(() => {
@@ -471,7 +495,7 @@ export function CandleChart({
         ref={container}
         data-testid="candle-chart"
         role="img"
-        aria-label={`${bot.symbol} ${bot.timeframe} candles with ${bot.strategy ?? "no"} indicators and trade markers; the trades are also listed in the table below`}
+        aria-label={`${bot.symbol} ${bot.timeframe} candles with ${bot.strategy ?? "no"} indicators, trade markers and strategy switch markers; the trades are also listed in the table below, and the switches on the bot's page`}
         className={oscillator ? "h-[560px]" : "h-[480px]"}
       />
     </div>

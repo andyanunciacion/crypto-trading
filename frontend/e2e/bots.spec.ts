@@ -4,7 +4,8 @@ import { signIn } from "./auth";
 
 /**
  * The Bots page (D47): a paper bot is created, started, switched to another strategy
- * (D51), rolled back to its first from its detail page (D52) and stopped from the
+ * (D51), rolled back to its first from its detail page (D52), has auto-switching turned
+ * on and off there (D54) and is stopped from the
  * dashboard, each as a command the engine carries out, with no engine restart. It
  * trades ETH/USDT,
  * which nothing else does, so starting it also starts a new candle series and price
@@ -105,6 +106,44 @@ test("a paper bot is created, started, switched, rolled back and stopped", async
   await expect(first).toContainText("same as running now");
   await expect(first.getByRole("button", { name: /^Roll back/ })).toHaveCount(0);
   await expect(history.locator("tbody tr")).toHaveCount(3);
+
+  // The switch log (P6-4) lists both, newest first, with what made them.
+  const log = page.getByRole("table", { name: "Switch log" });
+  await expect(log.locator("tbody tr")).toHaveCount(2);
+  await expect(log.locator('tr[data-switch="3"]')).toContainText("#2 → #3");
+  await expect(log.locator('tr[data-switch="3"]')).toContainText("rollback");
+  await expect(log.locator('tr[data-switch="2"]')).toContainText("#1 → #2");
+  await expect(log.locator('tr[data-switch="2"]')).toContainText("by hand");
+
+  // Auto-switching (P6-4), set up from the keyboard. Every regime maps to EMA 9/21, what
+  // it runs now, so a candle closing mid-test can't switch it.
+  await page.getByRole("button", { name: "Set up auto-switching" }).focus();
+  await page.keyboard.press("Enter");
+  const auto = page.getByRole("dialog", { name: "Auto-switching for e2e-eth" });
+  await expect(auto.getByLabel("Strategy when ranging")).toHaveValue("rsi_mean_reversion");
+  await expect(auto.getByLabel("Strategy when trending up")).toHaveValue("ema_crossover");
+  for (const regime of ["trending down", "ranging", "high volatility"]) {
+    await auto.getByLabel(`Strategy when ${regime}`).selectOption("ema_crossover");
+  }
+  await auto.getByLabel("Minimum hold, in candles").fill("0");
+  await expect(auto.getByRole("button", { name: "Turn on" })).toBeDisabled();
+  await auto.getByLabel("Minimum hold, in candles").fill("5");
+  await auto.getByLabel("Minimum hold, in candles").press("Enter");
+  await expect(auto).toBeHidden();
+  await expect(page.getByText(/^Auto-switching is on for e2e-eth/)).toBeFocused();
+  const mapping = page.getByRole("table", { name: "Auto-switching" });
+  await expect(mapping.locator('tr[data-regime="ranging"]')).toContainText("fast 9, slow 21");
+  await expect(page.getByText(/held for 5 closed candles in a row/)).toBeVisible();
+  // A switch by hand would be undone by the regime, so it's off while this is on.
+  await expect(page.getByRole("button", { name: "Switch e2e-eth's strategy" })).toBeDisabled();
+  await expect(second.getByRole("button", { name: "Roll back e2e-eth to #2" })).toBeDisabled();
+  await expect(second).toContainText("turn auto-switching off to roll back");
+  await expect(history.locator("tbody tr")).toHaveCount(3); // no config added
+
+  await page.getByRole("button", { name: "Turn off" }).click();
+  await expect(page.getByText(/^Auto-switching is off for e2e-eth/)).toBeFocused();
+  await expect(page.getByRole("button", { name: "Switch e2e-eth's strategy" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Set up auto-switching" })).toBeVisible();
 
   await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Bots" }).click();
   await expect(row).toContainText("fast 9, slow 21");

@@ -4,6 +4,7 @@ run them (running or paused). Against a real TimescaleDB (see shared.testing).""
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from sqlalchemy import URL, insert, text, update
@@ -16,7 +17,7 @@ from engine.risk.sizing import AllIn
 from engine.risk.stops import NO_STOPS, AtrMultiple, RMultiple, Stops
 from engine.strategies.ema_crossover import EmaCrossover, EmaCrossoverParams
 from engine.strategies.rsi_mean_reversion import RsiMeanReversion, RsiMeanReversionParams
-from shared.db.models import BotRow, OrderRow, PositionRow, StrategyConfigRow
+from shared.db.models import BotRow, OrderRow, PositionRow, StrategyConfigRow, StrategySwitchRow
 from shared.db.session import make_engine
 
 BTC = "BTC/USDT"
@@ -29,7 +30,7 @@ async def db(db_url: URL) -> AsyncIterator[AsyncEngine]:
         await conn.execute(
             text(
                 "TRUNCATE bots, strategy_configs, orders, fills, positions, paper_balances,"
-                " risk_events RESTART IDENTITY"
+                " risk_events, strategy_switches RESTART IDENTITY"
             )
         )
     yield engine
@@ -159,6 +160,73 @@ async def test_a_config_never_changes(db: AsyncEngine, change: str) -> None:
         (1, {"fast": 9, "slow": 21}),
         (added, {"fast": 5, "slow": 21}),
     ]
+
+
+@pytest.mark.parametrize(
+    "change", ["UPDATE strategy_switches SET reason = 'edited'", "DELETE FROM strategy_switches"]
+)
+async def test_a_recorded_switch_never_changes(db: AsyncEngine, change: str) -> None:
+    # Append-only like the configs (migration 0014, P6-4).
+    bot_id = await ema_bot(db)
+    added = await new_config(db, bot_id, version=1, params={"fast": 5, "slow": 21})
+    async with db.begin() as conn:
+        await conn.execute(
+            insert(StrategySwitchRow).values(
+                bot_id=bot_id,
+                from_config=1,
+                to_config=added,
+                trigger="manual",
+                policy="keep",
+                reason="switched by hand (test)",
+                source="test",
+            )
+        )
+
+    with pytest.raises(DBAPIError, match="strategy_switches is append-only: add a row instead"):
+        async with db.begin() as conn:
+            await conn.execute(text(change))
+
+
+AUTO_SWITCH: dict[str, Any] = {
+    "mapping": {
+        "trending_up": {"strategy": "ema_crossover", "version": 1, "params": {"fast": 9}},
+        "trending_down": {"strategy": "stay_flat", "version": 1, "params": {}},
+        "ranging": {"strategy": "rsi_mean_reversion", "version": 1, "params": {}},
+        "high_volatility": {"strategy": "stay_flat", "version": 1, "params": {}},
+    },
+    "min_hold": 4,
+    "policy": "hand_over",
+}
+
+
+async def test_a_bot_loads_with_its_auto_switching(db: AsyncEngine) -> None:
+    bot_id = await ema_bot(db)
+    await set_bot(db, bot_id, auto_switch=AUTO_SWITCH)
+
+    (bot,) = await load_bots(db, "mexc")
+
+    assert bot.auto is not None
+    assert (bot.auto.settings.min_hold, bot.auto.settings.policy) == (4, "hand_over")
+    assert bot.auto.targets["ranging"].name == "rsi_mean_reversion"
+    assert bot.auto.window == 199 + 3
+
+
+async def test_an_auto_switch_mapping_that_no_longer_builds_is_turned_off(
+    db: AsyncEngine,
+) -> None:
+    # As if RSI had moved on to version 2 since the mapping was saved: the bot runs on, on
+    # the config it has, without switching.
+    bot_id = await ema_bot(db)
+    mapping = {**AUTO_SWITCH["mapping"]}
+    mapping["ranging"] = {"strategy": "rsi_mean_reversion", "version": 99, "params": {}}
+    await set_bot(db, bot_id, auto_switch={**AUTO_SWITCH, "mapping": mapping})
+
+    with capture_logs() as logs:
+        (bot,) = await load_bots(db, "mexc")
+
+    assert (bot.id, bot.auto) == (bot_id, None)
+    (invalid,) = [log for log in logs if log["event"] == "bot.auto_switch_invalid"]
+    assert invalid["reason"] == "rsi_mean_reversion is now version 1, not version 99"
 
 
 async def test_stopped_bots_dont_load(db: AsyncEngine) -> None:

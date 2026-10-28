@@ -38,6 +38,8 @@ RISK_DECISIONS = ("allowed", "blocked", "resized")
 # What a strategy switch does with an open position. Must match
 # shared.commands.SwitchPolicy (a test checks this).
 SWITCH_POLICIES = ("keep", "close_first", "hand_over")
+# What switched a bot's strategy config (strategy_switches.trigger, P6-4).
+SWITCH_TRIGGERS = ("manual", "rollback", "regime")
 # The default sizing (engine.risk.sizing.AllIn): spend all the free cash, as before P4.
 ALL_IN_SIZING = '{"mode": "all_in"}'
 # The exchanges an account's keys can be for (CCXT ids): MEXC, and Binance's testnet (D23).
@@ -159,6 +161,8 @@ class BotRow(Base):
     # Why and when the kill switch stopped it (D43); NULL unless it did.
     stopped_reason: Mapped[str | None] = mapped_column(Text)
     stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Its regime -> strategy mapping (shared.regime.AutoSwitchSettings, P6-4, D54); NULL is off.
+    auto_switch: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
 
 class StrategyConfigRow(Base):
@@ -180,6 +184,33 @@ class StrategyConfigRow(Base):
     created_by: Mapped[str] = mapped_column(Text)
     # A rollback's copy (P6-2): the earlier config of this bot whose strategy and params it copies.
     restored_from: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("strategy_configs.id"))
+
+
+class StrategySwitchRow(Base):
+    """One switch of a bot's strategy config (P6-4, D54): from the Bots page, a rollback,
+    or the regime. Append-only, like the configs (migration 0014)."""
+
+    __tablename__ = "strategy_switches"
+    __table_args__ = (
+        CheckConstraint(f"trigger IN {SWITCH_TRIGGERS!r}", name="trigger"),
+        CheckConstraint(f"policy IN {SWITCH_POLICIES!r}", name="policy"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    bot_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("bots.id"), index=True)
+    # NULL only if a bot had no config before, which never happens: a bot is made with one.
+    from_config: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("strategy_configs.id"))
+    to_config: Mapped[int] = mapped_column(BigInteger, ForeignKey("strategy_configs.id"))
+    trigger: Mapped[str] = mapped_column(Text)
+    # What it did with an open position; NULL for those recorded from the config history.
+    policy: Mapped[str | None] = mapped_column(Text)
+    # A regime switch's: the regime, the candle that confirmed it, the detector's reading.
+    regime: Mapped[str | None] = mapped_column(Text)
+    candle_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reading: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    reason: Mapped[str] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(Text)  # who switched it: "dashboard", "regime", ...
 
 
 # --- Trading (P3): written by the brokers ---------------------------------------------

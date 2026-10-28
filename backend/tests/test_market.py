@@ -30,6 +30,7 @@ from shared.db.models import (
     OrderRow,
     RiskEventRow,
     StrategyConfigRow,
+    StrategySwitchRow,
 )
 
 BTC = "BTC/USDT"
@@ -159,7 +160,7 @@ async def seeded(api: Api) -> Api:
         await conn.execute(
             text(
                 "TRUNCATE bots, strategy_configs, orders, fills, positions, paper_balances,"
-                " risk_events, candles RESTART IDENTITY"
+                " risk_events, strategy_switches, candles RESTART IDENTITY"
             )
         )
         bot = {"exchange": "mexc", "symbol": BTC, "timeframe": "1h", "mode": "paper"}
@@ -323,6 +324,53 @@ async def test_trades_before_the_first_candle_shown_are_left_out(seeded: Api) ->
     assert [t["order_id"] for t in body["trades"]] == []
 
 
+async def add_switch(api: Api, ts: datetime, *, trigger: str = "regime") -> None:
+    """Bot 1 switches to a new RSI config at `ts`."""
+    async with api.db.begin() as conn:
+        config_id = await conn.scalar(
+            insert(StrategyConfigRow)
+            .values(
+                bot_id=1,
+                strategy="rsi_mean_reversion",
+                version=1,
+                params={"period": 7},
+                created_by="regime",
+            )
+            .returning(StrategyConfigRow.id)
+        )
+        await conn.execute(
+            insert(StrategySwitchRow).values(
+                bot_id=1,
+                ts=ts,
+                from_config=1,
+                to_config=config_id,
+                trigger=trigger,
+                policy="keep",
+                regime="ranging" if trigger == "regime" else None,
+                reason="ranging for 3 candles in a row",
+                source=trigger,
+            )
+        )
+
+
+async def test_switches_are_on_the_chart_with_the_strategy_they_switched_to(seeded: Api) -> None:
+    await add_switch(seeded, at(3), trigger="manual")  # before the candles shown below
+    await add_switch(seeded, at(28) + timedelta(seconds=2))
+
+    body = await get_json(seeded, "/bots/1/chart?limit=20")
+
+    assert body["switches"] == [
+        {
+            "id": 2,
+            "ts": "2026-10-26T10:00:02Z",
+            "trigger": "regime",
+            "regime": "ranging",
+            "strategy": "rsi_mean_reversion",
+            "reason": "ranging for 3 candles in a row",
+        }
+    ]
+
+
 async def test_a_bot_whose_lines_can_t_be_drawn_still_has_its_candles(seeded: Api) -> None:
     async with seeded.db.begin() as conn:  # configs are append-only (D52): add one
         config_id = await conn.scalar(
@@ -470,6 +518,13 @@ async def test_the_websocket_sends_new_candles_forming_and_trades(seeded: Api, d
                 await conn.execute(insert(FillRow).values(fill(4, at(30), "99", "0.1")))
             changed = receive_until(socket, lambda m: m["trades"] is not None)
             assert [t["order_id"] for t in changed["trades"]] == [1, 2, 3, 4]
+
+            # Switches too: sent first (none yet), then only when they change.
+            assert first["switches"] == []
+            await add_switch(seeded, at(30) + timedelta(seconds=2))
+            switched = receive_until(socket, lambda m: m["switches"] is not None)
+            assert [s["strategy"] for s in switched["switches"]] == ["rsi_mean_reversion"]
+            assert socket.receive_json()["switches"] is None
 
 
 async def test_the_websocket_closes_for_an_unknown_bot_and_after_sign_out(

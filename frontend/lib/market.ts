@@ -59,6 +59,16 @@ export type TradeMarker = {
   status: string;
 };
 
+/** A switch of the bot's strategy config (P6-4, D54), by hand or by the regime. */
+export type SwitchMarker = {
+  id: number;
+  ts: string; // when it was made; the new config decides from the next close on
+  trigger: "manual" | "rollback" | "regime";
+  regime: string | null;
+  strategy: string; // the strategy it switched to
+  reason: string;
+};
+
 export type Chart = {
   server_time: string;
   bot: ChartBot;
@@ -66,6 +76,7 @@ export type Chart = {
   indicators: Indicators | null;
   forming: FormingCandle | null;
   trades: TradeMarker[];
+  switches: SwitchMarker[];
 };
 
 export type ChartUpdate = {
@@ -74,6 +85,7 @@ export type ChartUpdate = {
   points: IndicatorPoint[];
   forming: FormingCandle | null;
   trades: TradeMarker[] | null; // null: unchanged
+  switches: SwitchMarker[] | null; // null: unchanged
 };
 
 export type TradeExplanation = {
@@ -148,6 +160,20 @@ export function tradeLabel(trade: Pick<TradeMarker, "side" | "kind">): string {
   const side = trade.side === "buy" ? "B" : "S";
   const kind = KIND_LABEL[trade.kind]?.short ?? trade.kind;
   return kind ? `${side} ${kind}` : side;
+}
+
+/** Short strategy names for switch markers. */
+const STRATEGY_SHORT: Record<string, string> = {
+  ema_crossover: "EMA",
+  rsi_mean_reversion: "RSI",
+  bollinger_breakout: "BB",
+  stay_flat: "FLAT",
+};
+
+/** A switch marker's label: "→ RSI", or "auto → RSI" when the regime made it. */
+export function switchLabel(s: Pick<SwitchMarker, "trigger" | "strategy">): string {
+  const to = `→ ${STRATEGY_SHORT[s.strategy] ?? s.strategy}`;
+  return s.trigger === "regime" ? `auto ${to}` : to;
 }
 
 /** Digits after the point in a decimal string: "81819.48" → 2. */

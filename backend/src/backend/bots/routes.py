@@ -8,9 +8,10 @@ here runs.
 - `GET /strategies`: what a new bot can be set up with, as the engine described it at
   startup (shared/catalog.py). 503 if it never has: the engine isn't running yet.
 - `GET /bots`: every bot with its setup (store.py).
-- `GET /bots/{bot_id}`: one bot's setup and every strategy config it has had; 404 if
-  there's no such bot.
-- `POST /bots`, `POST /bots/{bot_id}/start`, `/pause`, `/stop`, `/strategy`, `/rollback`:
+- `GET /bots/{bot_id}`: one bot's setup, every strategy config it has had and every
+  switch between them (P6-4); 404 if there's no such bot.
+- `POST /bots`, `POST /bots/{bot_id}/start`, `/pause`, `/stop`, `/strategy`, `/rollback`,
+  `/auto-switch` (P6-4: its regime -> strategy mapping, or off):
   each sends the engine a command over the Redis command list, as the kill switch does
   (shared/commands.py), and answers with its reply. The API never writes a bot: the
   engine checks everything, and its refusal comes back as a 422 with the reason. With
@@ -34,6 +35,7 @@ from backend.bots.store import BotDetail, BotSetup, read_bot, read_bots
 from backend.settings import ApiSettings
 from shared.catalog import CATALOG_KEY, Catalog
 from shared.commands import (
+    AutoSwitchCommand,
     BotAction,
     BotCommand,
     BotCommands,
@@ -44,6 +46,7 @@ from shared.commands import (
     SwitchStrategyCommand,
     send,
 )
+from shared.regime import AutoSwitchSettings
 
 log = structlog.get_logger()
 
@@ -88,6 +91,14 @@ class RollbackRequest(BaseModel):
 
     config_id: int  # one of the bot's earlier strategy configs
     policy: SwitchPolicy
+
+
+class AutoSwitchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # The mapping, minimum hold and policy; None turns auto-switching off. The shape is
+    # checked here; each strategy's params, by the engine.
+    settings: AutoSwitchSettings | None
 
 
 def _settings(state: State) -> ApiSettings:
@@ -181,6 +192,24 @@ async def rollback(
         expires_at=now + timedelta(seconds=_settings(state).kill_reply_seconds),
     )
     fields = {"bot_id": bot_id, "config_id": body.config_id, "policy": body.policy}
+    return await _send(state, command, user.username, fields)
+
+
+@router.post("/bots/{bot_id}/auto-switch")
+async def auto_switch(
+    bot_id: int, body: AutoSwitchRequest, request: Request, user: CurrentUser
+) -> BotReply:
+    state = request.app.state
+    now = _now(state)
+    settings = None if body.settings is None else body.settings.model_dump(mode="json")
+    command = AutoSwitchCommand(
+        bot_id=bot_id,
+        settings=settings,
+        source=SOURCE,
+        sent_at=now,
+        expires_at=now + timedelta(seconds=_settings(state).kill_reply_seconds),
+    )
+    fields = {"bot_id": bot_id, "auto_switch": body.settings is not None}
     return await _send(state, command, user.username, fields)
 
 

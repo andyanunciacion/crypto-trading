@@ -7,7 +7,7 @@ limited to B x 0.9995, rounded down.
 """
 
 import asyncio
-from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -20,18 +20,22 @@ from sqlalchemy import URL, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 from structlog.testing import capture_logs
 
-from engine.bots.runner import BotRunner
+from engine.bots.runner import BotRunner, RegimeHook
 from engine.bots.store import Bot, load_bot, load_bots, open_orders
 from engine.control.bots import BotControl
 from engine.control.listener import CommandListener
 from engine.exchange.errors import ExchangeError
 from engine.exchange.models import Candle, MarketRules, Timeframe
 from engine.marketdata.store import CandleStore, Series
+from engine.regime import switcher
+from engine.regime.detector import Regime, RegimeDetector, RegimeParams, RegimeReading
+from engine.regime.switcher import RegimeCheck
 from engine.risk.kill import KillSwitch
 from engine.risk.paper import PaperDesk
 from engine.strategies.base import Position
 from shared.commands import (
     COMMANDS_KEY,
+    AutoSwitchCommand,
     BotAction,
     BotCommand,
     BotReply,
@@ -43,7 +47,14 @@ from shared.commands import (
     reply_key,
     send,
 )
-from shared.db.models import SWITCH_POLICIES, BotRow, OrderRow, RiskEventRow, StrategyConfigRow
+from shared.db.models import (
+    SWITCH_POLICIES,
+    BotRow,
+    OrderRow,
+    RiskEventRow,
+    StrategyConfigRow,
+    StrategySwitchRow,
+)
 from shared.db.session import make_engine
 from shared.prices import PriceUpdate
 from shared.testing import set_limits
@@ -146,7 +157,7 @@ class Setup:
     control: BotControl
     runner: BotRunner | None = None
 
-    def new_runner(self, bots: list[Bot]) -> BotRunner:
+    def new_runner(self, bots: list[Bot], *, on_regime: RegimeHook | None = None) -> BotRunner:
         runner = BotRunner(
             bots,
             self.desk.risk,
@@ -155,7 +166,9 @@ class Setup:
             CandleStore(self.db),
             self.db,
             stream=quiet_stream,
-            selling=lambda bot_id: self.kill_switch.sells_for(bot_id),  # as main.py wires it
+            # As main.py wires them.
+            selling=lambda bot_id: self.kill_switch.sells_for(bot_id),
+            on_regime=self.control.auto_switch if on_regime is None else on_regime,
             clock=self.clock,
         )
         self.runner = runner
@@ -202,6 +215,36 @@ class Setup:
             strategy=strategy,
             params=RSI if params is None else params,
             policy=policy,
+            source="test",
+            sent_at=self.clock.now,
+            expires_at=self.clock.now + timedelta(seconds=10),
+        )
+
+    def auto(
+        self,
+        bot_id: int,
+        *,
+        min_hold: int = 3,
+        policy: SwitchPolicy = "keep",
+        off: bool = False,
+        **mapping: dict[str, Any],
+    ) -> AutoSwitchCommand:
+        """Auto-switching on for `bot_id` (trend: EMA 3/5, range: RSI(2), else stay flat;
+        `mapping` overrides a regime), or off."""
+        settings: dict[str, Any] = {
+            "mapping": {
+                "trending_up": {"strategy": "ema_crossover", "params": {"fast": 3, "slow": 5}},
+                "ranging": {"strategy": "rsi_mean_reversion", "params": RSI},
+                "trending_down": {"strategy": "stay_flat"},
+                "high_volatility": {"strategy": "stay_flat"},
+                **mapping,
+            },
+            "min_hold": min_hold,
+            "policy": policy,
+        }
+        return AutoSwitchCommand(
+            bot_id=bot_id,
+            settings=None if off else settings,
             source="test",
             sent_at=self.clock.now,
             expires_at=self.clock.now + timedelta(seconds=10),
@@ -266,7 +309,7 @@ async def setup(db_url: URL, redis_url: str) -> AsyncIterator[Setup]:
         await conn.execute(
             text(
                 "TRUNCATE bots, strategy_configs, orders, fills, positions, paper_balances,"
-                " risk_events, candles RESTART IDENTITY"
+                " risk_events, strategy_switches, candles RESTART IDENTITY"
             )
         )
     await set_limits(db)  # off: these tests aren't about them
@@ -1011,6 +1054,320 @@ async def test_rollback_refuses_what_it_cant_do(
     assert (reply.ok, reply.error) == (False, error)
     assert await configs(setup) == before
     assert (await setup.bot_row(1)).switch_policy == "keep"
+
+
+# --- Auto-switching (P6-4, D54) ----------------------------------------------------------
+#
+# The regime detector is scripted: each candle reads as `Regimes` says (trending up
+# unless told otherwise), after a 2-candle warm-up, so a test says exactly when a regime
+# starts. The detector's own rules are test_regime.py's; the rule on readings is
+# test_regime_switcher.py's. These check that the engine acts on it.
+
+
+@dataclass
+class Regimes:
+    """The regime of each candle, by index: `start[i]` from candle i on."""
+
+    start: dict[int, Regime] = field(default_factory=dict)
+
+    def at(self, index: int) -> Regime:
+        earlier = [i for i in self.start if i <= index]
+        return self.start[max(earlier)] if earlier else "trending_up"
+
+
+class ScriptedDetector(RegimeDetector):
+    def __init__(self, regimes: Regimes) -> None:
+        super().__init__(RegimeParams())
+        self.regimes = regimes
+
+    @property
+    def warmup_candles(self) -> int:
+        return 2
+
+    def detect(self, candles: Sequence[Candle]) -> RegimeReading:
+        ts = candles[-1].ts
+        if len(candles) < self.warmup_candles:
+            return RegimeReading(regime="unclear", ts=ts, reason="warming up")
+        regime = self.regimes.at((ts - T0) // MINUTE)
+        return RegimeReading(regime=regime, ts=ts, reason=f"scripted {regime}", indicators={})
+
+
+@pytest.fixture
+def regimes(monkeypatch: pytest.MonkeyPatch) -> Regimes:
+    regimes = Regimes()
+    monkeypatch.setattr(switcher, "RegimeDetector", lambda params: ScriptedDetector(regimes))
+    return regimes
+
+
+async def switches(setup: Setup) -> list[Any]:
+    async with setup.db.connect() as conn:
+        query = select(StrategySwitchRow).order_by(StrategySwitchRow.id)
+        return list((await conn.execute(query)).all())
+
+
+async def test_the_regime_switches_a_bot_only_after_the_minimum_hold(
+    setup: Setup, regimes: Regimes
+) -> None:
+    regimes.start[30] = "ranging"
+    bot_id = await setup.created()  # EMA 3/5: what the trend maps to
+    assert (await setup.control.handle(setup.auto(bot_id, min_hold=3))).ok
+    runner = setup.new_runner([])
+    async with running(runner):
+        assert (await setup.control.handle(setup.command("start", bot_id))).ok
+        await until(lambda: runner.running == [bot_id])
+
+        with capture_logs() as logs:
+            await setup.closes(runner, 30, "100", bid="99.9")
+            await setup.closes(runner, 31, "100", bid="99.9")
+        readings = [(log["regime"], log["held"]) for log in logs if log["event"] == "bot.regime"]
+        assert readings == [("ranging", 1), ("ranging", 2)]
+        assert runner.switching == []
+        assert await switches(setup) == []
+
+        await setup.closes(runner, 32, "100", bid="99.9")  # held 3: the switch
+        assert runner.switching == [bot_id]
+        await until(lambda: runner.switching == [])
+        with capture_logs() as logs:
+            await setup.closes(runner, 33, "100", bid="99.9")
+
+    (switched,) = [log for log in logs if log["event"] == "bot.switched"]
+    assert (switched["old"]["id"], switched["new"]["id"]) == (1, 2)
+    assert switched["new"]["strategy"] == "rsi_mean_reversion"
+    (row,) = await switches(setup)
+    assert (row.bot_id, row.from_config, row.to_config, row.trigger, row.policy) == (
+        bot_id,
+        1,
+        2,
+        "regime",
+        "keep",
+    )
+    assert (row.regime, row.candle_ts, row.source) == ("ranging", T0 + 32 * MINUTE, "regime")
+    assert row.reason == (
+        "ranging for 3 candles in a row (scripted ranging): switch to rsi_mean_reversion v1 "
+        '{"period": 2, "oversold": 30.0, "overbought": 70.0}'
+    )
+    assert (row.reading["regime"], row.reading["held"], row.reading["min_hold"]) == (
+        "ranging",
+        3,
+        3,
+    )
+    (config,) = [c for c in await configs(setup) if c[0] == 2]
+    assert config == (2, bot_id, "rsi_mean_reversion", RSI_2, None)
+    bot_row = await setup.bot_row(bot_id)
+    assert (bot_row.active_strategy_config_id, bot_row.switch_policy) == (2, "keep")
+
+
+async def test_a_crash_with_hand_over_sells_the_position_through_stay_flat(
+    setup: Setup, regimes: Regimes
+) -> None:
+    regimes.start[31] = "high_volatility"
+    bot_id = await setup.created()
+    assert (await setup.control.handle(setup.auto(bot_id, min_hold=2, policy="hand_over"))).ok
+    runner = setup.new_runner([])
+    async with running(runner):
+        await setup.bought_running(runner, bot_id)  # candle 30, still trending up
+        await setup.closes(runner, 31, "110", bid="109.9")
+        await setup.closes(runner, 32, "110", bid="109.9")  # held 2: to stay_flat
+        await until(lambda: runner.switching == [])
+        await setup.closes(runner, 33, "110", bid="109.9")  # stay_flat's SELL
+
+    # Sold whole, at the bid, in the config the order names: the regime's.
+    assert await orders(setup, bot_id) == [BUY, ("b1-202610221233-s", "closed", d("9.0768"), 2)]
+    assert await setup.desk.risk.position(bot_id, BTC) is None
+    (row,) = await switches(setup)
+    assert (row.regime, row.policy, row.to_config) == ("high_volatility", "hand_over", 2)
+
+
+async def test_a_restart_mid_hold_neither_switches_early_nor_starts_over(
+    setup: Setup, regimes: Regimes
+) -> None:
+    regimes.start[30] = "ranging"
+    bot_id = await setup.created()
+    assert (await setup.control.handle(setup.auto(bot_id, min_hold=3))).ok
+    runner = setup.new_runner([])
+    async with running(runner):
+        assert (await setup.control.handle(setup.command("start", bot_id))).ok
+        await until(lambda: runner.running == [bot_id])
+        await setup.closes(runner, 30, "100", bid="99.9")
+        await setup.closes(runner, 31, "100", bid="99.9")  # held 2
+
+    # A restart: REST now has candles 30 and 31, and the new runner warms up from it.
+    setup.market.rest += [candle(30), candle(31)]
+    (bot,) = await load_bots(setup.db, "mexc")
+    assert bot.auto is not None
+    runner = setup.new_runner([bot])
+    async with running(runner):
+        await until(lambda: runner.running == [bot_id])
+        assert await switches(setup) == []
+        await setup.closes(runner, 32, "100", bid="99.9")  # held 3, counted from the candles
+        await until(lambda: runner.switching == [])
+
+    (row,) = await switches(setup)
+    assert (row.regime, row.candle_ts) == ("ranging", T0 + 32 * MINUTE)
+
+
+async def test_one_switch_at_a_time(setup: Setup, regimes: Regimes) -> None:
+    regimes.start[30] = "ranging"
+    calls: list[datetime] = []
+    gate = asyncio.Event()
+
+    async def slow(bot: Bot, check: RegimeCheck) -> None:
+        calls.append(check.reading.ts)
+        await gate.wait()
+
+    bot_id = await setup.created()
+    assert (await setup.control.handle(setup.auto(bot_id, min_hold=1))).ok
+    runner = setup.new_runner([], on_regime=slow)
+    async with running(runner):
+        assert (await setup.control.handle(setup.command("start", bot_id))).ok
+        await until(lambda: runner.running == [bot_id])
+        await setup.closes(runner, 30, "100", bid="99.9")
+        await setup.closes(runner, 31, "100", bid="99.9")  # the first is still being made
+        assert calls == [T0 + 30 * MINUTE]
+
+        gate.set()
+        await until(lambda: runner.switching == [])
+        await setup.closes(runner, 32, "100", bid="99.9")  # it made none: asked again
+        await until(lambda: runner.switching == [])
+
+    assert calls == [T0 + 30 * MINUTE, T0 + 32 * MINUTE]
+
+
+async def test_a_manual_switch_is_refused_while_auto_switching_is_on(setup: Setup) -> None:
+    bot_id = await setup.created()
+    assert (await setup.control.handle(setup.auto(bot_id))).ok
+
+    switch = await setup.control.handle(setup.switch(bot_id, "keep"))
+    rollback = await setup.control.handle(setup.rollback(bot_id, 1, "keep"))
+
+    refusal = (
+        "auto-switching is on, and the regime would switch it back: turn auto-switching off first"
+    )
+    assert (switch.ok, switch.error) == (False, refusal)
+    assert (rollback.ok, rollback.error) == (False, refusal)
+    assert len(await configs(setup)) == 1
+
+    # Off again, both work, and each is recorded.
+    assert (await setup.control.handle(setup.auto(bot_id, off=True))).ok
+    assert (await setup.control.handle(setup.switch(bot_id, "keep"))).ok
+    assert (await setup.control.handle(setup.rollback(bot_id, 1, "hand_over"))).ok
+    assert [
+        (r.from_config, r.to_config, r.trigger, r.policy, r.regime, r.reason, r.source)
+        for r in await switches(setup)
+    ] == [
+        (1, 2, "manual", "keep", None, "switched by hand (test)", "test"),
+        (2, 3, "rollback", "hand_over", None, "rolled back by hand (test)", "test"),
+    ]
+
+
+async def test_turning_auto_switching_on_reloads_a_running_bot(
+    setup: Setup, regimes: Regimes
+) -> None:
+    bot_id = await setup.created()
+    runner = setup.new_runner([])
+    async with running(runner):
+        assert (await setup.control.handle(setup.command("start", bot_id))).ok
+        await until(lambda: runner.running == [bot_id])
+        with capture_logs() as logs:
+            await setup.closes(runner, 30, "100", bid="99.9")
+        assert "bot.regime" not in [log["event"] for log in logs]
+
+        with capture_logs() as logs:
+            # A long hold: the readings are still building up, so logged at INFO.
+            reply = await setup.control.handle(setup.auto(bot_id, min_hold=40))
+        assert (reply.ok, reply.status, reply.strategy_config_id) == (True, "running", None)
+        (set_,) = [log for log in logs if log["event"] == "bot.auto_switch_set"]
+        assert set_["reloading"] is True
+        assert set_["settings"]["mapping"]["ranging"] == {
+            "strategy": "rsi_mean_reversion",
+            "params": RSI_2,
+            "version": 1,  # stored with the strategy's version
+        }
+        await until(lambda: runner.switching == [])
+        with capture_logs() as logs:
+            await setup.closes(runner, 31, "100", bid="99.9")
+        assert [log["regime"] for log in logs if log["event"] == "bot.regime"] == ["trending_up"]
+
+        assert (await setup.control.handle(setup.auto(bot_id, off=True))).ok
+        await until(lambda: runner.switching == [])
+        with capture_logs() as logs:
+            await setup.closes(runner, 32, "100", bid="99.9")
+        assert "bot.regime" not in [log["event"] for log in logs]
+
+    assert len(await configs(setup)) == 1  # no config added either way
+    assert (await setup.bot_row(bot_id)).auto_switch is None
+
+
+@pytest.mark.parametrize(
+    ("bot_id", "mapping", "min_hold", "error"),
+    [
+        (99, {}, 3, "there's no bot 99"),
+        (
+            1,
+            {"ranging": {"strategy": "rsi_mean_reversion", "params": {"period": 1}}},
+            3,
+            "ranging: period: Input should be greater than or equal to 2",
+        ),
+        (1, {"ranging": {"strategy": "moon"}}, 3, "ranging: unknown strategy 'moon'; known: "),
+        (1, {}, 0, "min_hold: Input should be greater than or equal to 1"),
+    ],
+)
+async def test_auto_switching_refuses_what_it_cant_do(
+    setup: Setup, bot_id: int, mapping: dict[str, Any], min_hold: int, error: str
+) -> None:
+    await setup.created()
+
+    reply = await setup.control.handle(setup.auto(bot_id, min_hold=min_hold, **mapping))
+
+    assert not reply.ok and reply.error is not None
+    assert reply.error.startswith(error), reply.error
+    assert (await setup.bot_row(1)).auto_switch is None
+
+
+async def test_auto_switching_refuses_a_change_that_changes_nothing(setup: Setup) -> None:
+    bot_id = await setup.created()
+
+    off = await setup.control.handle(setup.auto(bot_id, off=True))
+    assert (await setup.control.handle(setup.auto(bot_id))).ok
+    same = await setup.control.handle(setup.auto(bot_id))
+
+    assert (off.ok, off.error) == (False, "nothing to change: auto-switching is already off")
+    assert (same.ok, same.error) == (
+        False,
+        "nothing to change: auto-switching already has those settings",
+    )
+
+
+async def test_a_regime_switch_is_dropped_if_the_bot_changed_meanwhile(
+    setup: Setup, regimes: Regimes
+) -> None:
+    regimes.start[0] = "ranging"
+    bot_id = await setup.created()
+    assert (await setup.control.handle(setup.auto(bot_id, min_hold=2))).ok
+    assert (await setup.control.handle(setup.command("start", bot_id))).ok  # the database only
+    bot, _ = await load_bot(setup.db, "mexc", bot_id)
+    assert bot.auto is not None
+    check = bot.auto.check([candle(i) for i in range(5)], bot.strategy, MINUTE)
+    assert check.switch is not None
+
+    # Its settings changed before the switch was made.
+    assert (await setup.control.handle(setup.auto(bot_id, min_hold=5))).ok
+    with capture_logs() as changed:
+        await setup.control.auto_switch(bot, check)
+    # It was stopped before the switch was made.
+    bot, _ = await load_bot(setup.db, "mexc", bot_id)
+    assert (await setup.control.handle(setup.command("stop", bot_id))).ok
+    with capture_logs() as stopped:
+        await setup.control.auto_switch(bot, check)
+
+    assert [
+        log["reason"] for log in [*changed, *stopped] if log["event"] == "bot.auto_switch_dropped"
+    ] == [
+        "its auto-switching settings changed, or it was turned off",
+        "the bot was stopped",
+    ]
+    assert len(await configs(setup)) == 1
+    assert await switches(setup) == []
 
 
 # --- Over Redis ---------------------------------------------------------------------------
