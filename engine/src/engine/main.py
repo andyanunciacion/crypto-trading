@@ -199,6 +199,7 @@ async def run(settings: Settings, mirror: LogMirror | None = None) -> None:
                     db,
                     on_kline=RedisFormingSink(redis, exchange.exchange_id),
                     on_new_symbol=prices.ensure,
+                    selling=kill_switch.sells_for,  # a switch that closes first (D51)
                 )
                 kill_switch.runner = runner
                 bot_control.runner = runner

@@ -44,6 +44,18 @@ up in the background, so a slow REST call never holds up the command listener (a
 must stay fast). On a series that's already streaming, it's seeded from REST and then,
 in one step with no await in between, with the candles the series delivered since, so
 it joins with a whole window. A series that isn't streaming (new, or ended) is started.
+
+The Bots page switches a bot's strategy or params with `switch()` (P6-1, D51). The new
+config warms up in the background, like a bot being added, and takes over at the bot's
+next candle, never between two: strategies only act on closed candles, and so no candle
+reaches its window twice. Until it's ready, the old config carries on, and each order's
+`reason` names the config that decided it. What happens to an open position:
+- `keep`: the config that bought it (the bot's `keeper`) still decides when to sell it,
+  along with the trade's stops. The new config sees every candle but only trades once
+  the bot is flat, and then the keeper is dropped.
+- `close_first`: the kill switch sells it (kind `switch`). While it does, the bot only
+  takes in candles, and its stops are left alone (`selling`), so nothing sells twice.
+- `hand_over`: the new config's SELL sells it. The trade keeps its stops.
 """
 
 import asyncio
@@ -108,9 +120,26 @@ def _utcnow() -> datetime:
 
 
 @dataclass(frozen=True)
+class _Keeper:
+    """The config that bought the open position, and its signals: it sells it (`keep`)."""
+
+    strategy_config_id: int
+    signals: SignalRunner[Any]
+
+
+@dataclass
 class _Running:
     bot: Bot
     signals: SignalRunner[Any]
+    keeper: _Keeper | None = None  # dropped once the bot is flat
+
+
+@dataclass(frozen=True)
+class _Switch:
+    """A switch, warmed up: the bot's new config and the candles to seed it with."""
+
+    running: _Running  # not seeded yet
+    history: list[Candle]
 
 
 class BotRunner:
@@ -126,6 +155,7 @@ class BotRunner:
         stream: StreamFactory | None = None,
         on_kline: KlineHook | None = None,
         on_new_symbol: Callable[[str], None] | None = None,
+        selling: Callable[[int], bool] | None = None,
         clock: Callable[[], datetime] = _utcnow,
         fee_rate: Decimal = DEFAULT_FEE_RATE,
     ) -> None:
@@ -138,6 +168,9 @@ class BotRunner:
         self._on_kline = on_kline  # the forming candle, for the dashboard's chart (D46)
         # Told each symbol a bot added later trades, so its prices get streamed.
         self._on_new_symbol = on_new_symbol
+        # Whether the kill switch is selling a bot's position for it (a `close_first`
+        # switch, D51): the bot is held back until it's gone.
+        self._selling = selling or (lambda bot_id: False)
         self._clock = clock
         self._fee_rate = fee_rate  # the fee the PaperBroker charges, left room for when buying
         self._series: dict[Series, list[_Running]] = {}
@@ -150,8 +183,10 @@ class BotRunner:
         self._warm: set[Series] = set()  # ... that has warmed up its bots
         self._recent: dict[Series, deque[Candle]] = {}  # each series' newest closed candles
         self._joining: dict[int, asyncio.Task[None]] = {}  # bots added, still warming up
+        self._switching: dict[int, asyncio.Task[None]] = {}  # switches still warming up
+        self._switches: dict[int, _Switch] = {}  # ... and warmed up, for the next candle
         for bot in bots:
-            self._enlist(_Running(bot, _signals(bot)))
+            self._enlist(_running(bot))
             self._locks[bot.id] = asyncio.Lock()
 
     @property
@@ -164,6 +199,11 @@ class BotRunner:
             for r in bots
             if r.bot.id not in self._stopped
         )
+
+    @property
+    def switching(self) -> list[int]:
+        """The bots whose switch (D51) is still warming up: their old config still acts."""
+        return sorted(self._switching)
 
     async def run(self) -> None:
         """Run every bot until cancelled. With no bots, it waits for `add()`."""
@@ -187,6 +227,7 @@ class BotRunner:
         if self._tasks is None:
             raise RuntimeError("add() needs run() to be running")
         self._forget(bot.id)  # an earlier run of it, stopped, perhaps with other settings
+        self._drop_switch(bot.id)
         self._stopped.discard(bot.id)
         self._exit_skipped.pop(bot.id, None)
         self._locks.setdefault(bot.id, asyncio.Lock())
@@ -194,6 +235,33 @@ class BotRunner:
             self._on_new_symbol(bot.symbol)  # first: its first order needs a fresh price
         self._joining[bot.id] = self._tasks.create_task(self._join(bot))
         log.info("bot.starting", bot_id=bot.id, name=bot.name, series=str(bot.series))
+        return True
+
+    def starting(self, bot_id: int) -> bool:
+        """Whether bot `bot_id` was added and is still warming up."""
+        return bot_id in self._joining
+
+    def switch(self, bot: Bot) -> bool:
+        """Run `bot`, a bot this runner runs, with its new strategy config (D51).
+
+        The new config (and its keeper, if any) warms up in the background, then takes
+        over at the bot's next candle (module docstring). A switch still warming up is
+        replaced. False if the runner doesn't run the bot (stopped, or still starting):
+        then a later `add()` or a restart loads it as it is.
+        """
+        if bot.id in self._joining or not self._runs(bot.id):
+            return False
+        if self._tasks is None:
+            raise RuntimeError("switch() needs run() to be running")
+        self._drop_switch(bot.id)
+        self._switching[bot.id] = self._tasks.create_task(self._warm_switch(bot))
+        log.info(
+            "bot.switch_warming_up",
+            bot_id=bot.id,
+            name=bot.name,
+            strategy_config_id=bot.strategy_config_id,
+            keeper=None if bot.keeper is None else bot.keeper.strategy_config_id,
+        )
         return True
 
     async def warm_up(self, series: Series) -> datetime:
@@ -205,7 +273,7 @@ class BotRunner:
         bots = list(self._series[series])
         history = await self._history(series, bots)
         for running in bots:
-            running.signals.seed(history)
+            _seed(running, history)
         # REST may not have the newest candle yet; then the stream fetches it first.
         last = history[-1].ts if history else self._last_closed(series)
         log.info(
@@ -246,6 +314,8 @@ class BotRunner:
                 },
                 # Its stops carry on from these (D40); None when flat or without stops.
                 levels=None if held is None else levels_json(held.levels),
+                # The config still selling its position after a switch (keep, D51).
+                keeper=None if running.keeper is None else running.keeper.strategy_config_id,
                 canceled=canceled.get(bot.id, []),
             )
 
@@ -269,21 +339,27 @@ class BotRunner:
         step = STEP[series.timeframe]
         closed_ago = self._clock() - (candle.ts + step)
         # A copy: a bot joining meanwhile starts at the next candle (it's seeded with this one).
-        for running in list(self._series[series]):
+        for bot in [r.bot for r in self._series[series]]:
             try:
-                async with self._locks[running.bot.id]:
-                    if running.bot.id in self._stopped:
+                async with self._locks[bot.id]:
+                    if bot.id in self._stopped:
                         continue
-                    self._exit_skipped.pop(running.bot.id, None)  # a new candle tries again
-                    if closed_ago < step:
+                    # Looked up again: a switch may have replaced it while we waited.
+                    running = self._switched(series, bot.id, candle)
+                    if running is None:
+                        continue
+                    self._exit_skipped.pop(bot.id, None)  # a new candle tries again
+                    if self._selling(bot.id):
+                        self._hold(running, candle)
+                    elif closed_ago < step:
                         await self._step(running, candle)
                     else:
                         await self._catch_up(running, candle, closed_ago)
             except Exception as exc:
                 log.error(
                     "bot.error",
-                    bot_id=running.bot.id,
-                    name=running.bot.name,
+                    bot_id=bot.id,
+                    name=bot.name,
                     candle_ts=candle.ts.isoformat(),
                     error=type(exc).__name__,
                     detail=str(exc),
@@ -303,8 +379,8 @@ class BotRunner:
                 continue  # acting on its candle; the next price checks again
             try:
                 async with lock:
-                    if bot.id in self._stopped:
-                        continue
+                    if bot.id in self._stopped or self._selling(bot.id):
+                        continue  # stopped, or the kill switch is selling it (D51)
                     await self._watch(bot, update, update.bid)
             except Exception as exc:
                 log.error(
@@ -327,6 +403,7 @@ class BotRunner:
         stopping = [i for i in bot_ids if i in self._locks and i not in self._stopped]
         self._stopped.update(stopping)  # first, so nothing new starts while we wait
         for bot_id in stopping:
+            self._drop_switch(bot_id)  # a restart, or Start, loads its config afresh
             async with self._locks[bot_id]:
                 pass  # its candle or price is done
         if stopping:
@@ -368,7 +445,7 @@ class BotRunner:
         """The closed candles `bots` need to warm up, up to the newest, from REST (and stored)."""
         step = STEP[series.timeframe]
         last_closed = self._last_closed(series)
-        needed = max(max(b.signals.strategy.warmup_candles, _atr_window(b.bot), 1) for b in bots)
+        needed = max(_candles_needed(b) for b in bots)
         history = await fetch_range(
             self._market,
             series.symbol,
@@ -381,7 +458,7 @@ class BotRunner:
 
     async def _join(self, bot: Bot) -> None:
         """Warm up a bot `add()` started, then put it on its series."""
-        running = _Running(bot, _signals(bot))
+        running = _running(bot)
         series = bot.series
         try:
             history: list[Candle] = []
@@ -395,9 +472,10 @@ class BotRunner:
             # From here to the end, no await: no candle can slip in between.
             if series in self._live:
                 newest = history[-1].ts if history else None
-                running.signals.seed(history)
-                running.signals.seed(
-                    [c for c in self._recent.get(series, ()) if newest is None or c.ts > newest]
+                _seed(running, history)
+                _seed(
+                    running,
+                    [c for c in self._recent.get(series, ()) if newest is None or c.ts > newest],
                 )
                 self._enlist(running)
                 log.info(
@@ -414,6 +492,87 @@ class BotRunner:
                 log.info("bot.started", bot_id=bot.id, name=bot.name, series=str(series))
         finally:
             self._joining.pop(bot.id, None)
+
+    async def _warm_switch(self, bot: Bot) -> None:
+        """Fetch what a switched bot's new config needs; it takes over at the next candle."""
+        running = _running(bot)
+        try:
+            history = await self._until_done(
+                "bot.switch_warm_up_failed",
+                bot.series,
+                lambda: self._history(bot.series, [running]),
+            )
+            self._switches[bot.id] = _Switch(running, history)
+            log.info(
+                "bot.switch_ready",
+                bot_id=bot.id,
+                name=bot.name,
+                strategy_config_id=bot.strategy_config_id,
+                candles=len(history),
+            )
+        finally:
+            # Only its own: a newer switch may have replaced (and cancelled) this one.
+            if self._switching.get(bot.id) is asyncio.current_task():
+                del self._switching[bot.id]
+
+    def _drop_switch(self, bot_id: int) -> None:
+        """Forget a switch of `bot_id` that hasn't taken over yet."""
+        task = self._switching.pop(bot_id, None)
+        if task is not None:
+            task.cancel()
+        self._switches.pop(bot_id, None)
+
+    def _switched(self, series: Series, bot_id: int, candle: Candle) -> _Running | None:
+        """The bot as it runs `candle`: switched first if its new config is ready.
+
+        No await: nothing can change the series or the bot's window meanwhile.
+        """
+        bots = self._series[series]
+        index = next((i for i, r in enumerate(bots) if r.bot.id == bot_id), None)
+        if index is None:
+            return None
+        old = bots[index]
+        switch = self._switches.pop(bot_id, None)
+        if switch is None:
+            if bot_id in self._switching:
+                log.info(
+                    "bot.switch_pending",
+                    bot_id=bot_id,
+                    name=old.bot.name,
+                    candle_ts=candle.ts.isoformat(),
+                    acting=old.bot.strategy_config_id,
+                )
+            return old
+        new = switch.running
+        # Up to the candle before this one: REST may already have had this one, and the
+        # loop gives it to the bot next.
+        before = sorted(
+            {
+                c.ts: c
+                for c in [*switch.history, *self._recent.get(series, ())]
+                if c.ts < candle.ts
+            }.values(),
+            key=lambda c: c.ts,
+        )
+        _seed(new, before)
+        bots[index] = new
+        for watched in self._watched.values():
+            watched[:] = [b for b in watched if b.id != bot_id]
+        if new.bot.stops != NO_STOPS:
+            self._watched.setdefault(new.bot.symbol, []).append(new.bot)
+        log.info(
+            "bot.switched",
+            bot_id=bot_id,
+            name=new.bot.name,
+            candle_ts=candle.ts.isoformat(),
+            old=_config_json(old.bot.strategy_config_id, old.signals),
+            new=_config_json(new.bot.strategy_config_id, new.signals),
+            keeper=None
+            if new.keeper is None
+            else _config_json(new.keeper.strategy_config_id, new.keeper.signals),
+            candles=len(new.signals.window),
+        )
+        return new
 
     async def _run_series(self, series: Series) -> None:
         last = await self._until_done("bots.warm_up_failed", series, lambda: self.warm_up(series))
@@ -465,7 +624,7 @@ class BotRunner:
     async def _catch_up(self, running: _Running, candle: Candle, closed_ago: timedelta) -> None:
         """A candle missed while the engine was down or offline: into the window, no signal."""
         canceled = await self._cancel_leftovers(running.bot)
-        running.signals.seed([candle])
+        _seed(running, [candle])
         log.info(
             "bot.caught_up",
             bot_id=running.bot.id,
@@ -475,11 +634,54 @@ class BotRunner:
             canceled=canceled,
         )
 
+    def _hold(self, running: _Running, candle: Candle) -> None:
+        """While the kill switch sells the bot's position (a `close_first` switch): into
+        the window, no signal, and its orders are left alone: one of them is that exit."""
+        _seed(running, [candle])
+        log.info(
+            "bot.waiting",
+            bot_id=running.bot.id,
+            name=running.bot.name,
+            candle_ts=candle.ts.isoformat(),
+            reason="its position is being sold before its new strategy trades",
+        )
+
     async def _step(self, running: _Running, candle: Candle) -> None:
         bot = running.bot
         await self._cancel_leftovers(bot)
         position = await self._risk.position(bot.id, bot.symbol)
+        keeper = running.keeper
+        if keeper is not None and position is None:
+            # Its trade is over: from now on the bot's own config decides everything.
+            running.keeper = keeper = None
+            log.info(
+                "bot.keeper_done",
+                bot_id=bot.id,
+                name=bot.name,
+                candle_ts=candle.ts.isoformat(),
+                strategy_config_id=bot.strategy_config_id,
+            )
         signal = running.signals.on_closed(candle, position)
+        decided_by = (bot.strategy_config_id, running.signals)
+        if keeper is not None:
+            kept = keeper.signals.on_closed(candle, position)
+            if signal.action != "hold":
+                log.info(
+                    "bot.skipped",
+                    bot_id=bot.id,
+                    name=bot.name,
+                    symbol=bot.symbol,
+                    signal_ts=signal.ts.isoformat(),
+                    side=signal.action,
+                    reason=(
+                        f"its position is strategy config {keeper.strategy_config_id}'s to "
+                        "sell (switched with keep)"
+                    ),
+                )
+            if kept.action != "sell":
+                return  # it only sells: the bot holds, so a BUY would be skipped anyway
+            signal = kept
+            decided_by = (keeper.strategy_config_id, keeper.signals)
         if signal.action == "hold":
             return
         side: OrderSide = "buy" if signal.action == "buy" else "sell"
@@ -522,7 +724,7 @@ class BotRunner:
             log.info("bot.skipped", **fields, reason=planned.reason)
             return
         outcome = await self._risk.submit(
-            bot.id, planned.request, _reason(bot, signal, planned.sizing, stops)
+            bot.id, planned.request, _reason(bot, decided_by, signal, planned.sizing, stops)
         )
         order = outcome.order
         log.info(
@@ -649,14 +851,48 @@ class BotRunner:
         )
 
 
-def _signals(bot: Bot) -> SignalRunner[Any]:
+def _running(bot: Bot) -> _Running:
+    """`bot`, with its signal runners, not seeded yet."""
     # ATR sizing or stops may need more candles than the strategy: the runner keeps them.
-    return SignalRunner(bot.strategy, bot.symbol, bot.timeframe, keep=_atr_window(bot))
+    signals = SignalRunner(bot.strategy, bot.symbol, bot.timeframe, keep=_atr_window(bot))
+    keeper = None
+    if bot.keeper is not None:
+        kept = SignalRunner(bot.keeper.strategy, bot.symbol, bot.timeframe)
+        keeper = _Keeper(bot.keeper.strategy_config_id, kept)
+    return _Running(bot, signals, keeper)
+
+
+def _seed(running: _Running, candles: Sequence[Candle]) -> None:
+    running.signals.seed(candles)
+    if running.keeper is not None:
+        running.keeper.signals.seed(candles)
+
+
+def _candles_needed(running: _Running) -> int:
+    """Closed candles the bot needs to warm up: its strategy's, ATR's, its keeper's."""
+    keeper = running.keeper
+    return max(
+        running.signals.strategy.warmup_candles,
+        _atr_window(running.bot),
+        0 if keeper is None else keeper.signals.strategy.warmup_candles,
+        1,
+    )
 
 
 def _atr_window(bot: Bot) -> int:
     """Closed candles the bot needs for its ATR sizing or stops: 0 if neither uses ATR."""
     return max(lookback(bot.sizing), stops_lookback(bot.stops))
+
+
+def _config_json(strategy_config_id: int, signals: SignalRunner[Any]) -> dict[str, JsonValue]:
+    """A strategy config as an order's `reason` and the logs name it."""
+    strategy = signals.strategy
+    return {
+        "id": strategy_config_id,
+        "strategy": strategy.name,
+        "version": strategy.version,
+        "params": strategy.params.model_dump(mode="json"),
+    }
 
 
 def _levels_fields(levels: ExitState) -> dict[str, JsonValue]:
@@ -677,11 +913,20 @@ def _equity(
 
 
 def _reason(
-    bot: Bot, signal: Signal, sizing: str | None, stops: StopPlan | None
+    bot: Bot,
+    decided_by: tuple[int, SignalRunner[Any]],
+    signal: Signal,
+    sizing: str | None,
+    stops: StopPlan | None,
 ) -> dict[str, JsonValue]:
-    """What an order records about why it was placed: the signal, the bot and its config,
-    and for a buy how it was sized and the stops it gets once it fills."""
-    reason: dict[str, JsonValue] = {"signal": signal.model_dump(mode="json"), **_bot_reason(bot)}
+    """What an order records about why it was placed: the signal, the bot and the config
+    whose signal it was (the bot's, or its keeper's), and for a buy how it was sized and
+    the stops it gets once it fills."""
+    reason: dict[str, JsonValue] = {
+        "signal": signal.model_dump(mode="json"),
+        "bot": {"id": bot.id, "name": bot.name},
+        "strategy_config": _config_json(*decided_by),
+    }
     if sizing is not None:
         reason["sizing"] = {
             "settings": SIZING.dump_python(bot.sizing, mode="json"),

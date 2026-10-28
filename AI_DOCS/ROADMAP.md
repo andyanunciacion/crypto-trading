@@ -74,7 +74,7 @@
 
 ## Phase 6 — Strategy switching
 
-1. [ ] **Manual hot-swap:** change a bot's strategy or params without restarting the engine; per-bot open-position policy (keep / close first / hand over).
+1. [x] **Manual hot-swap:** change a bot's strategy or params without restarting the engine; per-bot open-position policy (keep / close first / hand over). Edit on the Bots page sends a command the engine carries out; the new config warms up in the background and takes over at the bot's next candle. `keep` leaves an open trade to the config that bought it, `close_first` sells it until it's gone, `hand_over` gives it to the new config (D51).
 2. [ ] **Config history:** append-only `strategy_configs` with rollback from the UI.
 3. [ ] **Regime detector:** trending up/down, ranging, high volatility from ADX, ATR, EMA slope; tested on labeled history.
 4. [ ] **Auto-switcher:** regime → strategy mapping in settings, minimum hold time; switches logged, shown on the chart and in a switch log.

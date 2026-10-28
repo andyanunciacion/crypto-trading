@@ -5,7 +5,7 @@
  */
 
 import type { BacktestJob, CandleRange, NewBacktest, RunDetail, RunSummary } from "@/lib/backtests";
-import type { BotReply, BotSetup, Catalog, NewBot } from "@/lib/bots";
+import type { BotReply, BotSetup, Catalog, NewBot, StrategySwitch } from "@/lib/bots";
 import { PAGE_ROWS, type FillRow, type OrderRow } from "@/lib/history";
 import type { LogPage, RiskEvent } from "@/lib/logs";
 import type { Chart, TradeExplanation } from "@/lib/market";
@@ -133,6 +133,15 @@ export async function bots(): Promise<BotSetup[]> {
  */
 export async function createBot(bot: NewBot): Promise<BotReply> {
   const response = await call("/bots", { method: "POST", body: JSON.stringify(bot) });
+  return (await response.json()) as BotReply;
+}
+
+/** Switch a bot's strategy or params, with a policy for its open position (D51). */
+export async function switchStrategy(botId: number, change: StrategySwitch): Promise<BotReply> {
+  const response = await call(`/bots/${botId}/strategy`, {
+    method: "POST",
+    body: JSON.stringify(change),
+  });
   return (await response.json()) as BotReply;
 }
 

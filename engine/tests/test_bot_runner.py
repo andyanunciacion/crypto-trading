@@ -35,6 +35,7 @@ from engine.risk.sizing import ALL_IN, AtrRisk, PercentOfEquity, Sizing
 from engine.risk.stops import NO_STOPS, AtrMultiple, Percent, Stops
 from engine.strategies.base import Action, Position, Signal, Strategy, StrategyParams
 from engine.strategies.ema_crossover import EmaCrossover, EmaCrossoverParams
+from engine.strategies.rsi_mean_reversion import RsiMeanReversion, RsiMeanReversionParams
 from shared.db.models import BotRow, OrderRow, RiskEventRow
 from shared.db.session import make_engine
 from shared.prices import PriceUpdate
@@ -1159,3 +1160,78 @@ async def test_a_stopped_bot_started_again_starts_afresh(setup: Setup) -> None:
 
     order = await setup.desk.risk.get_order("b1-202610221231-b")
     assert order is not None and order.status == "closed"
+
+
+# --- Switching strategy (D51; the policies are in test_bot_control.py) -------------------
+
+
+def to_rsi(bot: Bot) -> Bot:
+    """`bot`, switched to RSI(2) 30/70 as config 2 (BotControl would store it first)."""
+    strategy = RsiMeanReversion(RsiMeanReversionParams(period=2, oversold=30, overbought=70))
+    return replace(bot, strategy_config_id=2, strategy=strategy)
+
+
+async def test_until_a_switch_has_warmed_up_the_old_config_acts(setup: Setup) -> None:
+    bot = await setup.ema_bot()
+    streams = Streams()
+    runner = setup.runner([bot], stream=streams)
+    async with running(runner):
+        await until(lambda: runner.running == [bot.id])
+        gate = asyncio.Event()
+        setup.market.gate = gate  # the switch's warm-up hangs on REST
+        assert runner.switch(to_rsi(bot))
+        assert runner.switching == [bot.id]
+
+        # Candle 30 crosses up: EMA (config 1) still decides, and buys.
+        setup.tick()
+        setup.quotes.set(ask="110", bid="109.9")
+        with capture_logs() as logs:
+            await streams.feed(candle(30, "110"))
+        (pending,) = [log for log in logs if log["event"] == "bot.switch_pending"]
+        assert pending["acting"] == 1
+
+        gate.set()
+        await until(lambda: runner.switching == [])
+        # Candle 31, flat at 110: RSI (config 2) takes over, and sells (RSI is 100).
+        setup.tick()
+        setup.quotes.set(ask="110", bid="109.9")
+        with capture_logs() as logs:
+            await streams.feed(candle(31, "110"))
+        (switched,) = [log for log in logs if log["event"] == "bot.switched"]
+        assert (switched["old"]["id"], switched["new"]["id"]) == (1, 2)
+
+    assert await decided_by(setup, "b1-202610221230-b") == 1
+    assert await decided_by(setup, "b1-202610221231-s") == 2
+    assert await setup.desk.risk.position(bot.id, BTC) is None
+
+
+async def decided_by(setup: Setup, client_order_id: str) -> Any:
+    """The id of the strategy config whose signal placed the order."""
+    order = await setup.desk.risk.get_order(client_order_id)
+    assert order is not None, client_order_id
+    config = order.reason["strategy_config"]
+    assert isinstance(config, dict)
+    return config["id"]
+
+
+async def test_a_switch_never_takes_a_candle_twice(setup: Setup) -> None:
+    bot = await setup.ema_bot()
+    streams = Streams()
+    runner = setup.runner([bot], stream=streams)
+    async with running(runner):
+        await until(lambda: runner.running == [bot.id])
+        setup.tick()
+        await streams.feed(candle(30))
+        # Candle 31 has closed, and REST has it before the stream hands it out.
+        setup.tick()
+        setup.market.rest += [candle(30), candle(31)]
+        assert runner.switch(to_rsi(bot))
+        await until(lambda: runner.switching == [])
+
+        with capture_logs() as logs:
+            await streams.feed(candle(31))
+
+    events = [log["event"] for log in logs if log.get("bot_id") == bot.id]
+    assert "bot.error" not in events
+    (switched,) = [log for log in logs if log["event"] == "bot.switched"]
+    assert switched["candles"] == 13 - 1  # RSI(2)'s window, up to candle 30

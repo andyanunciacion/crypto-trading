@@ -46,7 +46,7 @@ export type Indicators = {
 };
 
 export type TradeKind =
-  "signal" | "stop_loss" | "trailing_stop" | "take_profit" | "kill_switch" | "close";
+  "signal" | "stop_loss" | "trailing_stop" | "take_profit" | "kill_switch" | "close" | "switch";
 
 export type TradeMarker = {
   order_id: number;
@@ -141,6 +141,7 @@ export const KIND_LABEL: Record<string, { short: string; long: string }> = {
   take_profit: { short: "TP", long: "take-profit" },
   kill_switch: { short: "KILL", long: "kill switch" },
   close: { short: "CLOSE", long: "close from the Bots page" },
+  switch: { short: "SW", long: "closed for a strategy switch" },
 };
 
 export function tradeLabel(trade: Pick<TradeMarker, "side" | "kind">): string {

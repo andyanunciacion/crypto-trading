@@ -26,7 +26,9 @@ DEFAULT_ROWS = 100
 MAX_ROWS = 500
 CSV_BATCH = 500  # rows fetched from the database per chunk of the download
 
-Kind = Literal["signal", "stop_loss", "trailing_stop", "take_profit", "kill_switch", "close"]
+Kind = Literal[
+    "signal", "stop_loss", "trailing_stop", "take_profit", "kill_switch", "close", "switch"
+]
 OrderStatus = Literal["open", "closed", "canceled", "rejected"]
 
 

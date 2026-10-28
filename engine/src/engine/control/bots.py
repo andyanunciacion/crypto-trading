@@ -19,6 +19,15 @@ with a reason the dashboard shows. Each gets a `BotReply`:
   left open with nobody watching its stops, and the dashboard says so. Stopping a bot
   that's stopped already still cancels and closes, so it can close a stopped bot's
   position.
+- **switch** (`SwitchStrategyCommand`, P6-1, D51): a new strategy config, checked as
+  create checks one, becomes the bot's active config, and the policy its switch policy.
+  A running or paused bot switches at its next candle (runner.switch), with no restart;
+  a stopped one starts with it. The policy says what happens to an open position:
+  `keep` (the config that bought it still sells it), `close_first` (sold now, until
+  it's gone, as kind `switch`) or `hand_over` (the new config sells it). Refused while
+  the bot's position is being sold or the bot is still starting, and when nothing
+  changes. A change of policy alone adds no config and sells nothing; it only decides
+  whether a trade bought before an earlier switch is still its buyer's to sell.
 
 While the engine drains the commands sent while it was down (before any bot loads),
 there's no runner: only the database changes, and `load_bots` then picks them up. A bot
@@ -29,11 +38,11 @@ import time
 from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Protocol, cast, get_args
+from typing import Any, Protocol, cast, get_args
 
 import structlog
-from pydantic import ValidationError
-from sqlalchemy import select, update
+from pydantic import JsonValue, ValidationError
+from sqlalchemy import insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -41,13 +50,22 @@ from engine.bots.create import Listings, create_paper_bot
 from engine.bots.store import Bot, UnknownBot, load_bot, open_orders
 from engine.exchange.errors import ExchangeError
 from engine.exchange.models import Timeframe
-from engine.risk.kill import KillSwitch
+from engine.risk.kill import SWITCH, KillSwitch
 from engine.risk.paper import PaperDesk
 from engine.risk.sizing import SIZING
 from engine.risk.stops import STOPS
+from engine.strategies.base import Strategy
 from engine.strategies.registry import build, strategy_class
-from shared.commands import BotCommand, BotReply, Closing, CreateBotCommand, NotClosed
-from shared.db.models import BotRow
+from shared.commands import (
+    BotCommand,
+    BotCommands,
+    BotReply,
+    Closing,
+    CreateBotCommand,
+    NotClosed,
+    SwitchStrategyCommand,
+)
+from shared.db.models import BotRow, StrategyConfigRow
 
 log = structlog.get_logger()
 
@@ -56,6 +74,10 @@ class Runner(Protocol):
     """The bot runner, as the Bots page's commands see it."""
 
     def add(self, bot: Bot) -> bool: ...
+
+    def starting(self, bot_id: int) -> bool: ...
+
+    def switch(self, bot: Bot) -> bool: ...
 
     async def stop(self, bot_ids: Collection[int]) -> list[int]: ...
 
@@ -75,6 +97,7 @@ class _Done:
     canceled: list[str] = field(default_factory=list)
     closing: list[Closing] = field(default_factory=list)
     not_closed: list[NotClosed] = field(default_factory=list)
+    strategy_config_id: int | None = None
 
 
 class BotControl:
@@ -95,7 +118,7 @@ class BotControl:
         # Set once the bots are loaded; until then, commands change only the database.
         self.runner: Runner | None = None
 
-    async def handle(self, command: CreateBotCommand | BotCommand) -> BotReply:
+    async def handle(self, command: BotCommands) -> BotReply:
         """Carry out `command` (module docstring) and say what came of it.
 
         A refusal is a reply with `ok: false`. Anything else that goes wrong raises,
@@ -103,10 +126,12 @@ class BotControl:
         """
         started = time.monotonic()
         log.info("bot_command.received", **command.model_dump(mode="json"))
-        bot_id = command.bot_id if isinstance(command, BotCommand) else None
+        bot_id = None if isinstance(command, CreateBotCommand) else command.bot_id
         try:
             if isinstance(command, CreateBotCommand):
                 done = await self._create(command)
+            elif isinstance(command, SwitchStrategyCommand):
+                done = await self._switch(command)
             elif command.action == "start":
                 done = await self._start(command)
             elif command.action == "pause":
@@ -131,6 +156,7 @@ class BotControl:
             canceled=done.canceled,
             closing=done.closing,
             not_closed=done.not_closed,
+            strategy_config_id=done.strategy_config_id,
             took_ms=_ms_since(started),
         )
         log.info("bot_command.done", **reply.model_dump(mode="json"))
@@ -140,15 +166,11 @@ class BotControl:
 
     async def _create(self, command: CreateBotCommand) -> _Done:
         try:
-            strategy = build(
-                command.strategy, strategy_class(command.strategy).version, command.params
-            )
+            strategy = _strategy(command.strategy, command.params)
             sizing = SIZING.validate_python(command.sizing)
             stops = STOPS.validate_python(command.stops)
         except ValidationError as exc:
             raise Refused(describe(exc)) from None
-        except ValueError as exc:  # an unknown strategy
-            raise Refused(str(exc)) from None
         timeframes = get_args(Timeframe)
         if command.timeframe not in timeframes:
             raise Refused(f"timeframe {command.timeframe!r} isn't one of {', '.join(timeframes)}")
@@ -182,7 +204,7 @@ class BotControl:
             raise Refused(str(exc)) from None
         except ValueError as exc:  # includes pydantic's ValidationError for stored params
             raise Refused(f"this engine can't run it: {exc}") from None
-        if any(bot_id == bot.id for bot_id, _ in self._kill_switch.selling):
+        if self._kill_switch.sells_for(bot.id):
             raise Refused(
                 "its position is still being sold (kill switch, or stop + close): "
                 "start it once that's done"
@@ -251,12 +273,131 @@ class BotControl:
             done.closing, done.not_closed = await self._kill_switch.close_bot(bot_id, command.id)
         return done
 
+    async def _switch(self, command: SwitchStrategyCommand) -> _Done:
+        bot_id, policy = command.bot_id, command.policy
+        strategy = _strategy(command.strategy, command.params)
+        if self._kill_switch.sells_for(bot_id):
+            raise Refused(
+                "its position is still being sold (kill switch, stop + close, or a switch "
+                "that closes first): switch it once that's done"
+            )
+        if self.runner is not None and self.runner.starting(bot_id):
+            raise Refused("it's still warming up: switch it once it's in the engine")
+        params: dict[str, JsonValue] = strategy.params.model_dump(mode="json")
+        async with self._db.begin() as conn:
+            # Locked: two switches of one bot can't both read the same old config.
+            row = (
+                await conn.execute(
+                    select(
+                        BotRow.status,
+                        BotRow.mode,
+                        BotRow.exchange,
+                        BotRow.symbol,
+                        BotRow.switch_policy,
+                        BotRow.active_strategy_config_id,
+                        StrategyConfigRow.strategy,
+                        StrategyConfigRow.version,
+                        StrategyConfigRow.params,
+                    )
+                    .outerjoin(
+                        StrategyConfigRow,
+                        StrategyConfigRow.id == BotRow.active_strategy_config_id,
+                    )
+                    .where(BotRow.id == bot_id)
+                    .with_for_update(of=BotRow)
+                )
+            ).one_or_none()
+            if row is None:
+                raise Refused(f"there's no bot {bot_id}")
+            if row.mode != "paper":
+                raise Refused(f"{row.mode} bots can't be switched yet: only paper bots until P9")
+            if row.exchange != self._exchange.exchange_id:
+                raise Refused(
+                    f"the engine trades on {self._exchange.exchange_id}, not {row.exchange}"
+                )
+            same = (row.strategy, row.version, row.params) == (
+                strategy.name,
+                strategy.version,
+                params,
+            )
+            if same and row.switch_policy == policy:
+                raise Refused(
+                    "nothing to change: it already runs that strategy with those params, "
+                    f"and its switch policy is {policy}"
+                )
+            config_id = None
+            values: dict[str, object] = {"switch_policy": policy}
+            if not same:
+                config_id = await conn.scalar(
+                    insert(StrategyConfigRow)
+                    .values(
+                        bot_id=bot_id,
+                        strategy=strategy.name,
+                        version=strategy.version,
+                        params=params,
+                        created_by=command.source,
+                    )
+                    .returning(StrategyConfigRow.id)
+                )
+                values["active_strategy_config_id"] = config_id
+            await conn.execute(update(BotRow).where(BotRow.id == bot_id).values(**values))
+        position = await self._desk.risk.position(bot_id, row.symbol)
+        fields: dict[str, JsonValue] = {
+            "bot_id": bot_id,
+            "policy": policy,
+            "old_policy": row.switch_policy,
+            "old": {
+                "id": row.active_strategy_config_id,
+                "strategy": row.strategy,
+                "version": row.version,
+                "params": row.params,
+            },
+            "position": None if position is None else position.model_dump(mode="json"),
+        }
+        switching = False
+        if self.runner is not None and row.status != "stopped":
+            # Loaded as a restart would load it. A new policy alone can still start or
+            # end a keeper for a trade bought before an earlier switch (store.py).
+            bot, _ = await load_bot(self._db, self._exchange.exchange_id, bot_id)
+            switching = self.runner.switch(bot)
+        if config_id is None:
+            log.info("bot.switch_policy_set", **fields, switching=switching)
+            return _Done(bot_id, row.status)
+        log.info(
+            "bot.switch",
+            **fields,
+            new={
+                "id": config_id,
+                "strategy": strategy.name,
+                "version": strategy.version,
+                "params": params,
+            },
+            # False: the database alone changed; a Start or a restart loads it.
+            switching=switching,
+        )
+        done = _Done(bot_id, row.status, strategy_config_id=config_id)
+        if policy == "close_first" and position is not None:
+            done.closing, done.not_closed = await self._kill_switch.close_bot(
+                bot_id, command.id, kind=SWITCH
+            )
+        return done
+
     async def _status(self, bot_id: int) -> str:
         async with self._db.connect() as conn:
             status = await conn.scalar(select(BotRow.status).where(BotRow.id == bot_id))
         if status is None:
             raise Refused(f"there's no bot {bot_id}")
         return status
+
+
+def _strategy(name: str, params: dict[str, JsonValue]) -> Strategy[Any]:
+    """Strategy `name`, at its version now, with `params`; Refused with what's wrong."""
+    try:
+        return build(name, strategy_class(name).version, params)
+    except ValidationError as exc:
+        raise Refused(describe(exc)) from None
+    except ValueError as exc:  # an unknown strategy
+        raise Refused(str(exc)) from None
 
 
 def describe(exc: ValidationError) -> str:

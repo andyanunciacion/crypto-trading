@@ -3,12 +3,15 @@ import { expect, test } from "@playwright/test";
 import { signIn } from "./auth";
 
 /**
- * The Bots page (D47): a paper bot is created, started and stopped from the dashboard,
- * each as a command the engine carries out, with no engine restart. It trades ETH/USDT,
+ * The Bots page (D47): a paper bot is created, started, switched to another strategy
+ * (D51) and stopped from the dashboard, each as a command the engine carries out, with
+ * no engine restart. It trades ETH/USDT,
  * which nothing else does, so starting it also starts a new candle series and price
  * stream. It ends stopped, so the kill switch test after it still stops only e2e-bot.
  */
-test("a paper bot is created, started and stopped from the Bots page", async ({ page }) => {
+test("a paper bot is created, started, switched and stopped from the Bots page", async ({
+  page,
+}) => {
   await signIn(page);
   await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Bots" }).click();
   await expect(page).toHaveURL("/bots");
@@ -50,6 +53,24 @@ test("a paper bot is created, started and stopped from the Bots page", async ({ 
     engine: { symbols: string[] };
   };
   expect(overview.engine.symbols).toContain("ETH/USDT");
+
+  // Switched while it runs (D51), from the keyboard: the sheet starts from what it runs
+  // now, and nothing changed means nothing to send.
+  await row.getByRole("button", { name: "Switch e2e-eth's strategy" }).focus();
+  await page.keyboard.press("Enter");
+  const edit = page.getByRole("dialog", { name: "Switch e2e-eth's strategy" });
+  await expect(edit.getByLabel("fast", { exact: true })).toHaveValue("9");
+  await expect(edit.getByRole("radio", { name: /^Keep/ })).toBeChecked(); // the default policy
+  await expect(edit.getByRole("button", { name: "Save policy" })).toBeDisabled();
+  await edit.getByLabel("Strategy", { exact: true }).selectOption("rsi_mean_reversion");
+  await edit.getByLabel("period", { exact: true }).fill("7");
+  await edit.getByRole("radio", { name: /^Hand over/ }).check();
+  await edit.getByLabel("period", { exact: true }).press("Enter");
+  await expect(edit).toBeHidden();
+  await expect(page.getByText(/^Switched e2e-eth to rsi_mean_reversion/)).toBeVisible();
+  await expect(row).toContainText("period 7, oversold 30, overbought 70");
+  await expect(row).toContainText("on a switch: hand over");
+  await expect(row.locator('[data-engine="running"]')).toBeVisible(); // no restart
 
   await row.getByRole("button", { name: "Stop e2e-eth" }).click();
   const dialog = page.getByRole("alertdialog", { name: "Stop e2e-eth?" });

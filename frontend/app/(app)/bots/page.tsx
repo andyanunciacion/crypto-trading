@@ -4,6 +4,7 @@ import { Pause, Play, Square } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { BotWhy, StatusBadge } from "@/components/bot-status";
+import { EditStrategySheet } from "@/components/edit-strategy-sheet";
 import { Money } from "@/components/money";
 import { ModeBadge } from "@/components/mode-badge";
 import { NewBotSheet } from "@/components/new-bot-sheet";
@@ -21,11 +22,13 @@ import {
 } from "@/components/ui/table";
 import { ApiError, botCommand, bots as fetchBots } from "@/lib/api";
 import {
+  SWITCH_POLICIES,
   describeParams,
   describeSizing,
   describeStops,
   type BotReply,
   type BotSetup,
+  type StrategySwitch,
 } from "@/lib/bots";
 import { ENGINE_STALE_SECONDS, type Bot, type BotStatus, type Position } from "@/lib/overview";
 import { cn } from "@/lib/utils";
@@ -45,6 +48,7 @@ function problemText(error: unknown): string {
  * and its controls. Each control is a command the engine carries out (the API never
  * writes a bot), so the reply says what really happened. Pausing is one click (UX
  * principle 3); stopping asks, because a stopped bot's position is left unwatched.
+ * Edit switches its strategy or params while it runs (D51).
  */
 export default function BotsPage() {
   const feed = useFeed();
@@ -207,6 +211,9 @@ export default function BotsPage() {
                         <span className="text-muted-foreground font-mono text-xs">
                           {describeParams(bot.params)}
                         </span>
+                        <span className="text-muted-foreground text-xs">
+                          on a switch: {policyLabel(bot.switch_policy).toLowerCase()}
+                        </span>
                       </div>
                     </TableCell>
                     <TableCell className="text-muted-foreground min-w-40 text-xs whitespace-normal">
@@ -216,11 +223,23 @@ export default function BotsPage() {
                     <TableCell className="text-right">
                       <Money value={bot.cash} currency={bot.currency} />
                     </TableCell>
-                    <TableCell className="text-muted-foreground min-w-48 text-xs break-words whitespace-normal">
+                    <TableCell className="text-muted-foreground min-w-40 text-xs break-words whitespace-normal">
                       <BotWhy bot={bot} />
                     </TableCell>
                     <TableCell>
                       <div className="flex justify-end gap-1">
+                        <EditStrategySheet
+                          bot={bot}
+                          holding={position !== undefined}
+                          disabled={busy !== null}
+                          onSwitched={(reply, change) => {
+                            setMessage({
+                              kind: "status",
+                              text: switched(bot, change, reply, position !== undefined),
+                            });
+                            refresh();
+                          }}
+                        />
                         {bot.status !== "running" && (
                           <Button
                             size="sm"
@@ -294,6 +313,31 @@ function EngineNote({
       {inEngine ? "in the engine" : "warming up…"}
     </span>
   );
+}
+
+function policyLabel(policy: string): string {
+  return SWITCH_POLICIES.find((p) => p.value === policy)?.label ?? policy;
+}
+
+function switched(
+  bot: BotSetup,
+  change: StrategySwitch,
+  reply: BotReply,
+  holding: boolean,
+): string {
+  const took = `(${reply.took_ms} ms)`;
+  if (reply.strategy_config_id === null) {
+    return `${bot.name}: on a switch, ${policyLabel(change.policy).toLowerCase()} ${took}.`;
+  }
+  const when =
+    bot.status === "stopped" ? "it runs it once started" : "it trades with it from its next candle";
+  const parts = [`Switched ${bot.name} to ${change.strategy} ${took}: ${when}`];
+  if (reply.closing.length > 0) parts.push("selling its position until it's gone first");
+  for (const left of reply.not_closed) parts.push(`couldn't close ${left.symbol}: ${left.reason}`);
+  if (holding && change.policy === "keep") {
+    parts.push("its open position is still sold by the strategy that bought it");
+  }
+  return `${parts.join("; ")}.`;
 }
 
 function said(name: string, action: "start" | "pause" | "stop", reply: BotReply): string {

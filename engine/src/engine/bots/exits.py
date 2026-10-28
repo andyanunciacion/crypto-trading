@@ -21,7 +21,8 @@ with something left, and so on. A retry never reuses a cancelled exit's ID.
 The kill switch closes positions with the same exits (risk/kill.py, D43), as kind
 `kill_switch`, so it carries on a stop's numbering, and from then on the position is
 sold until it's gone by the same rule (`next_exit`). So does stopping one bot with
-"Stop + close position" on the Bots page (D47), as kind `close`.
+"Stop + close position" on the Bots page (D47), as kind `close`, and switching a bot's
+strategy with the policy `close_first` (D51), as kind `switch`.
 """
 
 from collections.abc import Sequence
@@ -30,8 +31,8 @@ from decimal import Decimal
 from typing import Any, Literal, cast
 
 from pydantic import JsonValue
-from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy import Row, select, update
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from engine.brokers.base import Mode
 from engine.risk.stops import (
@@ -45,9 +46,10 @@ from engine.risk.stops import (
 from engine.strategies.base import Position
 from shared.db.models import OrderRow, PositionRow
 
-# Why an exit sells: one of the stops, the kill switch closing everything (D43), or one
-# bot stopped and closed from the Bots page (D47).
-ExitCause = ExitKind | Literal["kill_switch", "close"]
+# Why an exit sells: one of the stops, the kill switch closing everything (D43), one
+# bot stopped and closed from the Bots page (D47), or a strategy switch that closes first
+# (D51).
+ExitCause = ExitKind | Literal["kill_switch", "close", "switch"]
 
 
 @dataclass(frozen=True)
@@ -128,22 +130,7 @@ async def load_held(db: AsyncEngine, bot_id: int, symbol: str, *, mode: Mode) ->
         ).one_or_none()
         if row is None:
             return None
-        # One position at a time, and a buy only when flat: the newest buy that filled
-        # anything opened this one.
-        buy = (
-            await conn.execute(
-                select(OrderRow.client_order_id, OrderRow.reason)
-                .where(
-                    OrderRow.bot_id == bot_id,
-                    OrderRow.symbol == symbol,
-                    OrderRow.mode == mode,
-                    OrderRow.side == "buy",
-                    OrderRow.filled > 0,
-                )
-                .order_by(OrderRow.id.desc())
-                .limit(1)
-            )
-        ).one_or_none()
+        buy = await opening_buy(conn, bot_id, symbol, mode=mode)
         if buy is None:
             return None
         exits = (
@@ -187,6 +174,30 @@ async def load_held(db: AsyncEngine, bot_id: int, symbol: str, *, mode: Mode) ->
             for e in exits
         ],
     )
+
+
+async def opening_buy(
+    conn: AsyncConnection, bot_id: int, symbol: str, *, mode: Mode
+) -> Row[tuple[str, dict[str, Any]]] | None:
+    """The buy that opened the bot's open position in `symbol`: its client order ID and
+    `reason`. Call it once you know there is one; None if no buy of the bot ever filled.
+
+    One position at a time, and a buy only when flat: the newest buy that filled
+    anything opened the open one.
+    """
+    query = (
+        select(OrderRow.client_order_id, OrderRow.reason)
+        .where(
+            OrderRow.bot_id == bot_id,
+            OrderRow.symbol == symbol,
+            OrderRow.mode == mode,
+            OrderRow.side == "buy",
+            OrderRow.filled > 0,
+        )
+        .order_by(OrderRow.id.desc())
+        .limit(1)
+    )
+    return (await conn.execute(query)).one_or_none()
 
 
 async def save_levels(

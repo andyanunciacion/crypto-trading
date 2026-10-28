@@ -573,9 +573,17 @@ Done (D50):
 
 ### P6-1 · Manual hot-swap
 `engine` `money` · Depends on: P5-4
-- [ ] Change strategy/params live; open-position policy keep / close first / hand over
+- [x] Change strategy/params live; open-position policy keep / close first / hand over
 
 **Done when:** a paper-mode test switches strategy under each policy and positions stay correct.
+
+**Done** (D51):
+- `test_bot_control.py` switches a bot holding 9.0768 BTC from EMA 3/5 to RSI(2) under each policy, against a real database, PaperDesk, kill switch and runner:
+  - hand over: RSI's SELL sells the whole position, as config 2; the trade's stop-loss still fires after the switch;
+  - keep: RSI's SELL is skipped, EMA's sells it as config 1, then RSI makes the next buy; a restart in between rebuilds the keeper;
+  - close first: exits `-x1`, `-x2` of kind `switch` sell it until it's gone while the bot only takes candles in, then it trades again, still running; a restart carries on the sale.
+- Also tested: a policy alone (no new config, the keeper dropped in memory and on reload), a stopped bot (the database only), refusals, a keeper whose config no longer builds (handed over), a switch still warming up (the old config acts), and a candle REST already had (never taken twice). Writing the tests found a bug, now fixed: a replaced switch's cancelled warm-up dropped the newer one's bookkeeping.
+- `bots.spec.ts` switches `e2e-eth` from the keyboard to RSI with hand over, while it runs, with no engine restart.
 
 ### P6-2 · Config history and rollback
 `engine` `frontend` · Depends on: P6-1

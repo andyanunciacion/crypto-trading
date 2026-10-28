@@ -40,7 +40,16 @@ export const LOG_VIEWS: Record<string, { label: string; level?: string; events?:
   all: { label: "Everything" },
   decisions: {
     label: "Decisions",
-    events: ["strategy.signal", "risk.", "bot.order", "bot.exit", "bot_command.", "kill_switch."],
+    events: [
+      "strategy.signal",
+      "risk.",
+      "bot.order",
+      "bot.exit",
+      "bot.switch",
+      "bot.keeper_done",
+      "bot_command.",
+      "kill_switch.",
+    ],
   },
   warnings: { label: "Warnings and errors", level: "warning" },
   errors: { label: "Errors", level: "error" },

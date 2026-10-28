@@ -24,7 +24,9 @@ switch's (`resume`), since the restart cancelled that exit (D38). It's worked ou
 
 `close_bot()` sells one bot's position the same way, for "Stop + close position" on the
 Bots page (D47, control/bots.py stops the bot first). Its exits have kind `close`, and
-a restart carries on with them too.
+a restart carries on with them too. A strategy switch with the policy `close_first`
+(D51) sells with it as well, with kind `switch`; the bot keeps running, and the bot
+runner holds it back until its position is gone (`selling`).
 """
 
 import asyncio
@@ -55,7 +57,8 @@ log = structlog.get_logger()
 
 KILL_SWITCH: ExitCause = "kill_switch"  # the `kind` of its exits
 CLOSE: ExitCause = "close"  # ... and of one bot's, closed from the Bots page
-_SELLING_KINDS = (KILL_SWITCH, CLOSE)
+SWITCH: ExitCause = "switch"  # ... and of one bot's, closed before a strategy switch
+_SELLING_KINDS = (KILL_SWITCH, CLOSE, SWITCH)
 
 
 class Stoppable(Protocol):
@@ -77,7 +80,7 @@ class _Selling:
     exchange: str
     symbol: str
     command_id: UUID | None  # None if the command is unknown (an old exit without one)
-    kind: ExitCause = KILL_SWITCH  # or CLOSE: one bot's, from the Bots page
+    kind: ExitCause = KILL_SWITCH  # or CLOSE or SWITCH: one bot's, from the Bots page
 
 
 class KillSwitch:
@@ -105,6 +108,10 @@ class KillSwitch:
     def selling(self) -> list[tuple[int, str]]:
         """The (bot, symbol) positions it's still selling."""
         return list(self._selling)
+
+    def sells_for(self, bot_id: int) -> bool:
+        """Whether it's still selling a position of bot `bot_id`."""
+        return any(selling_bot == bot_id for selling_bot, _ in self._selling)
 
     async def kill(self, command: KillCommand) -> KillReply:
         """Carry out `command` (module docstring) and say what it did.
@@ -147,14 +154,15 @@ class KillSwitch:
         return reply
 
     async def close_bot(
-        self, bot_id: int, command_id: UUID
+        self, bot_id: int, command_id: UUID, *, kind: ExitCause = CLOSE
     ) -> tuple[list[Closing], list[NotClosed]]:
         """Sell bot `bot_id`'s open positions until they're gone, as the kill switch does,
-        with exits of kind `close`. Stop the bot first, so it doesn't buy them back."""
+        with exits of kind `kind`. Stop the bot first, or hold it back while `sells_for`
+        it (a switch, D51), so it doesn't buy them back or sell them twice."""
         closing: list[Closing] = []
         not_closed: list[NotClosed] = []
         async with self._lock:
-            for selling in await self._open_positions(command_id, bot_id=bot_id, kind=CLOSE):
+            for selling in await self._open_positions(command_id, bot_id=bot_id, kind=kind):
                 self._selling[(selling.bot_id, selling.symbol)] = selling
                 quote = await self._quotes.latest(selling.exchange, selling.symbol)
                 result = await self._sell_safely(selling, quote)

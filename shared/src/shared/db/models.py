@@ -35,7 +35,8 @@ ORDER_STATUSES = ("open", "closed", "canceled", "rejected")
 BOT_STATUSES = ("running", "paused", "stopped")
 # Must match engine.risk.limits.Decision (a test checks this).
 RISK_DECISIONS = ("allowed", "blocked", "resized")
-# What a strategy switch (P6) does with an open position.
+# What a strategy switch does with an open position. Must match
+# shared.commands.SwitchPolicy (a test checks this).
 SWITCH_POLICIES = ("keep", "close_first", "hand_over")
 # The default sizing (engine.risk.sizing.AllIn): spend all the free cash, as before P4.
 ALL_IN_SIZING = '{"mode": "all_in"}'
@@ -146,7 +147,8 @@ class BotRow(Base):
     active_strategy_config_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("strategy_configs.id", use_alter=True)
     )
-    switch_policy: Mapped[str] = mapped_column(Text, server_default="keep")  # used from P6
+    # What a strategy switch does with an open position (shared.commands.SwitchPolicy, D51).
+    switch_policy: Mapped[str] = mapped_column(Text, server_default="keep")
     # How much each buy spends (engine/risk/sizing.py, D39), validated when loaded.
     sizing: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=ALL_IN_SIZING)
     # When a position is sold whatever the strategy says (engine/risk/stops.py, D40); {} is none.
@@ -170,7 +172,8 @@ class StrategyConfigRow(Base):
     version: Mapped[int] = mapped_column(Integer)  # the strategy's version when this was made
     params: Mapped[dict[str, Any]] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    created_by: Mapped[str] = mapped_column(Text)  # e.g. "cli"; "regime" from P6
+    # Who made it: "cli", or a command's source ("dashboard"); "regime" from P6-4.
+    created_by: Mapped[str] = mapped_column(Text)
 
 
 # --- Trading (P3): written by the brokers ---------------------------------------------

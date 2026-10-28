@@ -47,6 +47,8 @@ export type BotSetup = {
   timeframe: string;
   mode: Mode;
   status: BotStatus;
+  switch_policy: SwitchPolicy;
+  active_strategy_config_id: number | null;
   strategy: string | null;
   strategy_version: number | null;
   params: Record<string, unknown> | null;
@@ -77,10 +79,40 @@ export type BotReply = {
     filled: Decimal | null;
   }[];
   not_closed: { bot_id: number; symbol: string; reason: string }[];
+  /** A switch's new strategy config; null if only the policy changed. */
+  strategy_config_id: number | null;
   took_ms: number;
 };
 
 export type Settings = Record<string, number | string>;
+
+/** What a strategy switch does with the bot's open position (D51, `bots.switch_policy`). */
+export type SwitchPolicy = "keep" | "close_first" | "hand_over";
+
+export const SWITCH_POLICIES: { value: SwitchPolicy; label: string; hint: string }[] = [
+  {
+    value: "keep",
+    label: "Keep",
+    hint: "the strategy that bought it still decides when to sell it (and its stops stay); the new one makes the next buy",
+  },
+  {
+    value: "close_first",
+    label: "Close first",
+    hint: "sold now, until it's gone; the new strategy starts with no position",
+  },
+  {
+    value: "hand_over",
+    label: "Hand over",
+    hint: "the new strategy decides when to sell it; its stops stay",
+  },
+];
+
+/** A strategy switch, as `POST /bots/{id}/strategy` takes it. */
+export type StrategySwitch = {
+  strategy: string;
+  params: Settings;
+  policy: SwitchPolicy;
+};
 
 export type NewBot = {
   name: string;

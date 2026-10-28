@@ -1,6 +1,6 @@
 """The Bots page's API (backend/bots/, D47): the list and the catalog are read from the
-database and Redis; create, start, pause and stop are commands to the engine, over the
-Redis command list, answered with its reply.
+database and Redis; create, start, pause, stop and a strategy switch (D51) are commands
+to the engine, over the Redis command list, answered with its reply.
 
 A stand-in for the engine pops each command and replies; the engine's side is tested in
 engine/tests/test_bot_control.py.
@@ -23,6 +23,7 @@ from shared.commands import (
     Closing,
     Command,
     CreateBotCommand,
+    SwitchStrategyCommand,
     reply_key,
 )
 from shared.db.models import BotRow, PaperBalanceRow, StrategyConfigRow
@@ -122,6 +123,58 @@ async def test_start_pause_and_stop_send_their_command(api: Api) -> None:
         assert response.json()["closing"][0]["amount"] == "0.5"
 
 
+async def test_a_switch_sends_the_new_strategy_and_policy(api: Api) -> None:
+    await api.login()
+    closing = Closing(bot_id=3, symbol="BTC/USDT", amount=Decimal("0.5"))
+    engine = asyncio.create_task(
+        engine_replies(api, bot_id=3, status="running", strategy_config_id=8, closing=[closing])
+    )
+
+    response = await api.client.post(
+        "/bots/3/strategy",
+        json={"strategy": "rsi_mean_reversion", "params": {"period": 7}, "policy": "close_first"},
+    )
+    command = await engine
+
+    assert response.status_code == 200
+    assert (response.json()["strategy_config_id"], response.json()["closing"][0]["amount"]) == (
+        8,
+        "0.5",
+    )
+    assert isinstance(command, SwitchStrategyCommand)
+    assert (command.bot_id, command.strategy, command.params, command.policy) == (
+        3,
+        "rsi_mean_reversion",
+        {"period": 7},
+        "close_first",
+    )
+    assert (command.source, command.expires_at) == ("dashboard", T0 + timedelta(seconds=1))
+
+
+async def test_a_switch_with_an_unknown_policy_or_field_never_reaches_the_engine(
+    api: Api,
+) -> None:
+    await api.login()
+    good = {"strategy": "rsi_mean_reversion", "params": {}, "policy": "keep"}
+
+    for body in ({**good, "policy": "sell_all"}, {**good, "x": 1}, {"strategy": "ema_crossover"}):
+        assert (await api.client.post("/bots/3/strategy", json=body)).status_code == 422, body
+    assert await api.redis.llen(COMMANDS_KEY) == 0
+
+
+async def test_the_engines_refusal_of_a_switch_is_a_422(api: Api) -> None:
+    await api.login()
+    why = "it's still warming up: switch it once it's in the engine"
+    engine = asyncio.create_task(engine_replies(api, ok=False, error=why))
+
+    response = await api.client.post(
+        "/bots/3/strategy", json={"strategy": "ema_crossover", "policy": "hand_over"}
+    )
+    await engine
+
+    assert (response.status_code, response.json()["detail"]) == (422, why)
+
+
 async def test_with_no_reply_the_command_expires(api: Api) -> None:
     await api.login()
 
@@ -187,6 +240,7 @@ async def test_the_list_has_each_bots_setup(api: Api) -> None:
         "currency": "USDT",
     }
     assert (first["sizing"], first["stops"]["stop_loss"]["percent"]) == ({"mode": "all_in"}, "3")
+    assert (first["switch_policy"], first["active_strategy_config_id"]) == ("keep", 1)
     assert first["paused_reason"] == "paused from dashboard"
     assert (second["name"], second["status"], second["strategy"], second["cash"]) == (
         "bare",

@@ -1,8 +1,9 @@
-"""The Bots page's commands (control/bots.py, D47), against a real TimescaleDB and Redis
-(see shared.testing), a real PaperDesk, KillSwitch and BotRunner. The market and the
-latest price are fakes, with test_kill_switch.py's numbers: EMA crossover 3/5, 30 flat
-candles at 100, then a close at 110 is a BUY. With 1000 USDT, all-in, that buys 9.0768
-BTC at 110. Slippage 0.05%: a sell at bid B is limited to B x 0.9995, rounded down.
+"""The Bots page's commands (control/bots.py, D47; the strategy switch, D51), against a
+real TimescaleDB and Redis (see shared.testing), a real PaperDesk, KillSwitch and
+BotRunner. The market and the latest price are fakes, with test_kill_switch.py's
+numbers: EMA crossover 3/5, 30 flat candles at 100, then a close at 110 is a BUY. With
+1000 USDT, all-in, that buys 9.0768 BTC at 110. Slippage 0.05%: a sell at bid B is
+limited to B x 0.9995, rounded down.
 """
 
 import asyncio
@@ -11,7 +12,7 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 from redis.asyncio import Redis
@@ -36,10 +37,12 @@ from shared.commands import (
     BotReply,
     Closing,
     CreateBotCommand,
+    SwitchPolicy,
+    SwitchStrategyCommand,
     reply_key,
     send,
 )
-from shared.db.models import BotRow, RiskEventRow, StrategyConfigRow
+from shared.db.models import SWITCH_POLICIES, BotRow, OrderRow, RiskEventRow, StrategyConfigRow
 from shared.db.session import make_engine
 from shared.prices import PriceUpdate
 from shared.testing import set_limits
@@ -55,6 +58,7 @@ RULES = MarketRules(
     min_amount=Decimal("0.0001"),
     min_cost=Decimal("1"),
 )
+RSI: dict[str, Any] = {"period": 2, "oversold": 30, "overbought": 70}
 
 
 def d(value: str) -> Decimal:
@@ -150,6 +154,7 @@ class Setup:
             CandleStore(self.db),
             self.db,
             stream=quiet_stream,
+            selling=lambda bot_id: self.kill_switch.sells_for(bot_id),  # as main.py wires it
             clock=self.clock,
         )
         self.runner = runner
@@ -184,8 +189,25 @@ class Setup:
             expires_at=self.clock.now + timedelta(seconds=10),
         )
 
-    async def created(self, name: str = "btc-ema") -> int:
-        reply = await self.control.handle(self.create(name))
+    def switch(
+        self,
+        bot_id: int,
+        policy: SwitchPolicy,
+        strategy: str = "rsi_mean_reversion",
+        params: dict[str, Any] | None = None,
+    ) -> SwitchStrategyCommand:
+        return SwitchStrategyCommand(
+            bot_id=bot_id,
+            strategy=strategy,
+            params=RSI if params is None else params,
+            policy=policy,
+            source="test",
+            sent_at=self.clock.now,
+            expires_at=self.clock.now + timedelta(seconds=10),
+        )
+
+    async def created(self, name: str = "btc-ema", **fields: Any) -> int:
+        reply = await self.control.handle(self.create(name, **fields))
         assert reply.ok and reply.bot_id is not None, reply
         return reply.bot_id
 
@@ -203,6 +225,18 @@ class Setup:
         self.quotes.set(bid="109.9", ask="110")
         await runner.on_closed(SERIES, candle(30, "110"))
         return runner
+
+    async def bought_running(self, runner: BotRunner, bot_id: int) -> None:
+        """As `bought`, on `runner` while it runs (inside `running()`), so it can switch."""
+        assert (await self.control.handle(self.command("start", bot_id))).ok
+        await until(lambda: runner.running == [bot_id])
+        await self.closes(runner, 30, "110", bid="109.9")
+
+    async def closes(self, runner: BotRunner, i: int, close: str, *, bid: str) -> None:
+        """Candle `i` closes at `close`, 2 s ago, with the market at `bid` / `bid` + 0.1."""
+        self.clock.now = T0 + (i + 1) * MINUTE + timedelta(seconds=2)
+        self.quotes.set(bid=bid)
+        await runner.on_closed(SERIES, candle(i, close))
 
     async def price(self, runner: BotRunner, *, bid: str, size: str = "50") -> None:
         """A price a second on, as the engine's feed hands it out."""
@@ -488,6 +522,321 @@ async def test_a_restart_carries_on_a_close(setup: Setup) -> None:
     assert await exit_of(setup, "b1-202610221230-x2") == ("closed", d("5.0768"), "close")
 
 
+# --- Switch (P6-1, D51) -------------------------------------------------------------------
+#
+# Bought at 110 by EMA 3/5 (config 1), then switched to RSI(2) 30/70 (config 2). On
+# candle 31, flat at 110, RSI is still 100 (only gains since the jump), so RSI says SELL
+# and EMA holds. On candle 32 at 90, EMA crosses down: SELL. On candle 33 at 100, RSI
+# rises from 11.1 back through 30 to 52.9: BUY.
+
+
+async def orders(setup: Setup, bot_id: int) -> list[tuple[str, str, Decimal, Any]]:
+    """The bot's orders, oldest first: client order ID, status, filled, and the config
+    whose signal placed it (None for an exit)."""
+    async with setup.db.connect() as conn:
+        rows = (
+            await conn.execute(
+                select(OrderRow.client_order_id, OrderRow.status, OrderRow.filled, OrderRow.reason)
+                .where(OrderRow.bot_id == bot_id)
+                .order_by(OrderRow.id)
+            )
+        ).all()
+    return [
+        (
+            r.client_order_id,
+            r.status,
+            r.filled,
+            r.reason["strategy_config"]["id"] if "signal" in r.reason else None,
+        )
+        for r in rows
+    ]
+
+
+BUY = ("b1-202610221230-b", "closed", d("9.0768"), 1)
+
+
+def test_switch_policies_match_the_database_check() -> None:
+    assert get_args(SwitchPolicy) == SWITCH_POLICIES
+
+
+async def test_hand_over_lets_the_new_config_sell_the_position(setup: Setup) -> None:
+    bot_id = await setup.created()
+    runner = setup.new_runner([])
+    async with running(runner):
+        await setup.bought_running(runner, bot_id)
+
+        reply = await setup.control.handle(setup.switch(bot_id, "hand_over"))
+
+        assert (reply.ok, reply.status, reply.strategy_config_id) == (True, "running", 2)
+        assert (reply.closing, reply.not_closed) == ([], [])
+        await until(lambda: runner.switching == [])
+        with capture_logs() as logs:
+            await setup.closes(runner, 31, "110", bid="109.9")
+
+    assert [log["event"] for log in logs if log["event"].startswith("bot.switch")] == [
+        "bot.switched"
+    ]
+    # RSI's SELL, at the bid: the whole position, in the config the order names.
+    assert await orders(setup, bot_id) == [
+        BUY,
+        ("b1-202610221231-s", "closed", d("9.0768"), 2),
+    ]
+    assert await setup.desk.risk.position(bot_id, BTC) is None
+    row = await setup.bot_row(bot_id)
+    assert (row.active_strategy_config_id, row.switch_policy) == (2, "hand_over")
+    async with setup.db.connect() as conn:
+        config = (
+            await conn.execute(select(StrategyConfigRow).where(StrategyConfigRow.id == 2))
+        ).one()
+    assert (config.bot_id, config.strategy, config.version, config.created_by) == (
+        bot_id,
+        "rsi_mean_reversion",
+        1,
+        "test",
+    )
+    assert config.params == {"period": 2, "oversold": 30.0, "overbought": 70.0}
+
+
+async def test_hand_over_keeps_the_trades_stops(setup: Setup) -> None:
+    bot_id = await setup.created(stops={"stop_loss": {"kind": "percent", "percent": "3"}})
+    runner = setup.new_runner([])
+    async with running(runner):
+        await setup.bought_running(runner, bot_id)  # stop at 110 x 0.97 = 106.7
+        assert (await setup.control.handle(setup.switch(bot_id, "hand_over"))).ok
+        await until(lambda: runner.switching == [])
+        await setup.closes(runner, 31, "107", bid="106.9")  # RSI: 62.5, so no SELL
+
+        await setup.price(runner, bid="106.5")
+
+    assert await exit_of(setup, "b1-202610221230-x1") == ("closed", d("9.0768"), "stop_loss")
+    assert await setup.desk.risk.position(bot_id, BTC) is None
+
+
+async def test_keep_leaves_the_position_to_the_config_that_bought_it(setup: Setup) -> None:
+    bot_id = await setup.created()
+    runner = setup.new_runner([])
+    async with running(runner):
+        await setup.bought_running(runner, bot_id)
+
+        reply = await setup.control.handle(setup.switch(bot_id, "keep"))
+
+        assert (reply.ok, reply.strategy_config_id) == (True, 2)
+        await until(lambda: runner.switching == [])
+        with capture_logs() as logs:
+            await setup.closes(runner, 31, "110", bid="109.9")  # RSI: SELL; EMA: hold
+        (skipped,) = [log for log in logs if log["event"] == "bot.skipped"]
+        assert skipped["reason"] == (
+            "its position is strategy config 1's to sell (switched with keep)"
+        )
+        assert await orders(setup, bot_id) == [BUY]
+        assert await setup.desk.risk.position(bot_id, BTC) == Position(
+            amount=d("9.0768"), avg_entry=d("110")
+        )
+        # A restart now would carry on the same way.
+        (loaded,) = await load_bots(setup.db, "mexc")
+        assert loaded.strategy_config_id == 2
+        assert loaded.keeper is not None and loaded.keeper.strategy_config_id == 1
+
+        await setup.closes(runner, 32, "90", bid="89.9")  # EMA's SELL, as config 1's
+        with capture_logs() as logs:
+            await setup.closes(runner, 33, "100", bid="99.9")  # flat: RSI's BUY
+
+    assert [log["event"] for log in logs if log["event"] == "bot.keeper_done"] == [
+        "bot.keeper_done"
+    ]
+    (*_, sell, buy) = await orders(setup, bot_id)
+    assert sell == ("b1-202610221232-s", "closed", d("9.0768"), 1)
+    assert (buy[0], buy[1], buy[3]) == ("b1-202610221233-b", "closed", 2)
+    (loaded,) = await load_bots(setup.db, "mexc")
+    assert loaded.keeper is None  # its own buy now
+
+
+async def test_a_keeper_that_no_longer_builds_hands_the_position_over(setup: Setup) -> None:
+    bot_id = await setup.created()
+    await setup.bought(bot_id)
+    setup.control.runner = None  # only the database: this is about loading it
+    assert (await setup.control.handle(setup.switch(bot_id, "keep"))).ok
+    # As if EMA crossover had moved on to version 2 since the buy.
+    async with setup.db.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE orders SET reason = jsonb_set(reason, '{strategy_config,version}', '99')"
+                " WHERE client_order_id = 'b1-202610221230-b'"
+            )
+        )
+
+    with capture_logs() as logs:
+        (loaded,) = await load_bots(setup.db, "mexc")
+
+    assert (loaded.strategy_config_id, loaded.keeper) == (2, None)
+    (failed,) = [log for log in logs if log["event"] == "bot.keep_failed"]
+    assert failed["handed_over_to"] == 2
+    assert failed["reason"] == "ema_crossover is now version 1, not version 99"
+
+
+async def test_close_first_sells_the_position_before_the_new_config_trades(
+    setup: Setup,
+) -> None:
+    bot_id = await setup.created()
+    runner = setup.new_runner([])
+    async with running(runner):
+        await setup.bought_running(runner, bot_id)
+        setup.quotes.set(bid="105", size="4")
+
+        reply = await setup.control.handle(setup.switch(bot_id, "close_first"))
+
+        # 105 x 0.9995 = 104.9475 -> 104.94; 4 BTC on offer at the bid.
+        assert (reply.ok, reply.status, reply.strategy_config_id) == (True, "running", 2)
+        assert reply.closing == [
+            Closing(
+                bot_id=bot_id,
+                symbol=BTC,
+                amount=d("9.0768"),
+                client_order_id="b1-202610221230-x1",
+                status="open",
+                filled=d("4"),
+            )
+        ]
+        assert await exit_of(setup, "b1-202610221230-x1") == ("open", d("4"), "switch")
+        assert setup.kill_switch.selling == [(bot_id, BTC)]
+        refused = await setup.control.handle(setup.switch(bot_id, "keep", params={"period": 3}))
+        assert not refused.ok and "still being sold" in (refused.error or "")
+        await until(lambda: runner.switching == [])
+
+        # Its candle: the new config takes over, but only takes the candle in; the exit
+        # stays (no leftovers cancelled), and RSI's SELL isn't placed.
+        with capture_logs() as logs:
+            await setup.closes(runner, 31, "110", bid="105")
+        assert [log["event"] for log in logs if log.get("bot_id") == bot_id] == [
+            "bot.switched",
+            "bot.waiting",
+        ]
+        assert await exit_of(setup, "b1-202610221230-x1") == ("open", d("4"), "switch")
+
+        await setup.price(runner, bid="104")  # replaced at 103.94, and filled
+
+        assert await exit_of(setup, "b1-202610221230-x2") == ("closed", d("5.0768"), "switch")
+        assert await setup.desk.risk.position(bot_id, BTC) is None
+        assert setup.kill_switch.selling == []
+        assert (await setup.bot_row(bot_id)).status == "running"  # unlike stop + close
+
+        with capture_logs() as logs:
+            await setup.closes(runner, 32, "110", bid="109.9")
+        assert "bot.waiting" not in [log["event"] for log in logs]
+    assert [o[0] for o in await orders(setup, bot_id)] == [
+        "b1-202610221230-b",
+        "b1-202610221230-x1",
+        "b1-202610221230-x2",
+    ]
+
+
+async def test_a_restart_carries_on_a_close_first(setup: Setup) -> None:
+    bot_id = await setup.created()
+    runner = setup.new_runner([])
+    async with running(runner):
+        await setup.bought_running(runner, bot_id)
+        setup.quotes.set(bid="105", size="4")
+        assert (await setup.control.handle(setup.switch(bot_id, "close_first"))).ok
+
+    # A new desk and kill switch on the same database, as after a crash.
+    setup.desk = PaperDesk(setup.db, setup.quotes, setup.market, clock=setup.clock)
+    setup.kill_switch = KillSwitch(
+        setup.desk.risk, setup.db, setup.market, setup.quotes, clock=setup.clock
+    )
+    (bot,) = await load_bots(setup.db, "mexc")
+    assert (bot.strategy.name, bot.keeper) == ("rsi_mean_reversion", None)
+    runner = setup.new_runner([bot])
+    await runner.recover()  # cancels -x1
+    assert await setup.kill_switch.resume() == [(bot_id, BTC)]
+    await runner.warm_up(SERIES)
+    with capture_logs() as logs:
+        await setup.closes(runner, 31, "110", bid="105")  # held: still selling
+    assert [log["event"] for log in logs if log.get("bot_id") == bot_id] == ["bot.waiting"]
+
+    await setup.price(runner, bid="104.2")
+
+    assert await exit_of(setup, "b1-202610221230-x2") == ("closed", d("5.0768"), "switch")
+
+
+async def test_a_new_policy_alone_adds_no_config(setup: Setup) -> None:
+    bot_id = await setup.created()
+    runner = setup.new_runner([])
+    async with running(runner):
+        await setup.bought_running(runner, bot_id)
+        assert (await setup.control.handle(setup.switch(bot_id, "keep"))).ok
+        assert (await load_bots(setup.db, "mexc"))[0].keeper is not None
+
+        reply = await setup.control.handle(
+            setup.switch(bot_id, "hand_over", strategy="rsi_mean_reversion")
+        )
+
+        assert (reply.ok, reply.strategy_config_id, reply.closing) == (True, None, [])
+        # Its trade is now the bot's config's to sell, in memory as after a restart.
+        (loaded,) = await load_bots(setup.db, "mexc")
+        assert (loaded.strategy_config_id, loaded.keeper) == (2, None)
+        await until(lambda: runner.switching == [])
+        await setup.closes(runner, 31, "110", bid="109.9")  # RSI's SELL, acted on
+
+    assert (await orders(setup, bot_id))[-1] == ("b1-202610221231-s", "closed", d("9.0768"), 2)
+    row = await setup.bot_row(bot_id)
+    assert (row.active_strategy_config_id, row.switch_policy) == (2, "hand_over")
+
+
+async def test_a_stopped_bot_switches_in_the_database_and_starts_with_it(setup: Setup) -> None:
+    bot_id = await setup.created()
+
+    reply = await setup.control.handle(setup.switch(bot_id, "close_first"))
+
+    assert (reply.ok, reply.status, reply.strategy_config_id) == (True, "stopped", 2)
+    assert (reply.closing, reply.not_closed) == ([], [])  # flat: nothing to close
+    bot, status = await load_bot(setup.db, "mexc", bot_id)
+    assert (bot.strategy.name, bot.strategy_config_id, status) == (
+        "rsi_mean_reversion",
+        2,
+        "stopped",
+    )
+
+
+@pytest.mark.parametrize(
+    ("bot_id", "strategy", "params", "policy", "error"),
+    [
+        (99, "rsi_mean_reversion", RSI, "keep", "there's no bot 99"),
+        (
+            1,
+            "rsi_mean_reversion",
+            {"period": 1},
+            "keep",
+            "period: Input should be greater than or equal to 2",
+        ),
+        (1, "moon", {}, "keep", "unknown strategy 'moon'; known: "),
+        (
+            1,
+            "ema_crossover",
+            {"fast": 3, "slow": 5},
+            "keep",
+            "nothing to change: it already runs that strategy with those params, and its "
+            "switch policy is keep",
+        ),
+    ],
+)
+async def test_switch_refuses_what_it_cant_do(
+    setup: Setup,
+    bot_id: int,
+    strategy: str,
+    params: dict[str, Any],
+    policy: SwitchPolicy,
+    error: str,
+) -> None:
+    await setup.created()
+
+    reply = await setup.control.handle(setup.switch(bot_id, policy, strategy, params))
+
+    assert not reply.ok and reply.error is not None
+    assert reply.error.startswith(error), reply.error
+    async with setup.db.connect() as conn:
+        assert len((await conn.execute(select(StrategyConfigRow))).all()) == 1
+
+
 # --- Over Redis ---------------------------------------------------------------------------
 
 
@@ -509,9 +858,11 @@ async def test_commands_over_redis_get_their_replies(setup: Setup) -> None:
         assert created is not None and created.ok and created.bot_id is not None
         started = await send(setup.redis, setup.command("start", created.bot_id), reply_within=5)
         refused = await send(setup.redis, setup.create(), reply_within=5)
+        switched = await send(setup.redis, setup.switch(created.bot_id, "keep"), reply_within=5)
 
     assert started is not None and (started.ok, started.status) == (True, "running")
     assert refused is not None and refused.error == "a bot named 'btc-ema' already exists"
+    assert switched is not None and (switched.ok, switched.strategy_config_id) == (True, 2)
 
 
 async def test_an_expired_command_is_dropped_unanswered(setup: Setup) -> None:
