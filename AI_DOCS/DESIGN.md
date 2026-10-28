@@ -38,7 +38,7 @@ Login (password + TOTP)
     ├── Backtests     run form → results (metrics, equity curve, trades)
     ├── History       trades & orders, filters, CSV export
     ├── Logs          engine decisions, risk events, errors
-    └── Settings      exchange keys, risk limits, alerts, 2FA
+    └── Settings      risk limits, exchange keys (alerts from P7; 2FA is reset on the server)
 ```
 
 ## 5. Screen inventory
@@ -53,7 +53,8 @@ Login (password + TOTP)
 | Backtests (run + results, D48) | 5.5 | ✅ |
 | History with filters and CSV export (orders and fills, D49) | 5.6 | ✅ |
 | Logs (engine log and risk events, D49) | 5.6 | ✅ |
-| Settings (keys, risk limits, alerts) | 5.7 | ⬜ |
+| Settings (risk limits and exchange keys, D50) | 5.7 | ✅ |
+| Alert preferences (per event, on Settings) | 7.1 | ⬜ |
 | Strategy switch markers and switch log | 6.4 | ⬜ |
 
 ## 6. Key UX decisions (proposed; validate during paper trading)
@@ -63,7 +64,7 @@ Login (password + TOTP)
 | UX1 | **Kill switch** | Red button in the header on every screen. One click opens a confirm dialog with two buttons: "Stop all bots" and "Stop all + close positions". Fast, but can't be triggered by a stray click. |
 | UX2 | **Mode badge** | A global and per-bot badge: neutral **PAPER**, high-contrast **LIVE**. Shown as text, not just color. |
 | UX3 | **Going live** | Switching a bot to LIVE needs the global live flag (D17) plus a dialog where you type the bot's name and enter a TOTP code. |
-| UX4 | **Loosening risk limits** | Raising any limit needs a TOTP code; lowering one doesn't. |
+| UX4 | **Loosening risk limits** | Raising any limit needs a TOTP code; lowering one doesn't. A shorter breaker window, or turning any setting off, counts as raising; saving exchange keys needs a code too (D50). |
 | UX5 | **Freshness** | The header shows "last price Xs ago" and engine heartbeat. Numbers older than the stale cutoff are greyed out and show a warning. |
 | UX6 | **Numbers** | Tabular (monospace) figures, right-aligned in tables, with currency code. P&L shows a +/− sign as well as green/red. |
 | UX7 | **Time** | Shown in Asia/Manila time, with UTC on hover. Stored as UTC. |
@@ -97,6 +98,9 @@ A placeholder until (if ever) a brand is needed: shadcn/ui's neutral theme, syst
   - ✅ `PageTabs`, `Filter` (D49): a page's views as links setting `?tab=` (so a view can be linked to and survives a reload), and a labelled control in a filter bar. Filters live in the URL.
   - ✅ `usePages` (D49): a newest-first list paged by id, with "Load older"; rows from an earlier query are never shown as the current one's.
   - ✅ History (D49): Orders | Fills with bot, market, side, status, why, and From/To **Manila days** (To included). Export CSV downloads exactly the rows the filters match, named by those days. A row's time is a button that opens `TradeExplainPanel` (UX9).
+  - ✅ `CodeDialog` (UX4, D50): asks for a TOTP code before a change that adds risk, with focus in the code field; a wrong or used code, or a lock, is shown in it. The code just used to sign in won't do (each is good once). P9's going-live (UX3) can reuse it.
+  - ✅ `RiskLimitsForm` (D50): a mode's limits and circuit breakers, each with its unit, an Off box and a one-line hint, the breaker pairs as one sentence ("Pause a bot after [3] failed orders within [10] min"). Lowering saves at once; anything the API calls looser opens `CodeDialog` listing each change ("Max drawdown: 10% → 15%").
+  - ✅ `ExchangeKeys` (D50): the stored accounts by label, exchange and the key's last 4 characters, with Replace and Delete (a confirmation, no code); a form with the reminder "spot read and trade only, never withdrawal, IP-locked", whose password fields are cleared once saved.
   - ✅ Logs (D49): the engine log (Show: everything / decisions / warnings and errors / errors; an event prefix, typed and applied on Enter; bot; service), newest first and read again every 5 s, held still while looking back. Levels are words, warnings and errors colored too. A row's fields open in a native `<details>`. Risk events: bot, decision, rule, days, with each one's inputs.
 - **Freshness cutoffs (UX5):** the engine is stale after 30 s without a heartbeat (as Docker's health check), a price after 10 s (the PaperBroker won't fill on an older one), and the feed itself after 5 s without a snapshot. A stale number is greyed out, with a warning icon and the word "stale". The prices shown are the oldest of the ones the engine streams, so a stuck stream can't hide behind a busy one.
 - Money arrives from the API as **strings**, not JSON numbers, so Decimal precision survives (D9).

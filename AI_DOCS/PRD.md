@@ -102,7 +102,7 @@ Phase tags: **[P0]** Setup · **[P1]** Market data · **[P2]** Strategies & back
 - [P5] Backtests: run a backtest and view its results.
 - [P5] History: trades and orders with filters and CSV export.
 - [P5] Logs page, and a large kill switch that's always visible.
-- [P5] Settings: exchange API keys (encrypted), risk limits, alert preferences.
+- [P5] Settings: exchange API keys (encrypted), risk limits. [P7] Alert preferences.
 - [P6] Strategy switches shown on the chart and in a switch log.
 
 ### 6.3 Alerts and remote control (Telegram)

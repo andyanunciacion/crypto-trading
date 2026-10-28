@@ -9,11 +9,21 @@ import type { BotReply, BotSetup, Catalog, NewBot } from "@/lib/bots";
 import { PAGE_ROWS, type FillRow, type OrderRow } from "@/lib/history";
 import type { LogPage, RiskEvent } from "@/lib/logs";
 import type { Chart, TradeExplanation } from "@/lib/market";
+import type {
+  ExchangeAccount,
+  Mode,
+  NewAccount,
+  NewKeys,
+  RiskSettings,
+  StoredRiskSettings,
+} from "@/lib/settings";
 
 export class ApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    /** The answer's JSON, for refusals that carry more than a message (`needs_code`). */
+    readonly body: unknown = null,
   ) {
     super(message);
   }
@@ -26,7 +36,7 @@ async function call(path: string, init?: RequestInit): Promise<Response> {
   });
   if (!response.ok) {
     const body: unknown = await response.json().catch(() => null);
-    throw new ApiError(response.status, detailOf(body) ?? `HTTP ${response.status}`);
+    throw new ApiError(response.status, detailOf(body) ?? `HTTP ${response.status}`, body);
   }
   return response;
 }
@@ -180,6 +190,54 @@ export async function logs(query: URLSearchParams, before?: string): Promise<Log
 /** Buys the risk layer blocked or shrank (D41, D42), newest first. */
 export async function riskEvents(query: URLSearchParams, before?: number): Promise<RiskEvent[]> {
   return (await (await call(`/risk-events?${paged(query, before)}`)).json()) as RiskEvent[];
+}
+
+/** Both modes' risk limits and circuit breakers (D41, D42), paper first. */
+export async function riskSettings(): Promise<StoredRiskSettings[]> {
+  return (await (await call("/risk-settings")).json()) as StoredRiskSettings[];
+}
+
+/**
+ * Save a mode's settings (D50). Loosening any of them needs a TOTP `code` (UX4): without
+ * a right one it throws an ApiError, 403 (or 429 while locked), whose body `codeNeeded`
+ * reads.
+ */
+export async function saveRiskSettings(
+  mode: Mode,
+  settings: RiskSettings,
+  code?: string,
+): Promise<StoredRiskSettings> {
+  const response = await call(`/risk-settings/${mode}`, {
+    method: "PUT",
+    body: JSON.stringify({ settings, code }),
+  });
+  return (await response.json()) as StoredRiskSettings;
+}
+
+/** The stored exchange accounts: never their keys, only the API key's last 4 characters. */
+export async function exchangeAccounts(): Promise<ExchangeAccount[]> {
+  return (await (await call("/exchange-accounts")).json()) as ExchangeAccount[];
+}
+
+/** Store an exchange's keys, encrypted (D50). Needs a TOTP code, as `saveRiskSettings`. */
+export async function addExchangeAccount(account: NewAccount): Promise<ExchangeAccount> {
+  const response = await call("/exchange-accounts", {
+    method: "POST",
+    body: JSON.stringify(account),
+  });
+  return (await response.json()) as ExchangeAccount;
+}
+
+export async function replaceExchangeKeys(id: number, keys: NewKeys): Promise<ExchangeAccount> {
+  const response = await call(`/exchange-accounts/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(keys),
+  });
+  return (await response.json()) as ExchangeAccount;
+}
+
+export async function deleteExchangeAccount(id: number): Promise<void> {
+  await call(`/exchange-accounts/${id}`, { method: "DELETE" });
 }
 
 export async function botCommand(

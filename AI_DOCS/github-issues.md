@@ -534,10 +534,38 @@ Done (D49):
 
 ### P5-7 · Settings
 `frontend` `backend` `security` `money` · Depends on: P5-1
-- [ ] Exchange keys encrypted with Fernet (`exchange_accounts`); never sent back to the browser
-- [ ] Risk limits editor (raising needs TOTP, UX4); alert preferences
+- [x] Exchange keys encrypted with Fernet (`exchange_accounts`); never sent back to the browser
+- [x] Risk limits editor (raising needs TOTP, UX4); ~~alert preferences~~ moved to P7-1 (D50)
 
 **Done when:** keys are stored encrypted (checked in the DB), and raising a limit without TOTP is rejected by the API.
+
+Done (D50):
+- `backend/tests/test_risk_settings.py` (done-when, limits):
+  - Loosening any of the nine settings without a code is a 403 that names what loosens, and the row is unchanged. So is turning one off, and an edit that's tighter on one side and looser on the other.
+  - The right code saves. The same code again is refused, and so is the code just used to sign in.
+  - A wrong code is refused and counts toward the lockout (committed, though the edit isn't). The 5th locks: 429, the right code refused unchecked, and sign-in locked too.
+  - Tightening, or turning a limit back on, needs no code. A code sent with a tightening isn't used up. The same values (`10.00` for `10`) write and log nothing. The two modes are separate rows.
+  - Bounds, half a pair, NaN, an unknown field or a missing one are 422s, and no 422 echoes its input.
+- `backend/tests/test_exchange_accounts.py` (done-when, keys):
+  - A stored key's columns are Fernet tokens (`gAAAA…`), not the plaintext, and decrypt to it with `ENCRYPTION_KEY`. No response (add, list, replace, 403, 409, seven kinds of 422) contains the key or secret, and neither do the logs.
+  - Adding or replacing needs a code; deleting doesn't. A label in use is a 409 that leaves the code unused.
+  - MEXC with `sandbox` is refused; Binance's testnet is allowed.
+- `shared/tests/test_risk.py`: which edits loosen, field by field, both ways (the two windows looser when shorter), off and on again, `10` vs `10.00`, and every setting has a direction. `RiskSettings` moved to `shared/risk.py`, and the engine's limit and breaker tests pass unchanged. `test_every_route_needs_auth.py` requires the six new routes.
+- `e2e/settings.spec.ts` (`pnpm e2e`):
+  - From the nav: lowering max drawdown to 8% saves with no prompt (8 in the database). Raising it to 15% opens the code dialog ("Max drawdown: 8% below the peak → 15% below the peak"), with focus in the code field. A five-minute-old code is refused and nothing is saved; a fresh one saves 15.
+  - A MEXC key is saved with a code: listed as "…Q7r5", the typed keys gone from the page's HTML. In the database, both columns are `gAAAA…` tokens with no plaintext in them.
+  - The seeded limits are put back afterwards. All 10 e2e tests pass (2026-10-28).
+- Checked by hand in Chrome (2026-10-28, the e2e stack on port 3100):
+  - Without a session, `PUT /risk-settings/paper` and `GET /exchange-accounts` are 401s. Signed in, a raise with no code is a 403 listing `max_drawdown_pct` 10 → 50. A 300-character secret is a 422 naming `body.api_secret` without echoing it.
+  - From the keyboard: drawdown 8 and Enter saves with no prompt, and focus goes to "Saved". Drawdown 12 with the price spike turned off opens the dialog listing all three changes (the pair goes off together), focus in the code field.
+  - A five-minute-old code: "wrong or already used code", the field cleared, focus kept, and `failed_logins` 1. A fresh code saves: drawdown 12, spike off.
+  - Exchange keys, in dark theme: a made-up MEXC key saved with a code, listed as "…K3y9". The typed values are gone from the page. The row holds `gAAAA…` tokens (140 characters), with no plaintext.
+  - Delete: the dialog opens with focus on Cancel; Delete removes the row and focus goes to the message.
+  - The Logs page lists every `api.risk_settings.changed`/`.refused` and `api.exchange_account.added` line. Light and dark themes; no console errors.
+- It found three things, fixed:
+  - **A second save, without the code, on every confirm.** The code dialog sat inside the limits form in the React tree. React events bubble through portals, so its submit also submitted the form: a code-less PUT 30 ms before each coded one. The answers could arrive in either order and reopen the dialog after a save. The dialog now sits outside the form and stops its submit from bubbling. `settings.spec.ts` submits with Enter and requires exactly one PUT per submit; it failed on the old build (an extra code-less PUT after each coded one) and passes now.
+  - All seven Off boxes had the same accessible name, and each row's `<legend>` wasn't a fieldset's first child, so it named nothing. Each row is now a labelled group, and each box is named for its setting ("Max drawdown: off").
+  - On the Price spike row, the long sentence pushed the Off box onto a line of its own. It now has its own column.
 
 ---
 
@@ -587,6 +615,7 @@ Done (D49):
 ### P7-1 · Telegram alerts
 `ops` · Depends on: P3-3
 - [ ] Alerts bot service consuming engine events; per-event toggles (`alert_settings`); daily summary
+- [ ] Alert preferences on the Settings page (moved from P5-7, D50): a toggle per event the service sends
 
 **Done when:** a paper trade, a risk block and an error each produce a Telegram message.
 

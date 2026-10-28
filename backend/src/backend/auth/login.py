@@ -8,14 +8,19 @@ attempts at once can't both use the same code or both slip under the lockout.
 Lockout: `MAX_FAILURES` wrong attempts in a row lock the user for `LOCK_MINUTES`.
 While locked, nothing is checked at all, so guesses get no answer either way. Once the
 lock has passed, the count starts again. A right sign-in resets it.
+
+A signed-in user is asked for a code again before loosening a risk limit or saving an
+exchange key (UX4, D50): `confirm_code`. A wrong one counts toward the same lockout, so
+a stolen session can't try codes until one fits.
 """
 
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Any
 
-from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy import Row, select, update
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from backend.auth.crypto import Secrets
 from backend.auth.passwords import DUMMY_HASH, hash_password, needs_rehash, verify_password
@@ -74,15 +79,7 @@ async def sign_in(
             secret = secrets.decrypt(user.totp_secret_enc)
             step = accepted_step(secret, code, now, user.totp_last_step)
         if step is None:
-            lock_passed = user.locked_until is not None  # (and not in force: checked above)
-            failures = 1 if lock_passed else user.failed_logins + 1
-            locked = now + timedelta(minutes=LOCK_MINUTES) if failures >= MAX_FAILURES else None
-            await conn.execute(
-                update(UserRow)
-                .where(UserRow.id == user.id)
-                .values(failed_logins=failures, locked_until=locked, updated_at=now)
-            )
-            return Wrong() if locked is None else Locked(locked)
+            return await _record_failure(conn, user, now)
         values: dict[str, object] = {
             "failed_logins": 0,
             "locked_until": None,
@@ -93,6 +90,51 @@ async def sign_in(
             values["password_hash"] = await asyncio.to_thread(hash_password, password)
         await conn.execute(update(UserRow).where(UserRow.id == user.id).values(values))
         return SignedIn(user.id, user.username, user.session_version)
+
+
+@dataclass(frozen=True)
+class Confirmed:
+    """The code was right (and is now used up)."""
+
+
+async def confirm_code(
+    conn: AsyncConnection, secrets: Secrets, user_id: int, code: str, now: datetime
+) -> Confirmed | Wrong | Locked:
+    """Check a signed-in user's TOTP code, in the caller's transaction, which then holds
+    the user's row until it ends.
+
+    The rules are the sign-in's: one step either side, each step once (so the code just
+    used to sign in is refused: wait for the next one), and while locked nothing is
+    checked. A wrong code counts as a failed sign-in and the caller must commit it,
+    whatever else it rolls back. A right one doesn't reset the count: only a full
+    sign-in does, so confirming codes can't buy a password guesser more tries.
+    """
+    user = (
+        await conn.execute(select(UserRow.__table__).where(UserRow.id == user_id).with_for_update())
+    ).one()
+    if user.locked_until is not None and user.locked_until > now:
+        return Locked(user.locked_until)
+    step = accepted_step(secrets.decrypt(user.totp_secret_enc), code, now, user.totp_last_step)
+    if step is None:
+        return await _record_failure(conn, user, now)
+    await conn.execute(
+        update(UserRow).where(UserRow.id == user.id).values(totp_last_step=step, updated_at=now)
+    )
+    return Confirmed()
+
+
+async def _record_failure(conn: AsyncConnection, user: Row[Any], now: datetime) -> Wrong | Locked:
+    """One more wrong attempt for `user` (a `users` row, read `FOR UPDATE`), and the lock
+    once there have been `MAX_FAILURES` in a row."""
+    lock_passed = user.locked_until is not None  # (and not in force: the caller checked)
+    failures = 1 if lock_passed else user.failed_logins + 1
+    locked = now + timedelta(minutes=LOCK_MINUTES) if failures >= MAX_FAILURES else None
+    await conn.execute(
+        update(UserRow)
+        .where(UserRow.id == user.id)
+        .values(failed_logins=failures, locked_until=locked, updated_at=now)
+    )
+    return Wrong() if locked is None else Locked(locked)
 
 
 async def session_user(db: AsyncEngine, user_id: int) -> SessionUser | None:
