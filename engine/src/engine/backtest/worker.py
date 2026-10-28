@@ -55,7 +55,7 @@ from shared.backtest_jobs import (
 from shared.commands import BLOCK_SECONDS
 from shared.config import Settings, load_settings
 from shared.db.session import make_engine
-from shared.logs import configure_logging
+from shared.logs import LogMirror, configure_logging
 
 HEARTBEAT_INTERVAL_SECONDS = 10
 # The Docker health check reads this file's modification time (see compose.yaml).
@@ -211,7 +211,8 @@ async def beat(stop: asyncio.Event) -> None:
             await asyncio.wait_for(stop.wait(), timeout=HEARTBEAT_INTERVAL_SECONDS)
 
 
-async def run(settings: Settings) -> None:
+async def run(settings: Settings, mirror: LogMirror | None = None) -> None:
+    """The worker until SIGTERM; with a `mirror`, its lines go to the Logs page (D49)."""
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     # As in engine/main.py: PID 1 in a container ignores SIGTERM without a handler.
@@ -226,10 +227,15 @@ async def run(settings: Settings) -> None:
         worker = BacktestWorker(redis, db)
         async with asyncio.TaskGroup() as tasks:
             tasks.create_task(beat(stop))
+            if mirror is not None:
+                tasks.create_task(mirror.ship(redis, stop))  # ends after `stop`
             working = tasks.create_task(worker.run())
             await stop.wait()
             working.cancel()
     finally:
+        if mirror is not None:
+            with contextlib.suppress(Exception):
+                await mirror.flush(redis)
         await redis.aclose()
         await db.dispose()
     log.info("backtest.worker.stopping")
@@ -238,8 +244,9 @@ async def run(settings: Settings) -> None:
 def main() -> None:
     # First, so a bad config stops the worker before it does anything else.
     settings = load_settings()
-    configure_logging(settings.log_level)
-    asyncio.run(run(settings))
+    mirror = LogMirror("backtester")
+    configure_logging(settings.log_level, mirror=mirror)
+    asyncio.run(run(settings, mirror))
 
 
 if __name__ == "__main__":

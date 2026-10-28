@@ -67,7 +67,7 @@
 3. [x] **Market:** Lightweight Charts candles with indicators and trade markers; trade explanation panel (UX9). Per bot, from stored candles; each indicator point over the strategy's own window (`shared/chart.py`, parity-tested); the engine writes the forming candle to Redis for display; trades explained from the order's stored reason (D46).
 4. [x] **Bots:** create, start, pause, stop; strategy params via a form generated from the schema; commands go to the engine via Redis. The engine carries out each command and answers (D47): bots are created stopped, start without an engine restart, and can be stopped with their position closed. Editing a bot's params is P6-1's hot-swap.
 5. [x] **Backtests:** run a backtest from the UI; view metrics, equity curve and trades.
-6. [ ] **History + Logs:** trades and orders with filters and CSV export; logs of decisions, risk events and errors.
+6. [x] **History + Logs:** trades and orders with filters and CSV export; logs of decisions, risk events and errors. History is orders and fills, exported with the database's exact values; the services mirror their log lines into a capped Redis stream for the Logs page, beside `risk_events` (D49).
 7. [ ] **Settings:** encrypted exchange keys, risk limits (raising one needs TOTP, UX4), alert preferences.
 
 **Exit criteria:** you can start a paper bot, watch it trade live on the chart, and stop it from the UI; Playwright covers login, bot control and the kill switch.

@@ -516,9 +516,21 @@ Done (D48):
 
 ### P5-6 · History and Logs
 `frontend` `backend` · Depends on: P5-2
-- [ ] Trades/orders with filters and CSV export; logs page
+- [x] Trades/orders with filters and CSV export; logs page
 
 **Done when:** CSV export matches the DB rows for a filtered range.
+
+Done (D49):
+- `backend/tests/test_history.py`: two bots, six orders around midnight (one at 23:59:59.999999, one at exactly 00:00), partial fills, fees in two currencies and a fee of 0.00000001. For eleven filter sets, every cell of `orders.csv` and `fills.csv` equals the text Postgres gives for the same rows from its own SQL (NUMERIC's digits, `to_char` UTC times). Also: exact digits (never `1E-8`), blank fees across currencies, an empty range is just the header, paging newest first, and nine bad filters are 422s.
+- `e2e/history.spec.ts` (`pnpm e2e`): four of e2e-bot's orders around Manila's midnights. With From and To set to 11 Sep, the table shows B and C only. Export CSV downloads `orders_2026-09-11_to_2026-09-11.csv`, which equals Postgres's own `COPY` of the same range cell for cell; the same for the three fills. A row's time opens the explanation. The Logs page: `bots.loaded` from the engine is listed, "Errors" hides it, and a seeded risk event shows with its detail. All 8 e2e tests pass (2026-10-28).
+- `shared/tests/test_logs.py`: INFO+ lines reach the stream with their service; DEBUG, the heartbeat and the mirror's own lines don't; Decimals stay exact; a full buffer drops the oldest and says how many; with Redis down nothing raises, `logs.mirror.failed` is logged once, and the lines ship once it's back; `ship()` flushes when stopped; the stream is capped. `backend/tests/test_logs_api.py`: paging by stream id, every filter, several event prefixes, filtering across scan batches, unreadable lines skipped, risk events filtered and paged. `test_every_route_needs_auth.py` requires the six new routes. All 916 Python tests pass.
+- Found running it: the kill switch test timed out at 30 s. The kill had worked; its sign-in had waited most of the 30 s for an unused TOTP step, because the new tests signed in just before. `freshCode` (`e2e/auth.ts`) now adds that wait to the test's time limit.
+- Checked by hand in Chrome (2026-10-28, the e2e stack on port 3100):
+  - History: Manila times, exact fees (0.06395001 USDT), the Fills tab from the URL's filters, a row's time opening the panel, and Escape returning focus to that button.
+  - Logs: lines from the engine and the API, "Decisions" (kill switch, bot commands), and the light theme.
+  - Risk events: the inputs open in place.
+  - No console errors.
+  - The stream: 63 lines in 5 min, ~380 bytes a line (~19 MB at the 50,000 cap).
 
 ### P5-7 · Settings
 `frontend` `backend` `security` `money` · Depends on: P5-1

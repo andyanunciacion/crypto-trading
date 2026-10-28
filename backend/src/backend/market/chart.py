@@ -37,6 +37,10 @@ MAX_CANDLES = 5000  # DESIGN §9: the chart pans and zooms smoothly with this ma
 
 log = structlog.get_logger()
 
+# What placed an order: "signal", or the exit's kind (stop_loss, trailing_stop,
+# take_profit, kill_switch, close), from its stored `reason`. History filters on it too.
+ORDER_KIND = func.coalesce(OrderRow.reason["exit"]["kind"].astext, "signal")
+
 
 class _Out(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -214,7 +218,7 @@ async def read_trades(
             OrderRow.id.label("order_id"),
             OrderRow.client_order_id,
             OrderRow.side,
-            func.coalesce(OrderRow.reason["exit"]["kind"].astext, "signal").label("kind"),
+            ORDER_KIND.label("kind"),
             fills.c.ts,
             fills.c.price,
             OrderRow.filled.label("amount"),

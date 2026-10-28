@@ -51,8 +51,8 @@ Login (password + TOTP)
 | Bots list (create/start/pause/stop, D47) | 5.4 | ✅ |
 | Bot detail and editing params (with history and rollback) | 6.1, 6.2 | ⬜ |
 | Backtests (run + results, D48) | 5.5 | ✅ |
-| History with filters and CSV export | 5.6 | ⬜ |
-| Logs | 5.6 | ⬜ |
+| History with filters and CSV export (orders and fills, D49) | 5.6 | ✅ |
+| Logs (engine log and risk events, D49) | 5.6 | ✅ |
 | Settings (keys, risk limits, alerts) | 5.7 | ⬜ |
 | Strategy switch markers and switch log | 6.4 | ⬜ |
 
@@ -94,6 +94,10 @@ A placeholder until (if ever) a brand is needed: shadcn/ui's neutral theme, syst
   - ✅ `BacktestForm` (D48): the market, days, cash, fee rate and slippage with the CLI's defaults (each fraction's hint shows it as a percent), what's stored of the series, then `StrategySetup`. Run shows "Queued… / Running…" and opens the result; the backtester's refusal is an alert in the form. Refused for too little stored history, it says how many days fit and how far to backfill, with a "Use N days" button. (The form can't say beforehand: the warm-up depends on the params, sizing and stops, which only the engine reads.)
   - ✅ `EquityChart` (D48): equity at each close (the first line slot, blue) with the starting cash dashed, and the drawdown in its own pane below (`loss`), never on a second scale. A legend shows the hovered candle's exact equity and drawdown; the trades table is the table view. One series, so no legend box.
   - ✅ `Ratio`, `Plain`: a fraction from the API shown as a percent by moving the point in the string (`shiftPoint`), and a plain ratio to two places (Sharpe, profit factor); "—" when there's none.
+  - ✅ `PageTabs`, `Filter` (D49): a page's views as links setting `?tab=` (so a view can be linked to and survives a reload), and a labelled control in a filter bar. Filters live in the URL.
+  - ✅ `usePages` (D49): a newest-first list paged by id, with "Load older"; rows from an earlier query are never shown as the current one's.
+  - ✅ History (D49): Orders | Fills with bot, market, side, status, why, and From/To **Manila days** (To included). Export CSV downloads exactly the rows the filters match, named by those days. A row's time is a button that opens `TradeExplainPanel` (UX9).
+  - ✅ Logs (D49): the engine log (Show: everything / decisions / warnings and errors / errors; an event prefix, typed and applied on Enter; bot; service), newest first and read again every 5 s, held still while looking back. Levels are words, warnings and errors colored too. A row's fields open in a native `<details>`. Risk events: bot, decision, rule, days, with each one's inputs.
 - **Freshness cutoffs (UX5):** the engine is stale after 30 s without a heartbeat (as Docker's health check), a price after 10 s (the PaperBroker won't fill on an older one), and the feed itself after 5 s without a snapshot. A stale number is greyed out, with a warning icon and the word "stale". The prices shown are the oldest of the ones the engine streams, so a stuck stream can't hide behind a busy one.
 - Money arrives from the API as **strings**, not JSON numbers, so Decimal precision survives (D9).
 
