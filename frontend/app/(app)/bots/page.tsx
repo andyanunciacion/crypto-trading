@@ -1,6 +1,7 @@
 "use client";
 
 import { Pause, Play, Square } from "lucide-react";
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
 import { BotWhy, StatusBadge } from "@/components/bot-status";
@@ -22,13 +23,13 @@ import {
 } from "@/components/ui/table";
 import { ApiError, botCommand, bots as fetchBots } from "@/lib/api";
 import {
-  SWITCH_POLICIES,
   describeParams,
   describeSizing,
   describeStops,
+  policyLabel,
+  switchedText,
   type BotReply,
   type BotSetup,
-  type StrategySwitch,
 } from "@/lib/bots";
 import { ENGINE_STALE_SECONDS, type Bot, type BotStatus, type Position } from "@/lib/overview";
 import { cn } from "@/lib/utils";
@@ -48,7 +49,8 @@ function problemText(error: unknown): string {
  * and its controls. Each control is a command the engine carries out (the API never
  * writes a bot), so the reply says what really happened. Pausing is one click (UX
  * principle 3); stopping asks, because a stopped bot's position is left unwatched.
- * Edit switches its strategy or params while it runs (D51).
+ * Edit switches its strategy or params while it runs (D51); a bot's name opens its
+ * detail page, with its strategy history and rollback (D52).
  */
 export default function BotsPage() {
   const feed = useFeed();
@@ -187,7 +189,15 @@ export default function BotsPage() {
                 const position = positions.get(bot.id);
                 return (
                   <TableRow key={bot.id} data-bot={bot.name}>
-                    <TableCell className="font-medium">{bot.name}</TableCell>
+                    <TableCell className="font-medium">
+                      {/* Its detail page: setup and strategy history, with rollback (D52). */}
+                      <Link
+                        href={`/bots/${bot.id}`}
+                        className="decoration-muted-foreground hover:decoration-foreground underline underline-offset-4"
+                      >
+                        {bot.name}
+                      </Link>
+                    </TableCell>
                     <TableCell>
                       <div className="flex flex-col items-start gap-1">
                         <StatusBadge status={bot.status} />
@@ -235,7 +245,7 @@ export default function BotsPage() {
                           onSwitched={(reply, change) => {
                             setMessage({
                               kind: "status",
-                              text: switched(bot, change, reply, position !== undefined),
+                              text: switchedText(bot, change, reply, position !== undefined),
                             });
                             refresh();
                           }}
@@ -313,31 +323,6 @@ function EngineNote({
       {inEngine ? "in the engine" : "warming up…"}
     </span>
   );
-}
-
-function policyLabel(policy: string): string {
-  return SWITCH_POLICIES.find((p) => p.value === policy)?.label ?? policy;
-}
-
-function switched(
-  bot: BotSetup,
-  change: StrategySwitch,
-  reply: BotReply,
-  holding: boolean,
-): string {
-  const took = `(${reply.took_ms} ms)`;
-  if (reply.strategy_config_id === null) {
-    return `${bot.name}: on a switch, ${policyLabel(change.policy).toLowerCase()} ${took}.`;
-  }
-  const when =
-    bot.status === "stopped" ? "it runs it once started" : "it trades with it from its next candle";
-  const parts = [`Switched ${bot.name} to ${change.strategy} ${took}: ${when}`];
-  if (reply.closing.length > 0) parts.push("selling its position until it's gone first");
-  for (const left of reply.not_closed) parts.push(`couldn't close ${left.symbol}: ${left.reason}`);
-  if (holding && change.policy === "keep") {
-    parts.push("its open position is still sold by the strategy that bought it");
-  }
-  return `${parts.join("; ")}.`;
 }
 
 function said(name: string, action: "start" | "pause" | "stop", reply: BotReply): string {

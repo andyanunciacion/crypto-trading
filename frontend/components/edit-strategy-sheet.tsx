@@ -5,6 +5,7 @@ import { useState, type FormEvent } from "react";
 
 import { allValid } from "@/components/strategy-setup";
 import { StrategyParamsForm } from "@/components/strategy-params-form";
+import { SwitchPolicyFields } from "@/components/switch-policy-fields";
 import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/components/ui/native-select";
 import {
@@ -17,7 +18,6 @@ import {
 } from "@/components/ui/sheet";
 import { ApiError, catalog as fetchCatalog, switchStrategy } from "@/lib/api";
 import {
-  SWITCH_POLICIES,
   initialValues,
   toSettings,
   type BotReply,
@@ -215,30 +215,12 @@ function SwitchForm({
         )}
       </fieldset>
 
-      <fieldset className="flex flex-col gap-2" aria-describedby="switch-policy-note">
-        <legend className="mb-2 text-sm font-semibold">Its open position</legend>
-        <p id="switch-policy-note" className="text-muted-foreground -mt-2 text-xs">
-          {holding
-            ? "It holds a position now: this decides what happens to it."
-            : "It holds no position now. The choice is kept for its next switch."}
-        </p>
-        {SWITCH_POLICIES.map((p) => (
-          <label key={p.value} className="flex items-start gap-2 text-sm">
-            <input
-              type="radio"
-              name="policy"
-              value={p.value}
-              checked={policy === p.value}
-              onChange={() => setPolicy(p.value)}
-              className="accent-primary mt-0.5 size-4 shrink-0"
-            />
-            <span>
-              <span className="font-medium">{p.label}</span>
-              <span className="text-muted-foreground">: {p.hint}</span>
-            </span>
-          </label>
-        ))}
-      </fieldset>
+      <SwitchPolicyFields
+        idPrefix="switch"
+        policy={policy}
+        holding={holding}
+        onChange={setPolicy}
+      />
 
       {error !== null && (
         <p role="alert" className="text-loss text-sm">

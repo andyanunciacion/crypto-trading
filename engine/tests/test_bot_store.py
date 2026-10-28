@@ -7,7 +7,7 @@ from decimal import Decimal
 
 import pytest
 from sqlalchemy import URL, insert, text, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from structlog.testing import capture_logs
 
@@ -135,6 +135,32 @@ async def test_names_are_unique(db: AsyncEngine) -> None:
         await ema_bot(db)
 
 
+@pytest.mark.parametrize(
+    "change",
+    [
+        'UPDATE strategy_configs SET params = \'{"fast": 5, "slow": 21}\'',
+        "DELETE FROM strategy_configs",
+    ],
+)
+async def test_a_config_never_changes(db: AsyncEngine, change: str) -> None:
+    # Append-only, in the database itself (migration 0013, D52): a change adds a row.
+    bot_id = await ema_bot(db)
+
+    with pytest.raises(DBAPIError, match="strategy_configs is append-only: add a row instead"):
+        async with db.begin() as conn:
+            await conn.execute(text(change))
+
+    added = await new_config(db, bot_id, version=1, params={"fast": 5, "slow": 21})
+    async with db.connect() as conn:
+        rows = (
+            await conn.execute(text("SELECT id, params FROM strategy_configs ORDER BY id"))
+        ).all()
+    assert [tuple(r) for r in rows] == [
+        (1, {"fast": 9, "slow": 21}),
+        (added, {"fast": 5, "slow": 21}),
+    ]
+
+
 async def test_stopped_bots_dont_load(db: AsyncEngine) -> None:
     await set_bot(db, await ema_bot(db), status="stopped")
 
@@ -220,18 +246,39 @@ async def test_a_bot_pointing_at_another_bots_config_is_refused(db: AsyncEngine)
     ]
 
 
+async def new_config(db: AsyncEngine, bot_id: int, *, version: int, params: object) -> int:
+    """Add an EMA crossover config to the bot as no command would, and make it active.
+
+    Configs are append-only (D52): a test can't change one, so it adds one.
+    """
+    async with db.begin() as conn:
+        config_id: int = (
+            await conn.execute(
+                insert(StrategyConfigRow)
+                .values(
+                    bot_id=bot_id,
+                    strategy="ema_crossover",
+                    version=version,
+                    params=params,
+                    created_by="test",
+                )
+                .returning(StrategyConfigRow.id)
+            )
+        ).scalar_one()
+    await set_bot(db, bot_id, active_strategy_config_id=config_id)
+    return config_id
+
+
 async def test_a_config_from_an_older_strategy_version_is_refused(db: AsyncEngine) -> None:
     bot_id = await ema_bot(db)
-    async with db.begin() as conn:
-        await conn.execute(update(StrategyConfigRow).values(version=0))
+    await new_config(db, bot_id, version=0, params={"fast": 9, "slow": 21})
 
     assert await refusals(db) == [(bot_id, "ema_crossover is now version 1, not version 0")]
 
 
 async def test_one_bad_bot_doesnt_stop_the_others(db: AsyncEngine) -> None:
     bad = await ema_bot(db, "bad")
-    async with db.begin() as conn:
-        await conn.execute(update(StrategyConfigRow).values(params={"fast": 30, "slow": 21}))
+    await new_config(db, bad, version=1, params={"fast": 30, "slow": 21})
     good = await create_bot(
         db,
         name="good",

@@ -162,7 +162,11 @@ class BotRow(Base):
 
 
 class StrategyConfigRow(Base):
-    """A strategy with specific params, for one bot. Append-only: a change adds a row."""
+    """A strategy with specific params, for one bot.
+
+    Append-only: a change adds a row, and a trigger refuses any UPDATE or DELETE
+    (migration 0013, D52). So each row is when that config became the bot's.
+    """
 
     __tablename__ = "strategy_configs"
 
@@ -174,6 +178,8 @@ class StrategyConfigRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     # Who made it: "cli", or a command's source ("dashboard"); "regime" from P6-4.
     created_by: Mapped[str] = mapped_column(Text)
+    # A rollback's copy (P6-2): the earlier config of this bot whose strategy and params it copies.
+    restored_from: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("strategy_configs.id"))
 
 
 # --- Trading (P3): written by the brokers ---------------------------------------------

@@ -324,9 +324,20 @@ async def test_trades_before_the_first_candle_shown_are_left_out(seeded: Api) ->
 
 
 async def test_a_bot_whose_lines_can_t_be_drawn_still_has_its_candles(seeded: Api) -> None:
-    async with seeded.db.begin() as conn:
+    async with seeded.db.begin() as conn:  # configs are append-only (D52): add one
+        config_id = await conn.scalar(
+            insert(StrategyConfigRow)
+            .values(
+                bot_id=1,
+                strategy="martingale",  # no chart lines for it
+                version=1,
+                params={},
+                created_by="test",
+            )
+            .returning(StrategyConfigRow.id)
+        )
         await conn.execute(
-            update(StrategyConfigRow).values(strategy="martingale")  # no chart lines for it
+            update(BotRow).where(BotRow.id == 1).values(active_strategy_config_id=config_id)
         )
     body = await get_json(seeded, "/bots/1/chart")
 

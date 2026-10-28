@@ -16,7 +16,7 @@ from typing import Any, get_args
 
 import pytest
 from redis.asyncio import Redis
-from sqlalchemy import URL, select, text
+from sqlalchemy import URL, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 from structlog.testing import capture_logs
 
@@ -37,6 +37,7 @@ from shared.commands import (
     BotReply,
     Closing,
     CreateBotCommand,
+    RollbackCommand,
     SwitchPolicy,
     SwitchStrategyCommand,
     reply_key,
@@ -206,6 +207,16 @@ class Setup:
             expires_at=self.clock.now + timedelta(seconds=10),
         )
 
+    def rollback(self, bot_id: int, config_id: int, policy: SwitchPolicy) -> RollbackCommand:
+        return RollbackCommand(
+            bot_id=bot_id,
+            config_id=config_id,
+            policy=policy,
+            source="test",
+            sent_at=self.clock.now,
+            expires_at=self.clock.now + timedelta(seconds=10),
+        )
+
     async def created(self, name: str = "btc-ema", **fields: Any) -> int:
         reply = await self.control.handle(self.create(name, **fields))
         assert reply.ok and reply.bot_id is not None, reply
@@ -288,6 +299,40 @@ async def until(check: Callable[[], bool]) -> None:
     async with asyncio.timeout(5):
         while not check():  # noqa: ASYNC110 (waiting on the runner's tasks)
             await asyncio.sleep(0.01)
+
+
+async def point_at_config(
+    db: AsyncEngine,
+    bot_id: int,
+    *,
+    strategy: str = "ema_crossover",
+    version: int = 1,
+    params: dict[str, Any] | None = None,
+    active: bool = True,
+) -> int:
+    """Add a config to bot `bot_id` as no command would (an old version, say), and make
+    it the bot's active one unless `active` is False. Its id."""
+    async with db.begin() as conn:
+        config_id: int = (
+            await conn.execute(
+                insert(StrategyConfigRow)
+                .values(
+                    bot_id=bot_id,
+                    strategy=strategy,
+                    version=version,
+                    params={"fast": 3, "slow": 5} if params is None else params,
+                    created_by="test",
+                )
+                .returning(StrategyConfigRow.id)
+            )
+        ).scalar_one()
+        if active:
+            await conn.execute(
+                update(BotRow)
+                .where(BotRow.id == bot_id)
+                .values(active_strategy_config_id=config_id)
+            )
+    return config_id
 
 
 async def exit_of(setup: Setup, client_order_id: str) -> tuple[str, Decimal, Any]:
@@ -394,8 +439,7 @@ async def test_start_refuses_an_unknown_bot_or_one_it_cant_run(setup: Setup) -> 
     assert (reply.ok, reply.error) == (False, "there's no bot 99")
 
     bot_id = await setup.created()
-    async with setup.db.begin() as conn:
-        await conn.execute(text("UPDATE strategy_configs SET version = 99"))
+    await point_at_config(setup.db, bot_id, version=99)  # configs never change (D52)
     reply = await setup.control.handle(setup.command("start", bot_id))
     assert (reply.ok, reply.error) == (
         False,
@@ -837,6 +881,138 @@ async def test_switch_refuses_what_it_cant_do(
         assert len((await conn.execute(select(StrategyConfigRow))).all()) == 1
 
 
+# --- Rollback (P6-2, D52) -------------------------------------------------------------
+
+
+async def configs(setup: Setup) -> list[tuple[int, int, str, dict[str, Any], int | None]]:
+    """Every strategy config: id, bot, strategy, params, and what it restores."""
+    async with setup.db.connect() as conn:
+        rows = (await conn.execute(select(StrategyConfigRow).order_by(StrategyConfigRow.id))).all()
+    return [(r.id, r.bot_id, r.strategy, r.params, r.restored_from) for r in rows]
+
+
+EMA_3_5 = {"fast": 3, "slow": 5}
+RSI_2 = {"period": 2, "oversold": 30.0, "overbought": 70.0}
+
+
+async def test_a_rollback_restores_the_earlier_params_and_keeps_both_in_history(
+    setup: Setup,
+) -> None:
+    bot_id = await setup.created()
+    runner = setup.new_runner([])
+    async with running(runner):
+        assert (await setup.control.handle(setup.command("start", bot_id))).ok
+        await until(lambda: runner.running == [bot_id])
+        assert (await setup.control.handle(setup.switch(bot_id, "hand_over"))).ok
+        await until(lambda: runner.switching == [])
+        await setup.closes(runner, 30, "100", bid="99.9")  # RSI takes over: 50, so it holds
+
+        with capture_logs() as logs:
+            reply = await setup.control.handle(setup.rollback(bot_id, 1, "hand_over"))
+
+        assert (reply.ok, reply.status, reply.strategy_config_id) == (True, "running", 3)
+        (switch,) = [log for log in logs if log["event"] == "bot.switch"]
+        assert (switch["old"]["id"], switch["new"]["id"], switch["restored_from"]) == (2, 3, 1)
+        assert switch["switching"] is True
+        await until(lambda: runner.switching == [])
+        await setup.closes(runner, 31, "110", bid="109.9")  # EMA 3/5's BUY, as config 3
+
+    assert await configs(setup) == [
+        (1, bot_id, "ema_crossover", EMA_3_5, None),
+        (2, bot_id, "rsi_mean_reversion", RSI_2, None),
+        (3, bot_id, "ema_crossover", EMA_3_5, 1),
+    ]
+    assert (await setup.bot_row(bot_id)).active_strategy_config_id == 3
+    ((client_order_id, status, _, config_id),) = await orders(setup, bot_id)
+    assert (client_order_id, status, config_id) == ("b1-202610221231-b", "closed", 3)
+
+
+async def test_rolling_back_to_the_buyers_params_ends_its_keep(setup: Setup) -> None:
+    bot_id = await setup.created()
+    runner = setup.new_runner([])
+    async with running(runner):
+        await setup.bought_running(runner, bot_id)  # bought by config 1
+        assert (await setup.control.handle(setup.switch(bot_id, "keep"))).ok
+        assert (await load_bots(setup.db, "mexc"))[0].keeper is not None
+
+        reply = await setup.control.handle(setup.rollback(bot_id, 1, "keep"))
+
+        assert (reply.ok, reply.strategy_config_id, reply.closing) == (True, 3, [])
+        # Config 3 is the trade's buyer's strategy and params: no keeper, after a restart too.
+        (loaded,) = await load_bots(setup.db, "mexc")
+        assert (loaded.strategy_config_id, loaded.keeper) == (3, None)
+        await until(lambda: runner.switching == [])
+        await setup.closes(runner, 31, "110", bid="109.9")
+        await setup.closes(runner, 32, "90", bid="89.9")  # EMA's SELL, as config 3's
+
+    assert await orders(setup, bot_id) == [
+        BUY,
+        ("b1-202610221232-s", "closed", d("9.0768"), 3),
+    ]
+
+
+async def test_a_rollback_with_close_first_sells_the_position(setup: Setup) -> None:
+    bot_id = await setup.created()
+    runner = setup.new_runner([])
+    async with running(runner):
+        await setup.bought_running(runner, bot_id)
+        assert (await setup.control.handle(setup.switch(bot_id, "hand_over"))).ok
+        await until(lambda: runner.switching == [])
+        setup.quotes.set(bid="105", size="4")
+
+        reply = await setup.control.handle(setup.rollback(bot_id, 1, "close_first"))
+
+        assert (reply.ok, reply.strategy_config_id) == (True, 3)
+        assert [c.client_order_id for c in reply.closing] == ["b1-202610221230-x1"]
+        assert await exit_of(setup, "b1-202610221230-x1") == ("open", d("4"), "switch")
+        refused = await setup.control.handle(setup.rollback(bot_id, 2, "keep"))
+        assert refused.error is not None and "still being sold" in refused.error, refused
+
+    assert (await setup.bot_row(bot_id)).switch_policy == "close_first"
+
+
+async def test_a_stopped_bot_rolls_back_in_the_database(setup: Setup) -> None:
+    bot_id = await setup.created()
+    assert (await setup.control.handle(setup.switch(bot_id, "keep"))).ok
+
+    reply = await setup.control.handle(setup.rollback(bot_id, 1, "keep"))
+
+    assert (reply.ok, reply.status, reply.strategy_config_id) == (True, "stopped", 3)
+    bot, status = await load_bot(setup.db, "mexc", bot_id)
+    assert (bot.strategy.name, bot.strategy.params.model_dump(mode="json"), status) == (
+        "ema_crossover",
+        EMA_3_5,
+        "stopped",
+    )
+    assert bot.strategy_config_id == 3
+
+
+@pytest.mark.parametrize(
+    ("bot_id", "config_id", "error"),
+    [
+        (99, 1, "bot 99 has no strategy config 1"),
+        (1, 3, "bot 1 has no strategy config 3"),  # bot 2's
+        (1, 9, "bot 1 has no strategy config 9"),
+        (1, 2, "nothing to change: it already runs that config's strategy and params"),
+        (1, 4, "can't roll back to config 4: ema_crossover is now version 1, not version 0"),
+    ],
+)
+async def test_rollback_refuses_what_it_cant_do(
+    setup: Setup, bot_id: int, config_id: int, error: str
+) -> None:
+    await setup.created()  # bot 1, config 1
+    assert (await setup.control.handle(setup.switch(1, "keep"))).ok  # config 2
+    await setup.created("other")  # bot 2, config 3
+    await point_at_config(setup.db, 1, version=0, active=False)  # config 4: an old version
+    before = await configs(setup)
+
+    reply = await setup.control.handle(setup.rollback(bot_id, config_id, "hand_over"))
+
+    assert (reply.ok, reply.error) == (False, error)
+    assert await configs(setup) == before
+    assert (await setup.bot_row(1)).switch_policy == "keep"
+
+
 # --- Over Redis ---------------------------------------------------------------------------
 
 
@@ -859,10 +1035,12 @@ async def test_commands_over_redis_get_their_replies(setup: Setup) -> None:
         started = await send(setup.redis, setup.command("start", created.bot_id), reply_within=5)
         refused = await send(setup.redis, setup.create(), reply_within=5)
         switched = await send(setup.redis, setup.switch(created.bot_id, "keep"), reply_within=5)
+        rolled = await send(setup.redis, setup.rollback(created.bot_id, 1, "keep"), reply_within=5)
 
     assert started is not None and (started.ok, started.status) == (True, "running")
     assert refused is not None and refused.error == "a bot named 'btc-ema' already exists"
     assert switched is not None and (switched.ok, switched.strategy_config_id) == (True, 2)
+    assert rolled is not None and (rolled.ok, rolled.strategy_config_id) == (True, 3)
 
 
 async def test_an_expired_command_is_dropped_unanswered(setup: Setup) -> None:

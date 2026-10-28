@@ -1,4 +1,5 @@
-"""The Bots page's list: every bot with how it's set up (D47), read fresh each time.
+"""The Bots page's list: every bot with how it's set up (D47), read fresh each time; and
+a bot's detail page: the same, with every strategy config it has had (P6-2, D52).
 
 Its live status also comes once a second with the Overview (dashboard/overview.py);
 this adds what the Overview leaves out: the strategy's params, sizing, stops and cash.
@@ -43,8 +44,63 @@ class BotSetup(BaseModel):
     stopped_at: AwareDatetime | None
 
 
-async def read_bots(db: AsyncEngine) -> list[BotSetup]:
-    """Every bot, oldest first."""
+class ConfigEntry(BaseModel):
+    """One of a bot's strategy configs (P6-2, D52): each is when that config became its."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: int
+    number: int  # the bot's own count: its first config is 1
+    strategy: str
+    version: int
+    params: dict[str, Any]
+    created_at: AwareDatetime
+    created_by: str
+    restored_from: int | None  # a rollback's: the config (id) it copies
+    active: bool  # the one the bot runs now
+
+
+class BotDetail(BaseModel):
+    """The bot detail page: the bot, and every config it has had, newest first."""
+
+    model_config = ConfigDict(frozen=True)
+
+    bot: BotSetup
+    configs: list[ConfigEntry]
+
+
+async def read_bot(db: AsyncEngine, bot_id: int) -> BotDetail | None:
+    """Bot `bot_id` and its config history; None if there's no such bot."""
+    found = await read_bots(db, bot_id)
+    if not found:
+        return None
+    bot = found[0]
+    query = (
+        select(StrategyConfigRow)
+        .where(StrategyConfigRow.bot_id == bot_id)
+        .order_by(StrategyConfigRow.id)
+    )
+    async with db.connect() as conn:
+        rows = (await conn.execute(query)).all()
+    configs = [
+        ConfigEntry(
+            id=row.id,
+            number=number,
+            strategy=row.strategy,
+            version=row.version,
+            params=row.params,
+            created_at=row.created_at,
+            created_by=row.created_by,
+            restored_from=row.restored_from,
+            active=row.id == bot.active_strategy_config_id,
+        )
+        for number, row in enumerate(rows, start=1)
+    ]
+    return BotDetail(bot=bot, configs=configs[::-1])
+
+
+async def read_bots(db: AsyncEngine, bot_id: int | None = None) -> list[BotSetup]:
+    """Every bot, oldest first; or only bot `bot_id` (none if there's no such bot)."""
     query = (
         select(
             *BotRow.__table__.columns,
@@ -58,6 +114,9 @@ async def read_bots(db: AsyncEngine) -> list[BotSetup]:
     balances_query = select(
         PaperBalanceRow.bot_id, PaperBalanceRow.currency, PaperBalanceRow.free, PaperBalanceRow.used
     )
+    if bot_id is not None:
+        query = query.where(BotRow.id == bot_id)
+        balances_query = balances_query.where(PaperBalanceRow.bot_id == bot_id)
     async with db.connect() as conn:
         rows = (await conn.execute(query)).all()
         balances = (await conn.execute(balances_query)).all()

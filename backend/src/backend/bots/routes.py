@@ -1,5 +1,6 @@
 """The Bots page (D47): list, create, start, pause and stop bots, and switch their
-strategy (P6-1, D51).
+strategy (P6-1, D51); a bot's detail page, with its config history and rollback (P6-2,
+D52).
 
 All of it is on the `protected` router (app.py): a session is checked before anything
 here runs.
@@ -7,8 +8,10 @@ here runs.
 - `GET /strategies`: what a new bot can be set up with, as the engine described it at
   startup (shared/catalog.py). 503 if it never has: the engine isn't running yet.
 - `GET /bots`: every bot with its setup (store.py).
-- `POST /bots`, `POST /bots/{bot_id}/start`, `/pause`, `/stop`, `/strategy`: each sends
-  the engine a command over the Redis command list, as the kill switch does
+- `GET /bots/{bot_id}`: one bot's setup and every strategy config it has had; 404 if
+  there's no such bot.
+- `POST /bots`, `POST /bots/{bot_id}/start`, `/pause`, `/stop`, `/strategy`, `/rollback`:
+  each sends the engine a command over the Redis command list, as the kill switch does
   (shared/commands.py), and answers with its reply. The API never writes a bot: the
   engine checks everything, and its refusal comes back as a 422 with the reason. With
   no reply in `kill_reply_seconds`, it answers 504; the command expires then, so it
@@ -27,7 +30,7 @@ from redis.asyncio import Redis
 from starlette.datastructures import State
 
 from backend.auth.deps import CurrentUser
-from backend.bots.store import BotSetup, read_bots
+from backend.bots.store import BotDetail, BotSetup, read_bot, read_bots
 from backend.settings import ApiSettings
 from shared.catalog import CATALOG_KEY, Catalog
 from shared.commands import (
@@ -36,6 +39,7 @@ from shared.commands import (
     BotCommands,
     BotReply,
     CreateBotCommand,
+    RollbackCommand,
     SwitchPolicy,
     SwitchStrategyCommand,
     send,
@@ -79,6 +83,13 @@ class SwitchRequest(BaseModel):
     policy: SwitchPolicy  # what happens to an open position (shared/commands.py)
 
 
+class RollbackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    config_id: int  # one of the bot's earlier strategy configs
+    policy: SwitchPolicy
+
+
 def _settings(state: State) -> ApiSettings:
     return cast(ApiSettings, state.settings)
 
@@ -101,6 +112,14 @@ async def strategies(request: Request) -> Catalog:
 @router.get("/bots")
 async def bots(request: Request) -> list[BotSetup]:
     return await read_bots(request.app.state.db)
+
+
+@router.get("/bots/{bot_id}")
+async def bot(bot_id: int, request: Request) -> BotDetail:
+    detail = await read_bot(request.app.state.db, bot_id)
+    if detail is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"There's no bot {bot_id}.")
+    return detail
 
 
 @router.post("/bots", status_code=status.HTTP_201_CREATED)
@@ -145,6 +164,23 @@ async def switch(bot_id: int, body: SwitchRequest, request: Request, user: Curre
         expires_at=now + timedelta(seconds=_settings(state).kill_reply_seconds),
     )
     fields = {"bot_id": bot_id, "strategy": body.strategy, "policy": body.policy}
+    return await _send(state, command, user.username, fields)
+
+
+@router.post("/bots/{bot_id}/rollback")
+async def rollback(
+    bot_id: int, body: RollbackRequest, request: Request, user: CurrentUser
+) -> BotReply:
+    state = request.app.state
+    now = _now(state)
+    command = RollbackCommand(
+        bot_id=bot_id,
+        **body.model_dump(),
+        source=SOURCE,
+        sent_at=now,
+        expires_at=now + timedelta(seconds=_settings(state).kill_reply_seconds),
+    )
+    fields = {"bot_id": bot_id, "config_id": body.config_id, "policy": body.policy}
     return await _send(state, command, user.username, fields)
 
 

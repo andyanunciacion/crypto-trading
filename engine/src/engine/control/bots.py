@@ -28,6 +28,11 @@ with a reason the dashboard shows. Each gets a `BotReply`:
   the bot's position is being sold or the bot is still starting, and when nothing
   changes. A change of policy alone adds no config and sells nothing; it only decides
   whether a trade bought before an earlier switch is still its buyer's to sell.
+- **rollback** (`RollbackCommand`, P6-2, D52): back to one of the bot's earlier configs.
+  Configs are append-only, so it adds a config copying that one's strategy and params
+  (`restored_from` names it), built at the version it was made with, then switches to
+  it exactly as a switch does, with the command's policy. Refused when the strategy's
+  version has moved on, and when the bot already runs those params.
 
 While the engine drains the commands sent while it was down (before any bot loads),
 there's no runner: only the database changes, and `load_bots` then picks them up. A bot
@@ -63,6 +68,7 @@ from shared.commands import (
     Closing,
     CreateBotCommand,
     NotClosed,
+    RollbackCommand,
     SwitchStrategyCommand,
 )
 from shared.db.models import BotRow, StrategyConfigRow
@@ -132,6 +138,8 @@ class BotControl:
                 done = await self._create(command)
             elif isinstance(command, SwitchStrategyCommand):
                 done = await self._switch(command)
+            elif isinstance(command, RollbackCommand):
+                done = await self._rollback(command)
             elif command.action == "start":
                 done = await self._start(command)
             elif command.action == "pause":
@@ -274,8 +282,47 @@ class BotControl:
         return done
 
     async def _switch(self, command: SwitchStrategyCommand) -> _Done:
-        bot_id, policy = command.bot_id, command.policy
         strategy = _strategy(command.strategy, command.params)
+        return await self._apply_switch(command, strategy)
+
+    async def _rollback(self, command: RollbackCommand) -> _Done:
+        bot_id, config_id = command.bot_id, command.config_id
+        async with self._db.connect() as conn:
+            row = (
+                await conn.execute(
+                    select(
+                        StrategyConfigRow.bot_id,
+                        StrategyConfigRow.strategy,
+                        StrategyConfigRow.version,
+                        StrategyConfigRow.params,
+                    ).where(StrategyConfigRow.id == config_id)
+                )
+            ).one_or_none()
+        if row is None or row.bot_id != bot_id:
+            raise Refused(f"bot {bot_id} has no strategy config {config_id}")
+        # At the version it was made with: one whose strategy has moved on would no
+        # longer give the signals it gave then, so it isn't the same config.
+        try:
+            strategy = build(row.strategy, row.version, row.params)
+        except ValidationError as exc:
+            raise Refused(f"can't roll back to config {config_id}: {describe(exc)}") from None
+        except ValueError as exc:
+            raise Refused(f"can't roll back to config {config_id}: {exc}") from None
+        return await self._apply_switch(command, strategy, restored_from=config_id)
+
+    async def _apply_switch(
+        self,
+        command: SwitchStrategyCommand | RollbackCommand,
+        strategy: Strategy[Any],
+        *,
+        restored_from: int | None = None,
+    ) -> _Done:
+        """Make `strategy` bot `command.bot_id`'s active config, with `command.policy`.
+
+        A rollback (`restored_from`, the config it copies) always adds a config: one that
+        changes nothing is refused rather than read as a change of policy alone.
+        """
+        bot_id, policy = command.bot_id, command.policy
         if self._kill_switch.sells_for(bot_id):
             raise Refused(
                 "its position is still being sold (kill switch, stop + close, or a switch "
@@ -320,6 +367,10 @@ class BotControl:
                 strategy.version,
                 params,
             )
+            if same and restored_from is not None:
+                raise Refused(
+                    "nothing to change: it already runs that config's strategy and params"
+                )
             if same and row.switch_policy == policy:
                 raise Refused(
                     "nothing to change: it already runs that strategy with those params, "
@@ -336,6 +387,7 @@ class BotControl:
                         version=strategy.version,
                         params=params,
                         created_by=command.source,
+                        restored_from=restored_from,
                     )
                     .returning(StrategyConfigRow.id)
                 )
@@ -372,6 +424,7 @@ class BotControl:
                 "version": strategy.version,
                 "params": params,
             },
+            restored_from=restored_from,  # a rollback's: the config it copies (D52)
             # False: the database alone changed; a Start or a restart loads it.
             switching=switching,
         )

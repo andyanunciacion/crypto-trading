@@ -5,7 +5,15 @@
  */
 
 import type { BacktestJob, CandleRange, NewBacktest, RunDetail, RunSummary } from "@/lib/backtests";
-import type { BotReply, BotSetup, Catalog, NewBot, StrategySwitch } from "@/lib/bots";
+import type {
+  BotDetail,
+  BotReply,
+  BotSetup,
+  Catalog,
+  NewBot,
+  Rollback,
+  StrategySwitch,
+} from "@/lib/bots";
 import { PAGE_ROWS, type FillRow, type OrderRow } from "@/lib/history";
 import type { LogPage, RiskEvent } from "@/lib/logs";
 import type { Chart, TradeExplanation } from "@/lib/market";
@@ -126,6 +134,11 @@ export async function bots(): Promise<BotSetup[]> {
   return (await (await call("/bots")).json()) as BotSetup[];
 }
 
+/** One bot's setup and every strategy config it has had (D52). 404: no such bot. */
+export async function bot(botId: number): Promise<BotDetail> {
+  return (await (await call(`/bots/${botId}`)).json()) as BotDetail;
+}
+
 /**
  * The Bots page's commands, carried out by the engine (D47). Throws an ApiError: 422
  * with the engine's reason when it refuses, 504 when it didn't answer in time (the
@@ -139,6 +152,15 @@ export async function createBot(bot: NewBot): Promise<BotReply> {
 /** Switch a bot's strategy or params, with a policy for its open position (D51). */
 export async function switchStrategy(botId: number, change: StrategySwitch): Promise<BotReply> {
   const response = await call(`/bots/${botId}/strategy`, {
+    method: "POST",
+    body: JSON.stringify(change),
+  });
+  return (await response.json()) as BotReply;
+}
+
+/** Switch a bot back to one of its earlier configs, as a new config copying it (D52). */
+export async function rollback(botId: number, change: Rollback): Promise<BotReply> {
+  const response = await call(`/bots/${botId}/rollback`, {
     method: "POST",
     body: JSON.stringify(change),
   });

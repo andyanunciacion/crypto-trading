@@ -4,14 +4,13 @@ import { signIn } from "./auth";
 
 /**
  * The Bots page (D47): a paper bot is created, started, switched to another strategy
- * (D51) and stopped from the dashboard, each as a command the engine carries out, with
- * no engine restart. It trades ETH/USDT,
+ * (D51), rolled back to its first from its detail page (D52) and stopped from the
+ * dashboard, each as a command the engine carries out, with no engine restart. It
+ * trades ETH/USDT,
  * which nothing else does, so starting it also starts a new candle series and price
  * stream. It ends stopped, so the kill switch test after it still stops only e2e-bot.
  */
-test("a paper bot is created, started, switched and stopped from the Bots page", async ({
-  page,
-}) => {
+test("a paper bot is created, started, switched, rolled back and stopped", async ({ page }) => {
   await signIn(page);
   await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Bots" }).click();
   await expect(page).toHaveURL("/bots");
@@ -71,6 +70,46 @@ test("a paper bot is created, started, switched and stopped from the Bots page",
   await expect(row).toContainText("period 7, oversold 30, overbought 70");
   await expect(row).toContainText("on a switch: hand over");
   await expect(row.locator('[data-engine="running"]')).toBeVisible(); // no restart
+
+  // Its history (D52): the name opens its detail page, which lists both configs. Rolled
+  // back to the first from the keyboard, it runs EMA 9/21 again as a third config, and
+  // the first two stay listed.
+  await row.getByRole("link", { name: "e2e-eth" }).click();
+  await expect(page).toHaveURL(/\/bots\/\d+$/);
+  await expect(page.getByRole("heading", { name: "e2e-eth" })).toBeVisible();
+  const history = page.getByRole("table", { name: "Strategy history" });
+  const first = history.locator('tr[data-config="1"]');
+  const second = history.locator('tr[data-config="2"]');
+  await expect(second).toContainText("rsi_mean_reversion");
+  await expect(second).toContainText("running now");
+  await expect(first).toContainText("fast 9, slow 21");
+  await expect(second.getByRole("button", { name: /^Roll back/ })).toHaveCount(0);
+
+  await first.getByRole("button", { name: "Roll back e2e-eth to #1" }).focus();
+  await page.keyboard.press("Enter");
+  const back = page.getByRole("alertdialog", { name: "Roll back e2e-eth to #1?" });
+  await expect(back.getByRole("button", { name: "Cancel" })).toBeFocused();
+  await expect(back.getByRole("radio", { name: /^Hand over/ })).toBeChecked(); // its policy now
+  await back.getByRole("radio", { name: /^Keep/ }).check();
+  await back.getByRole("button", { name: "Roll back", exact: true }).focus();
+  await page.keyboard.press("Enter");
+  await expect(back).toBeHidden();
+  await expect(page.getByText(/^Rolled e2e-eth back to #1, ema_crossover/)).toBeFocused();
+  const third = history.locator('tr[data-config="3"]');
+  await expect(third).toContainText("ema_crossover");
+  await expect(third).toContainText("fast 9, slow 21");
+  await expect(third).toContainText("running now");
+  await expect(third).toContainText("rollback to #1");
+  await expect(second).not.toContainText("running now");
+  // #1 is what it runs again, so there's nothing to roll back to there.
+  await expect(first).toContainText("same as running now");
+  await expect(first.getByRole("button", { name: /^Roll back/ })).toHaveCount(0);
+  await expect(history.locator("tbody tr")).toHaveCount(3);
+
+  await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Bots" }).click();
+  await expect(row).toContainText("fast 9, slow 21");
+  await expect(row).toContainText("on a switch: keep");
+  await expect(row.locator('[data-engine="running"]')).toBeVisible(); // still no restart
 
   await row.getByRole("button", { name: "Stop e2e-eth" }).click();
   const dialog = page.getByRole("alertdialog", { name: "Stop e2e-eth?" });

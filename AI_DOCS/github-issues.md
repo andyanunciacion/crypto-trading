@@ -587,9 +587,36 @@ Done (D50):
 
 ### P6-2 · Config history and rollback
 `engine` `frontend` · Depends on: P6-1
-- [ ] Append-only `strategy_configs`; rollback from bot detail
+- [x] Append-only `strategy_configs`; rollback from bot detail
 
 **Done when:** rolling back restores the previous params, and both versions stay in history.
+
+**Done** (D52):
+- `test_bot_control.py` (done-when): a running bot switches from EMA 3/5 to RSI(2) (config 2), then rolls back to config 1.
+  - The result is config 3: EMA 3/5 with `restored_from` 1, active. Configs 1 and 2 are unchanged.
+  - EMA's next BUY names config 3, with no restart. `bot.switch` logs `restored_from`.
+- Also tested:
+  - Under `keep`, rolling back to the params that bought the open position ends the keeper, after a reload too, and EMA's SELL is placed as config 3.
+  - A `close_first` rollback sells the position as exits of kind `switch`, and a second rollback is refused while it sells.
+  - A stopped bot changes in the database only. It works over Redis.
+  - Refusals: another bot's config, an unknown config, the params it runs now, and a strategy version that moved on.
+- `test_bot_store.py`: UPDATE and DELETE on `strategy_configs` raise the trigger's error (migration 0013), and INSERT still works. The tests that used to UPDATE a config (an old version, bad params; `test_market.py`'s unknown strategy) now insert one.
+- `test_bots.py`:
+  - `POST /bots/{id}/rollback` sends a `RollbackCommand`. A bad policy, an extra field (strategy) or a missing config never reaches the engine, and the engine's refusal is a 422.
+  - `GET /bots/{id}` numbers the configs per bot, newest first, with `restored_from` and `active`, and leaves out the other bot's. An unknown bot is a 404.
+  - `test_every_route_needs_auth.py` requires the new routes (and `/strategy`, which it had missed).
+- `bots.spec.ts`:
+  - After the switch to RSI, `e2e-eth`'s name opens its detail page, which lists #2 (running now) and #1.
+  - From the keyboard, Roll back on #1 (focus starts on Cancel, the policy starts as the bot's hand over, set to keep) adds #3, EMA 9/21, "rollback to #1", running now. Focus moves to the result message, and all three rows stay.
+  - Back on the list: EMA 9/21, "on a switch: keep", still in the engine. All 10 e2e tests pass (2026-10-28).
+- It found one thing, fixed: once the dialog closed, Radix gave focus back to its Roll back button, which the reloaded history no longer shows in that place, so the result message lost it. The dialog now keeps focus off the button after a rollback (Cancel still returns it).
+- Checked by hand in Chrome (2026-10-28, the main stack after `up --build`, migration 0013 applied):
+  - On the database, an UPDATE and a DELETE of a config (each in a rolled-back transaction) are refused by the trigger, and the rows are unchanged.
+  - `chrome-switch-test` (stopped, flat, configs #1–#4 alternating EMA 2/3 and RSI 14) is opened from its name on the list. From the keyboard, Roll back on #1 adds #5, EMA 2/3, "running now · rollback to #1". In the database that's row 14 with `restored_from` 10, and the bot points at it.
+  - Light and dark themes; no console errors.
+- The hand check found two more things, fixed:
+  - **The bot's name didn't look like a link.** It only underlined on hover, so the detail page was hard to find. It's underlined all the time now.
+  - **A row identical to the running config offered Roll back,** and the engine's refusal named the database id ("config 11") where the page says #2. Such a row now says "same as running now" with no button, and the refusal no longer names an id ("it already runs that config's strategy and params"). `bots.spec.ts` checks the note after the rollback.
 
 ### P6-3 · Regime detector
 `strategy` · Depends on: P2-1

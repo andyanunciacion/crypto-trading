@@ -1,7 +1,7 @@
 /**
- * The Bots page (D47): what a new bot can be set up with (the engine's catalog), each
- * bot's setup, and the engine's replies. Mirrors `shared/catalog.py`,
- * `backend/bots/store.py` and `shared/commands.py`.
+ * The Bots page (D47) and a bot's detail page (D52): what a new bot can be set up with
+ * (the engine's catalog), each bot's setup and config history, and the engine's
+ * replies. Mirrors `shared/catalog.py`, `backend/bots/store.py` and `shared/commands.py`.
  */
 import type { Decimal } from "@/lib/format";
 import type { BotStatus, Mode } from "@/lib/overview";
@@ -113,6 +113,67 @@ export type StrategySwitch = {
   params: Settings;
   policy: SwitchPolicy;
 };
+
+/** A rollback to one of the bot's earlier configs, as `POST /bots/{id}/rollback` takes it. */
+export type Rollback = {
+  config_id: number;
+  policy: SwitchPolicy;
+};
+
+/** One of a bot's strategy configs (D52): each is when that config became the bot's. */
+export type ConfigEntry = {
+  id: number;
+  /** The bot's own count: its first config is #1. */
+  number: number;
+  strategy: string;
+  version: number;
+  params: Record<string, unknown>;
+  created_at: string;
+  created_by: string;
+  /** A rollback's: the id of the config it copies. */
+  restored_from: number | null;
+  active: boolean;
+};
+
+/** The bot detail page (`GET /bots/{id}`): the bot, and its configs, newest first. */
+export type BotDetail = {
+  bot: BotSetup;
+  configs: ConfigEntry[];
+};
+
+export function policyLabel(policy: string): string {
+  return SWITCH_POLICIES.find((p) => p.value === policy)?.label ?? policy;
+}
+
+/**
+ * What a switch (or a rollback, `rolledBackTo` its config's number) did, from the
+ * engine's reply: when the new config trades, and what happened to the position.
+ */
+export function switchedText(
+  bot: BotSetup,
+  change: { strategy: string; policy: SwitchPolicy },
+  reply: BotReply,
+  holding: boolean,
+  rolledBackTo?: number,
+): string {
+  const took = `(${reply.took_ms} ms)`;
+  if (reply.strategy_config_id === null) {
+    return `${bot.name}: on a switch, ${policyLabel(change.policy).toLowerCase()} ${took}.`;
+  }
+  const when =
+    bot.status === "stopped" ? "it runs it once started" : "it trades with it from its next candle";
+  const what =
+    rolledBackTo === undefined
+      ? `Switched ${bot.name} to ${change.strategy}`
+      : `Rolled ${bot.name} back to #${rolledBackTo}, ${change.strategy}`;
+  const parts = [`${what} ${took}: ${when}`];
+  if (reply.closing.length > 0) parts.push("selling its position until it's gone first");
+  for (const left of reply.not_closed) parts.push(`couldn't close ${left.symbol}: ${left.reason}`);
+  if (holding && change.policy === "keep") {
+    parts.push("its open position is still sold by the strategy that bought it");
+  }
+  return `${parts.join("; ")}.`;
+}
 
 export type NewBot = {
   name: string;
