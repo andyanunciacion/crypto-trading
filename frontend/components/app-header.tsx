@@ -20,6 +20,8 @@ const NAV = [
   { href: "/market", label: "Market" },
   { href: "/bots", label: "Bots" },
   { href: "/backtests", label: "Backtests" },
+  { href: "/history", label: "History" },
+  { href: "/logs", label: "Logs" },
 ];
 
 /**

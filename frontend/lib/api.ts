@@ -6,6 +6,8 @@
 
 import type { BacktestJob, CandleRange, NewBacktest, RunDetail, RunSummary } from "@/lib/backtests";
 import type { BotReply, BotSetup, Catalog, NewBot } from "@/lib/bots";
+import { PAGE_ROWS, type FillRow, type OrderRow } from "@/lib/history";
+import type { LogPage, RiskEvent } from "@/lib/logs";
 import type { Chart, TradeExplanation } from "@/lib/market";
 
 export class ApiError extends Error {
@@ -152,6 +154,32 @@ export async function backtest(runId: number): Promise<RunDetail> {
 export async function candleRange(symbol: string, timeframe: string): Promise<CandleRange> {
   const query = new URLSearchParams({ symbol, timeframe });
   return (await (await call(`/candles/range?${query.toString()}`)).json()) as CandleRange;
+}
+
+/** A page of History (D49), newest first; `before` is the last id shown. */
+export async function historyOrders(query: URLSearchParams, before?: number): Promise<OrderRow[]> {
+  return (await (await call(`/history/orders?${paged(query, before)}`)).json()) as OrderRow[];
+}
+
+export async function historyFills(query: URLSearchParams, before?: number): Promise<FillRow[]> {
+  return (await (await call(`/history/fills?${paged(query, before)}`)).json()) as FillRow[];
+}
+
+function paged(query: URLSearchParams, before?: number | string): string {
+  const page = new URLSearchParams(query);
+  page.set("limit", String(PAGE_ROWS));
+  if (before !== undefined) page.set("before", String(before));
+  return page.toString();
+}
+
+/** The services' log lines (D49), newest first; `before` is the last page's `next`. */
+export async function logs(query: URLSearchParams, before?: string): Promise<LogPage> {
+  return (await (await call(`/logs?${paged(query, before)}`)).json()) as LogPage;
+}
+
+/** Buys the risk layer blocked or shrank (D41, D42), newest first. */
+export async function riskEvents(query: URLSearchParams, before?: number): Promise<RiskEvent[]> {
+  return (await (await call(`/risk-events?${paged(query, before)}`)).json()) as RiskEvent[];
 }
 
 export async function botCommand(

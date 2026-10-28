@@ -41,7 +41,8 @@ backups/
 
 # Logs
 *.log
-logs/
+# The root's only: code folders named logs (backend/logs/, the Logs page) are source.
+/logs/
 
 # OS / editor
 .DS_Store

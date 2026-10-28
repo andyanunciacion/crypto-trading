@@ -10,6 +10,7 @@ The dashboard reaches the API under `/api` on its own origin (Next.js rewrites s
 the prefix), so the browser sends the session cookie with no CORS involved (D44).
 """
 
+import asyncio
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -27,9 +28,12 @@ from backend.auth.deps import current_user
 from backend.backtests import routes as backtest_routes
 from backend.bots import routes as bot_routes
 from backend.dashboard import routes as dashboard_routes
+from backend.history import routes as history_routes
+from backend.logs import routes as log_routes
 from backend.market import routes as market_routes
 from backend.settings import ApiSettings
 from shared.db.session import make_engine
+from shared.logs import LogMirror
 
 # The only routes anyone can call without signing in.
 PUBLIC = frozenset({"/health", "/auth/login"})
@@ -68,17 +72,26 @@ def create_app(
     *,
     database_url: URL | None = None,
     clock: Callable[[], datetime] = _utcnow,
+    mirror: LogMirror | None = None,
 ) -> FastAPI:
-    """The API. `database_url` and `clock` are for tests; otherwise the settings decide."""
+    """The API. `database_url` and `clock` are for tests; otherwise the settings decide.
+    With a `mirror`, the API's log lines go to the Logs page's stream too (D49)."""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.db = make_engine(database_url or settings.database_url)
-        # Live prices, the engine's heartbeat, and commands to the engine (D45).
+        # Live prices, the engine's heartbeat, commands to the engine (D45), the logs (D49).
         app.state.redis = Redis.from_url(settings.redis_url)
+        stop = asyncio.Event()
+        shipping = (
+            None if mirror is None else asyncio.create_task(mirror.ship(app.state.redis, stop))
+        )
         try:
             yield
         finally:
+            stop.set()
+            if shipping is not None:
+                await shipping  # a last flush
             await app.state.redis.aclose()
             await app.state.db.dispose()
 
@@ -101,6 +114,8 @@ def create_app(
     protected.include_router(market_routes.router)
     protected.include_router(bot_routes.router)
     protected.include_router(backtest_routes.router)
+    protected.include_router(history_routes.router)
+    protected.include_router(log_routes.router)
 
     app.include_router(public)
     app.include_router(auth_routes.public)

@@ -13,6 +13,9 @@ the Bots page's create, start, pause and stop (D47). Commands sent while it was 
 carried out first, before any bot is loaded. A bot started later on a new symbol gets
 its price stream then (`Prices.ensure`). At startup it also writes what a new bot can be
 set up with (control/catalog.py), for the Bots page's form.
+
+Its log lines go to stdout and, from INFO up, to the Redis stream the dashboard's Logs
+page reads (shared/logs.py, D49).
 """
 
 import asyncio
@@ -41,7 +44,7 @@ from engine.risk.paper import PaperDesk
 from shared.config import Settings, load_settings
 from shared.db.session import make_engine
 from shared.heartbeat import ENGINE_HEARTBEAT_KEY, EngineHeartbeat
-from shared.logs import configure_logging
+from shared.logs import LogMirror, configure_logging
 from shared.prices import PriceUpdate
 
 HEARTBEAT_INTERVAL_SECONDS = 10
@@ -134,7 +137,9 @@ class Prices:
             )
 
 
-async def run(settings: Settings) -> None:
+async def run(settings: Settings, mirror: LogMirror | None = None) -> None:
+    """The engine until SIGTERM. With a `mirror`, its log lines also go to Redis for the
+    dashboard's Logs page (D49)."""
     started_at = datetime.now(UTC)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -217,11 +222,18 @@ async def run(settings: Settings) -> None:
                         bots=lambda: runner.running,
                     )
                 )
+                if mirror is not None:
+                    # Ends by itself once `stop` is set, after a last flush.
+                    tasks.create_task(mirror.ship(redis, stop))
                 workers = [tasks.create_task(runner.run()), tasks.create_task(commands.run())]
                 await stop.wait()
                 for worker in [*workers, *prices.workers]:
                     worker.cancel()
     finally:
+        if mirror is not None:
+            # What a crash logged on its way out, for the Logs page; stdout has it anyway.
+            with contextlib.suppress(Exception):
+                await mirror.flush(redis)
         await redis.aclose()
         await db.dispose()
     log.info("engine.stopping")
@@ -230,5 +242,6 @@ async def run(settings: Settings) -> None:
 def main() -> None:
     # First, so a bad config stops the engine before it does anything else.
     settings = load_settings()
-    configure_logging(settings.log_level)
-    asyncio.run(run(settings))
+    mirror = LogMirror("engine")
+    configure_logging(settings.log_level, mirror=mirror)
+    asyncio.run(run(settings, mirror))
