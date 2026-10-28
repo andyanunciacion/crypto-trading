@@ -16,21 +16,26 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi import APIRouter, Depends, FastAPI, Request, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.docs import get_swagger_ui_html
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from redis.asyncio import Redis
 from sqlalchemy import URL
 
 from backend.auth import routes as auth_routes
+from backend.auth.confirm import CodeRefused, handle_code_refused
 from backend.auth.crypto import Secrets
 from backend.auth.deps import current_user
 from backend.backtests import routes as backtest_routes
 from backend.bots import routes as bot_routes
 from backend.dashboard import routes as dashboard_routes
 from backend.history import routes as history_routes
+from backend.keys import routes as key_routes
 from backend.logs import routes as log_routes
 from backend.market import routes as market_routes
+from backend.risk_settings import routes as risk_settings_routes
 from backend.settings import ApiSettings
 from shared.db.session import make_engine
 from shared.logs import LogMirror
@@ -65,6 +70,16 @@ async def openapi(request: Request) -> dict[str, Any]:
 async def docs() -> HTMLResponse:
     # Relative, so it works both at /docs and through the dashboard at /api/docs.
     return get_swagger_ui_html(openapi_url="openapi.json", title="crypto-trading API")
+
+
+async def _validation_failed(request: Request, exc: Exception) -> JSONResponse:
+    """FastAPI's 422, without the `input` it normally echoes back: that could be an
+    exchange secret or a password. `loc` and `msg` say what's wrong (D50)."""
+    assert isinstance(exc, RequestValidationError)
+    errors = [{k: v for k, v in error.items() if k != "input"} for error in exc.errors()]
+    return JSONResponse(
+        {"detail": jsonable_encoder(errors)}, status_code=status.HTTP_422_UNPROCESSABLE_CONTENT
+    )
 
 
 def create_app(
@@ -116,7 +131,11 @@ def create_app(
     protected.include_router(backtest_routes.router)
     protected.include_router(history_routes.router)
     protected.include_router(log_routes.router)
+    protected.include_router(risk_settings_routes.router)
+    protected.include_router(key_routes.router)
 
+    app.add_exception_handler(RequestValidationError, _validation_failed)
+    app.add_exception_handler(CodeRefused, handle_code_refused)
     app.include_router(public)
     app.include_router(auth_routes.public)
     app.include_router(protected)

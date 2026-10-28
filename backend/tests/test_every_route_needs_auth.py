@@ -80,6 +80,12 @@ async def test_every_other_route_refuses_a_caller_without_a_session(api: Api) ->
         "GET /history/fills.csv",
         "GET /logs",
         "GET /risk-events",
+        "GET /risk-settings",
+        "PUT /risk-settings/{mode}",
+        "GET /exchange-accounts",
+        "POST /exchange-accounts",
+        "PUT /exchange-accounts/{account_id}",
+        "DELETE /exchange-accounts/{account_id}",
     } <= set(checked)
 
 

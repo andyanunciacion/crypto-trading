@@ -22,24 +22,29 @@ they will on one shared exchange account (P9).
 
 The circuit breakers (breakers.py, D42) share these settings and are checked before
 them: a bot that isn't running, a stale price or a price spike blocks a buy first.
+
+The settings model itself (`RiskSettings`) is in shared/risk.py, since the dashboard's
+Settings page edits it (D50).
 """
 
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Literal, Self
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import BaseModel, ConfigDict, JsonValue
 
 from engine.exchange.models import MarketRules, OrderRequest
 from engine.risk.sizing import below_minimum
+
+# The settings model is shared with the API's Settings page (D50); re-exported here.
+from shared.risk import MAX_SPIKE_MINUTES as MAX_SPIKE_MINUTES
+from shared.risk import RiskSettings as RiskSettings
 
 # The same values as `risk_events.decision`.
 Decision = Literal["allowed", "blocked", "resized"]
 
 # The daily loss rule's name: its blocks in `risk_events` keep it hit until midnight.
 DAILY_LOSS = "daily_loss"
-# The longest spike window: how much price history the breakers keep (breakers.py).
-MAX_SPIKE_MINUTES = 60
 
 
 class _Frozen(BaseModel):
@@ -54,32 +59,6 @@ class RiskDecision(_Frozen):
     rule: str  # the rule that decided
     detail: str
     requested_amount: Decimal | None = None  # what was asked for, when resized
-
-
-class RiskSettings(_Frozen):
-    """The limits and circuit breakers, one row of `risk_settings` per mode. None turns
-    one off."""
-
-    max_open_positions: int | None = Field(default=None, ge=1)
-    max_coin_exposure_pct: Decimal | None = Field(default=None, gt=0, le=100)
-    max_daily_loss_pct: Decimal | None = Field(default=None, gt=0, le=100)
-    max_drawdown_pct: Decimal | None = Field(default=None, gt=0, le=100)
-    # The circuit breakers (breakers.py, D42).
-    stale_after_candles: int | None = Field(default=None, ge=1)
-    max_failed_orders: int | None = Field(default=None, ge=1)
-    failed_orders_minutes: int | None = Field(default=None, ge=1)
-    spike_pct: Decimal | None = Field(default=None, gt=0)
-    spike_minutes: int | None = Field(default=None, ge=1, le=MAX_SPIKE_MINUTES)
-
-    @model_validator(mode="after")
-    def _set_in_pairs(self) -> Self:
-        for count, minutes in (
-            ("max_failed_orders", "failed_orders_minutes"),
-            ("spike_pct", "spike_minutes"),
-        ):
-            if (getattr(self, count) is None) != (getattr(self, minutes) is None):
-                raise ValueError(f"{count} and {minutes} go together: set both, or neither")
-        return self
 
 
 NO_LIMITS = RiskSettings()

@@ -10,6 +10,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -19,6 +20,7 @@ from sqlalchemy import (
     MetaData,
     Numeric,
     Text,
+    false,
     func,
     text,
 )
@@ -37,6 +39,8 @@ RISK_DECISIONS = ("allowed", "blocked", "resized")
 SWITCH_POLICIES = ("keep", "close_first", "hand_over")
 # The default sizing (engine.risk.sizing.AllIn): spend all the free cash, as before P4.
 ALL_IN_SIZING = '{"mode": "all_in"}'
+# The exchanges an account's keys can be for (CCXT ids): MEXC, and Binance's testnet (D23).
+EXCHANGES = ("mexc", "binance")
 
 
 class Base(DeclarativeBase):
@@ -363,5 +367,30 @@ class UserRow(Base):
     session_version: Mapped[int] = mapped_column(Integer, server_default="1")
     failed_logins: Mapped[int] = mapped_column(Integer, server_default="0")  # in a row
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ExchangeAccountRow(Base):
+    """An exchange's API key and secret, stored from the Settings page (P5-7, D50).
+
+    Both are Fernet-encrypted (D12) and never sent back to the browser; `key_hint` is
+    what the page shows instead. Nothing trades with them until P9.
+    """
+
+    __tablename__ = "exchange_accounts"
+    __table_args__ = (
+        CheckConstraint(f"exchange IN {EXCHANGES!r}", name="exchange"),
+        # MEXC has no sandbox (D22); Binance's is its spot testnet (D23).
+        CheckConstraint("NOT (exchange = 'mexc' AND sandbox)", name="sandbox"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    exchange: Mapped[str] = mapped_column(Text)  # the CCXT id
+    label: Mapped[str] = mapped_column(Text, unique=True)
+    api_key_enc: Mapped[str] = mapped_column(Text)  # Fernet-encrypted, never plain
+    api_secret_enc: Mapped[str] = mapped_column(Text)  # Fernet-encrypted, never plain
+    key_hint: Mapped[str] = mapped_column(Text)  # the API key's last 4 characters
+    sandbox: Mapped[bool] = mapped_column(Boolean, server_default=false())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { ApiError, me, signOut } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-// The screens built so far; the others join as their slices land (DESIGN §4).
+// Every screen of DESIGN §4.
 const NAV = [
   { href: "/", label: "Overview" },
   { href: "/market", label: "Market" },
@@ -22,6 +22,7 @@ const NAV = [
   { href: "/backtests", label: "Backtests" },
   { href: "/history", label: "History" },
   { href: "/logs", label: "Logs" },
+  { href: "/settings", label: "Settings" },
 ];
 
 /**

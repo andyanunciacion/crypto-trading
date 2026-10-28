@@ -68,7 +68,7 @@
 4. [x] **Bots:** create, start, pause, stop; strategy params via a form generated from the schema; commands go to the engine via Redis. The engine carries out each command and answers (D47): bots are created stopped, start without an engine restart, and can be stopped with their position closed. Editing a bot's params is P6-1's hot-swap.
 5. [x] **Backtests:** run a backtest from the UI; view metrics, equity curve and trades.
 6. [x] **History + Logs:** trades and orders with filters and CSV export; logs of decisions, risk events and errors. History is orders and fills, exported with the database's exact values; the services mirror their log lines into a capped Redis stream for the Logs page, beside `risk_events` (D49).
-7. [ ] **Settings:** encrypted exchange keys, risk limits (raising one needs TOTP, UX4), alert preferences.
+7. [x] **Settings:** encrypted exchange keys, risk limits (raising one needs TOTP, UX4), alert preferences. The limits and keys need a code to loosen or save, and the API writes them itself (D50); alert preferences moved to P7-1, with the service that sends alerts.
 
 **Exit criteria:** you can start a paper bot, watch it trade live on the chart, and stop it from the UI; Playwright covers login, bot control and the kill switch.
 
@@ -85,7 +85,7 @@
 
 ## Phase 7 — Alerts and monitoring
 
-1. [ ] **Telegram alerts:** trades, stop-loss hits, switches, errors, limit breaches, daily summary; on/off per event type.
+1. [ ] **Telegram alerts:** trades, stop-loss hits, switches, errors, limit breaches, daily summary; on/off per event type, on the Settings page (moved from P5-7, D50).
 2. [ ] **Telegram commands:** /status, /pnl, /pause, /kill, only from your chat ID.
 3. [ ] **Heartbeat:** alert if the engine stops sending updates.
 4. [ ] **Health + errors:** health endpoint per service; Sentry wired into API and engine.
