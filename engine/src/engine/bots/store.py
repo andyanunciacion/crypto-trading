@@ -1,17 +1,22 @@
 """Bots and their strategy configs in the database (`bots`, `strategy_configs`).
 
 A bot runs the strategy config its `active_strategy_config_id` points at. Configs are
-append-only: changing a bot's strategy or params adds a row (P6), so every order's
-`reason` can name the exact config behind it.
+append-only: changing a bot's strategy or params adds a row (P6-1, D51), so every
+order's `reason` can name the exact config behind it.
+
+A bot switched with the policy `keep` while it held a position still has that trade
+sold by the config that bought it: its `keeper`. It isn't stored: it's worked out on
+loading, from the opening buy's `reason`, for as long as that position is open.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, cast
 
 import structlog
 from sqlalchemy import Select, insert, select, update
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from engine.bots.exits import opening_buy
 from engine.brokers.base import Mode
 from engine.exchange.models import Timeframe
 from engine.marketdata.store import Series
@@ -22,6 +27,14 @@ from engine.strategies.registry import build
 from shared.db.models import BotRow, OrderRow, PositionRow, StrategyConfigRow
 
 log = structlog.get_logger()
+
+
+@dataclass(frozen=True)
+class Keeper:
+    """The config that opened a bot's position, still selling it after a switch (`keep`)."""
+
+    strategy_config_id: int
+    strategy: Strategy[Any]
 
 
 @dataclass(frozen=True)
@@ -37,6 +50,8 @@ class Bot:
     strategy: Strategy[Any]
     sizing: Sizing = ALL_IN  # how much each buy spends (D39)
     stops: Stops = NO_STOPS  # when a position is sold whatever the strategy says (D40)
+    # Sells the open position instead of `strategy`, after a switch with `keep` (D51).
+    keeper: Keeper | None = None
 
     @property
     def series(self) -> Series:
@@ -107,6 +122,7 @@ def _bots_query() -> Select[Any]:
             BotRow.status,
             BotRow.sizing,
             BotRow.stops,
+            BotRow.switch_policy,
             StrategyConfigRow.id.label("config_id"),
             StrategyConfigRow.bot_id.label("config_bot_id"),
             StrategyConfigRow.strategy,
@@ -127,16 +143,18 @@ async def load_bots(db: AsyncEngine, exchange: str) -> list[Bot]:
     the others.
     """
     query = _bots_query().where(BotRow.status.in_(("running", "paused"))).order_by(BotRow.id)
-    async with db.connect() as conn:
-        rows = (await conn.execute(query)).all()
     bots: list[Bot] = []
     statuses: dict[int, str] = {}
-    for row in rows:
-        try:
-            bots.append(_bot(row, exchange))
-        except ValueError as exc:  # includes pydantic's ValidationError for bad params
-            log.error("bot.refused", bot_id=row.id, name=row.name, reason=str(exc))
-        statuses[row.id] = row.status
+    async with db.connect() as conn:
+        rows = (await conn.execute(query)).all()
+        for row in rows:
+            try:
+                bot = _bot(row, exchange)
+            except ValueError as exc:  # includes pydantic's ValidationError for bad params
+                log.error("bot.refused", bot_id=row.id, name=row.name, reason=str(exc))
+            else:
+                bots.append(await _with_keeper(conn, bot, row.switch_policy))
+            statuses[row.id] = row.status
     log.info(
         "bots.loaded",
         bots=[
@@ -149,6 +167,7 @@ async def load_bots(db: AsyncEngine, exchange: str) -> list[Bot]:
                 "strategy": b.strategy.name,
                 "params": b.strategy.params.model_dump(mode="json"),
                 "stops": STOPS.dump_python(b.stops, mode="json", exclude_none=True),
+                "keeper": _keeper_json(b.keeper),
             }
             for b in bots
         ],
@@ -168,9 +187,10 @@ async def load_bot(db: AsyncEngine, exchange: str, bot_id: int) -> tuple[Bot, st
     """
     async with db.connect() as conn:
         row = (await conn.execute(_bots_query().where(BotRow.id == bot_id))).one_or_none()
-    if row is None:
-        raise UnknownBot(f"there's no bot {bot_id}")
-    return _bot(row, exchange), row.status
+        if row is None:
+            raise UnknownBot(f"there's no bot {bot_id}")
+        bot = await _with_keeper(conn, _bot(row, exchange), row.switch_policy)
+    return bot, row.status
 
 
 async def held_symbols(db: AsyncEngine, *, mode: Mode) -> list[str]:
@@ -228,3 +248,61 @@ def _bot(row: Any, exchange: str) -> Bot:
         sizing=SIZING.validate_python(row.sizing),
         stops=STOPS.validate_python(row.stops),
     )
+
+
+async def _with_keeper(conn: AsyncConnection, bot: Bot, switch_policy: str) -> Bot:
+    """`bot`, with its keeper if it has one (module docstring).
+
+    That's under the policy `keep`, while an open position's buy was placed by another
+    strategy or other params than the bot's now. If that config no longer builds (its
+    strategy's version moved on), the position is handed over to the bot's strategy
+    instead, logged as `bot.keep_failed`: better than a position nobody sells.
+    """
+    if switch_policy != "keep":
+        return bot
+    mode: Mode = "paper"  # _bot refuses every other mode
+    held = await conn.scalar(
+        select(PositionRow.id).where(
+            PositionRow.bot_id == bot.id,
+            PositionRow.symbol == bot.symbol,
+            PositionRow.mode == mode,
+            PositionRow.closed_at.is_(None),
+        )
+    )
+    buy = None if held is None else await opening_buy(conn, bot.id, bot.symbol, mode=mode)
+    if buy is None:
+        return bot  # flat, or a position no buy of this bot opened
+    config = buy.reason.get("strategy_config")
+    if not isinstance(config, dict):
+        return bot
+    strategy = bot.strategy
+    if (config["strategy"], config["version"], config["params"]) == (
+        strategy.name,
+        strategy.version,
+        strategy.params.model_dump(mode="json"),
+    ):
+        return bot  # bought by the strategy and params it runs now
+    try:
+        kept = build(config["strategy"], config["version"], config["params"])
+    except ValueError as exc:  # includes pydantic's ValidationError
+        log.error(
+            "bot.keep_failed",
+            bot_id=bot.id,
+            name=bot.name,
+            buy=buy.client_order_id,
+            strategy_config=config,
+            reason=str(exc),
+            handed_over_to=bot.strategy_config_id,
+        )
+        return bot
+    return replace(bot, keeper=Keeper(config["id"], kept))
+
+
+def _keeper_json(keeper: Keeper | None) -> dict[str, Any] | None:
+    if keeper is None:
+        return None
+    return {
+        "strategy_config_id": keeper.strategy_config_id,
+        "strategy": keeper.strategy.name,
+        "params": keeper.strategy.params.model_dump(mode="json"),
+    }

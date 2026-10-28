@@ -17,6 +17,8 @@ The commands:
 - `CreateBotCommand` and `BotCommand` (start, pause, stop): the Bots page's (D47). They
   expire at `expires_at`, when the sender stops waiting for the reply: a click nobody
   saw answered must not take effect when the engine next starts, hours later.
+- `SwitchStrategyCommand`: change a bot's strategy or params while it runs, with a
+  policy for its open position (P6-1, D51). It expires like the bot commands.
 """
 
 import time
@@ -135,6 +137,28 @@ class BotCommand(_Expiring):
     close_position: bool = False  # stop only
 
 
+# What happens to a bot's open position when it switches strategy (bots.switch_policy):
+# - keep: the config that opened it still sells it (its SELL, and the trade's stops);
+#   the new config makes the next buy, once the bot is flat;
+# - close_first: it's sold now, until it's gone; the new config starts flat;
+# - hand_over: the new config's SELL sells it; the trade keeps its stops.
+SwitchPolicy = Literal["keep", "close_first", "hand_over"]
+
+
+class SwitchStrategyCommand(_Expiring):
+    """Run bot `bot_id` on another strategy, or other params, without a restart (P6-1).
+
+    The engine checks the params and refuses with the reason. `policy` becomes the
+    bot's switch policy, and says what happens to its open position now.
+    """
+
+    type: Literal["switch_strategy"] = "switch_strategy"
+    bot_id: int
+    strategy: str = Field(min_length=1, max_length=64)
+    params: dict[str, JsonValue] = Field(default_factory=dict)
+    policy: SwitchPolicy
+
+
 class BotReply(_Frozen):
     id: UUID  # the command's
     ok: bool
@@ -144,19 +168,20 @@ class BotReply(_Frozen):
     canceled: list[str] = Field(default_factory=list)  # the orders a stop cancelled
     closing: list[Closing] = Field(default_factory=list)  # a stop + close's sells
     not_closed: list[NotClosed] = Field(default_factory=list)
+    # A switch's new strategy config; None if only the policy changed.
+    strategy_config_id: int | None = None
     took_ms: int
 
 
-Command = Annotated[KillCommand | CreateBotCommand | BotCommand, Field(discriminator="type")]
+BotCommands = CreateBotCommand | BotCommand | SwitchStrategyCommand
+Command = Annotated[KillCommand | BotCommands, Field(discriminator="type")]
 COMMAND: TypeAdapter[Command] = TypeAdapter(Command)
 
 
 @overload
 async def send(redis: Redis, command: KillCommand, *, reply_within: float) -> KillReply | None: ...
 @overload
-async def send(
-    redis: Redis, command: CreateBotCommand | BotCommand, *, reply_within: float
-) -> BotReply | None: ...
+async def send(redis: Redis, command: BotCommands, *, reply_within: float) -> BotReply | None: ...
 async def send(
     redis: Redis, command: Command, *, reply_within: float
 ) -> KillReply | BotReply | None:

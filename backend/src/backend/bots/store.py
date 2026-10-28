@@ -12,11 +12,12 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from shared.commands import SwitchPolicy
 from shared.db.models import BotRow, PaperBalanceRow, StrategyConfigRow
 
 
 class BotSetup(BaseModel):
-    # Ignores the columns it doesn't show (switch_policy, active_strategy_config_id).
+    # Ignores any column it doesn't show.
     model_config = ConfigDict(frozen=True, extra="ignore")
 
     id: int
@@ -27,6 +28,8 @@ class BotSetup(BaseModel):
     timeframe: str
     mode: str
     status: str
+    switch_policy: SwitchPolicy  # what a strategy switch does with its position (D51)
+    active_strategy_config_id: int | None
     strategy: str | None  # None: no active strategy config (the engine refuses it)
     strategy_version: int | None
     params: dict[str, Any] | None

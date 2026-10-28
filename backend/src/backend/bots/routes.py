@@ -1,4 +1,5 @@
-"""The Bots page (D47): list, create, start, pause and stop bots.
+"""The Bots page (D47): list, create, start, pause and stop bots, and switch their
+strategy (P6-1, D51).
 
 All of it is on the `protected` router (app.py): a session is checked before anything
 here runs.
@@ -6,12 +7,12 @@ here runs.
 - `GET /strategies`: what a new bot can be set up with, as the engine described it at
   startup (shared/catalog.py). 503 if it never has: the engine isn't running yet.
 - `GET /bots`: every bot with its setup (store.py).
-- `POST /bots`, `POST /bots/{bot_id}/start`, `/pause`, `/stop`: each sends the engine a
-  command over the Redis command list, as the kill switch does (shared/commands.py),
-  and answers with its reply. The API never writes a bot: the engine checks everything,
-  and its refusal comes back as a 422 with the reason. With no reply in
-  `kill_reply_seconds`, it answers 504; the command expires then, so it can't take
-  effect later, when nobody's looking.
+- `POST /bots`, `POST /bots/{bot_id}/start`, `/pause`, `/stop`, `/strategy`: each sends
+  the engine a command over the Redis command list, as the kill switch does
+  (shared/commands.py), and answers with its reply. The API never writes a bot: the
+  engine checks everything, and its refusal comes back as a 422 with the reason. With
+  no reply in `kill_reply_seconds`, it answers 504; the command expires then, so it
+  can't take effect later, when nobody's looking.
 """
 
 from collections.abc import Callable, Mapping
@@ -29,7 +30,16 @@ from backend.auth.deps import CurrentUser
 from backend.bots.store import BotSetup, read_bots
 from backend.settings import ApiSettings
 from shared.catalog import CATALOG_KEY, Catalog
-from shared.commands import BotAction, BotCommand, BotReply, CreateBotCommand, send
+from shared.commands import (
+    BotAction,
+    BotCommand,
+    BotCommands,
+    BotReply,
+    CreateBotCommand,
+    SwitchPolicy,
+    SwitchStrategyCommand,
+    send,
+)
 
 log = structlog.get_logger()
 
@@ -59,6 +69,14 @@ class StopRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     close_position: bool = False  # also sell the bot's position until it's gone
+
+
+class SwitchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    strategy: str = Field(min_length=1, max_length=64)
+    params: dict[str, JsonValue] = Field(default_factory=dict)
+    policy: SwitchPolicy  # what happens to an open position (shared/commands.py)
 
 
 def _settings(state: State) -> ApiSettings:
@@ -115,6 +133,21 @@ async def stop(bot_id: int, body: StopRequest, request: Request, user: CurrentUs
     )
 
 
+@router.post("/bots/{bot_id}/strategy")
+async def switch(bot_id: int, body: SwitchRequest, request: Request, user: CurrentUser) -> BotReply:
+    state = request.app.state
+    now = _now(state)
+    command = SwitchStrategyCommand(
+        bot_id=bot_id,
+        **body.model_dump(),
+        source=SOURCE,
+        sent_at=now,
+        expires_at=now + timedelta(seconds=_settings(state).kill_reply_seconds),
+    )
+    fields = {"bot_id": bot_id, "strategy": body.strategy, "policy": body.policy}
+    return await _send(state, command, user.username, fields)
+
+
 async def _bot_command(
     state: State, action: BotAction, bot_id: int, username: str, *, close_position: bool = False
 ) -> BotReply:
@@ -133,7 +166,7 @@ async def _bot_command(
 
 async def _send(
     state: State,
-    command: CreateBotCommand | BotCommand,
+    command: BotCommands,
     username: str,
     fields: Mapping[str, object],
 ) -> BotReply:
