@@ -26,8 +26,18 @@ Binance's spot testnet (`testnet.binance.vision`, fake money), the planned P9 te
 |---|---|---|
 | `exchange_info.json` | `GET /api/v3/exchangeInfo` (BTCUSDT) | Recorded live from the testnet |
 
+## `binance/`
+
+Binance's public market data (`data-api.binance.vision`, no key). It's history MEXC no longer serves, used by tests only; nothing at runtime talks to Binance.
+
+| File | Endpoint | Source |
+|---|---|---|
+| `btcusdt_1d_2019_2023.json.gz` | `GET /api/v3/klines` (BTCUSDT, 1d, 2019-06-01 to 2023-12-31), as `Candle` JSON | Recorded live with `engine.regime.record_history` (1,675 days); replayed by `test_regime_history.py` |
+
 ## Re-recording
 
 `uv run python -m engine.exchange.record mexc` (or `binance_testnet`) re-records that exchange's live files. The tests check exact recorded values, so update them to match afterwards.
+
+`uv run python -m engine.regime.record_history` re-records the Binance daily history; closed daily candles don't change, so it should give the same file.
 
 `live_btcusdt_1m.json.gz` has its own recorder, which takes about 3 hours. Run it in Docker (see its docstring), and re-record when the live path's REST requests change: the parity test then fails with "re-record". Private endpoints need an API key, so their fixtures are kept by hand; if a real response ever differs, replace the docs example with it.

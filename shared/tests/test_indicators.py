@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from shared.indicators import Bands, atr, bollinger, ema, rsi
+from shared.indicators import Bands, Directional, adx, atr, bollinger, ema, rsi
 
 
 def test_ema_matches_a_hand_calculation() -> None:
@@ -119,3 +119,58 @@ def test_atr_needs_equal_series_and_a_positive_period() -> None:
         atr([1.0, 2.0], [1.0, 2.0], [1.0, 2.0], 0)
     with pytest.raises(ValueError, match="same length"):
         atr([1.0, 2.0], [1.0], [1.0, 2.0], 1)
+
+
+def test_adx_matches_a_hand_calculation() -> None:
+    # (high, low, close). From the second candle on, up = high - previous high and
+    # down = previous low - low; the bigger one counts as +DM or -DM if positive:
+    #   up  2, down -1: +DM 2, -DM 0, TR 3
+    #   up  1, down -1: +DM 1, -DM 0, TR 3
+    #   up -1, down  2: +DM 0, -DM 2, TR 4
+    #   up -1, down  1: +DM 0, -DM 1, TR 4
+    # Period 2, Wilder's smoothing as in ATR:
+    #   seed:   TR 3,    +DM 1.5,   -DM 0  -> +DI 50,     -DI 0,     DX 100
+    #   then:   TR 3.5,  +DM 0.75,  -DM 1  -> +DI 150/7,  -DI 200/7, DX 100/7
+    #   then:   TR 3.75, +DM 0.375, -DM 1  -> +DI 10,     -DI 80/3,  DX 500/11
+    # ADX seed: (100 + 100/7) / 2 = 400/7; then 400/7 + (500/11 - 400/7) / 2 = 3950/77.
+    candles = [(10, 8, 9), (12, 9, 11), (13, 10, 12), (12, 8, 9), (11, 7, 8)]
+    highs, lows, closes = ([float(c[i]) for c in candles] for i in range(3))
+
+    result = adx(highs, lows, closes, 2)
+
+    assert [tuple(r) for r in result] == [
+        pytest.approx((400 / 7, 150 / 7, 200 / 7)),
+        pytest.approx((3950 / 77, 10.0, 80 / 3)),
+    ]
+    assert isinstance(result[0], Directional)
+
+
+def test_adx_of_a_steady_rise_is_all_one_way() -> None:
+    # Every candle a higher high and a higher low: no -DM at all, so every DX is 100.
+    highs = [float(i + 1) for i in range(10)]
+    lows = [float(i) for i in range(10)]
+    closes = [i + 0.5 for i in range(10)]
+
+    for point in adx(highs, lows, closes, 3):
+        assert point.adx == pytest.approx(100.0)
+        assert point.plus_di > 0
+        assert point.minus_di == 0.0
+
+
+def test_adx_of_a_flat_market_is_zero() -> None:
+    assert adx([5.0] * 5, [5.0] * 5, [5.0] * 5, 2) == [Directional(0.0, 0.0, 0.0)] * 2
+
+
+def test_adx_has_one_value_per_full_period_of_dx() -> None:
+    # DX starts at candle `period`, and ADX averages `period` of them.
+    flat = [1.0] * 10
+    assert len(adx(flat, flat, flat, 1)) == 9
+    assert len(adx(flat, flat, flat, 5)) == 1
+    assert adx(flat[:9], flat[:9], flat[:9], 5) == []
+
+
+def test_adx_needs_equal_series_and_a_positive_period() -> None:
+    with pytest.raises(ValueError, match="period"):
+        adx([1.0, 2.0], [1.0, 2.0], [1.0, 2.0], 0)
+    with pytest.raises(ValueError, match="same length"):
+        adx([1.0, 2.0], [1.0], [1.0, 2.0], 1)
