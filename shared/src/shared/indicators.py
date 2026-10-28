@@ -92,6 +92,78 @@ def atr(
     return result
 
 
+class Directional(NamedTuple):
+    adx: float
+    plus_di: float
+    minus_di: float
+
+
+def adx(
+    highs: Sequence[float], lows: Sequence[float], closes: Sequence[float], period: int
+) -> list[Directional]:
+    """Average Directional Index, Wilder's: how strong a trend is, and which way.
+
+    From the second candle on, the up-move is the high minus the previous high and the
+    down-move the previous low minus the low; the bigger one counts as +DM or -DM if
+    it's positive (an inside or outside candle can count as neither). +DM, -DM and the
+    true range are smoothed as in `atr`, and +DI / -DI = 100 x smoothed DM / smoothed
+    TR: the share of the typical move that went up or down. DX = 100 x |+DI - -DI| /
+    (+DI + -DI) says how one-sided that was, and ADX smooths DX the same way, seeded
+    with the average of the first `period` DX values. ADX is 0 to 100 and has no
+    direction; the DI lines give that. A flat market reads 0 for all three.
+
+    DX starts at candle `period`, so `result[i]` belongs to candle `i + 2 * period - 1`:
+    there are `len(closes) - 2 * period + 1` results, or none with fewer candles.
+    """
+    if period < 1:
+        raise ValueError(f"ADX period must be at least 1, got {period}")
+    if not len(highs) == len(lows) == len(closes):
+        raise ValueError("ADX needs highs, lows and closes of the same length")
+    if len(closes) < 2 * period:
+        return []
+    plus_dm: list[float] = []
+    minus_dm: list[float] = []
+    ranges: list[float] = []
+    for i in range(1, len(closes)):
+        up = highs[i] - highs[i - 1]
+        down = lows[i - 1] - lows[i]
+        plus_dm.append(up if up > down and up > 0 else 0.0)
+        minus_dm.append(down if down > up and down > 0 else 0.0)
+        prev_close = closes[i - 1]
+        ranges.append(
+            max(highs[i] - lows[i], abs(highs[i] - prev_close), abs(lows[i] - prev_close))
+        )
+
+    true_range = sum(ranges[:period]) / period
+    plus = sum(plus_dm[:period]) / period
+    minus = sum(minus_dm[:period]) / period
+    lines = [_di(plus, minus, true_range)]
+    for tr, p, m in zip(ranges[period:], plus_dm[period:], minus_dm[period:], strict=True):
+        true_range += (tr - true_range) / period
+        plus += (p - plus) / period
+        minus += (m - minus) / period
+        lines.append(_di(plus, minus, true_range))
+
+    dx = [_dx(plus_di, minus_di) for plus_di, minus_di in lines]
+    current = sum(dx[:period]) / period
+    result = [Directional(current, *lines[period - 1])]
+    for value, (plus_di, minus_di) in zip(dx[period:], lines[period:], strict=True):
+        current += (value - current) / period
+        result.append(Directional(current, plus_di, minus_di))
+    return result
+
+
+def _di(plus: float, minus: float, true_range: float) -> tuple[float, float]:
+    if true_range == 0:
+        return 0.0, 0.0
+    return 100 * plus / true_range, 100 * minus / true_range
+
+
+def _dx(plus_di: float, minus_di: float) -> float:
+    total = plus_di + minus_di
+    return 0.0 if total == 0 else 100 * abs(plus_di - minus_di) / total
+
+
 class Bands(NamedTuple):
     lower: float
     middle: float

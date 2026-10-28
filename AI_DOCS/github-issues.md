@@ -620,9 +620,24 @@ Done (D50):
 
 ### P6-3 · Regime detector
 `strategy` · Depends on: P2-1
-- [ ] ADX, ATR, EMA slope → trending up/down, ranging, high volatility
+- [x] ADX, ATR, EMA slope → trending up/down, ranging, high volatility
 
 **Done when:** tests on labeled historical windows give the expected regimes.
+
+**Done** (D53):
+- `test_regime_history.py` (done-when): Binance BTC/USDT 1d, 2019-06 to 2023 (`engine.regime.record_history`; MEXC keeps only about a year), default settings. Nine spans labeled from market history, each read mostly as its label:
+  - **Up:** Oct–Dec 2020, 11k → 19k (56 of 67 days `trending_up`); Oct–Dec 2023, 28k → 43k (52 of 54).
+  - **Down:** Nov 2021–Jan 2022, 65k → 35k (49 of 68 `trending_down`, the rest `unclear`); Apr–May 2022, 46k → 34k.
+  - **Ranging:** May–Jul 2020 at 9–10k; Jun–Aug 2023 at 29–31.5k.
+  - **High volatility:** the COVID crash (9 of 12 days), China's mining ban (7 of 13), Celsius and 3AC (8 of 8).
+  - No trend span ever reads as the opposite trend.
+- **Found on the first run:** 7 of 9 passed with no allowance. ADX lags weeks on daily candles. The 2023 range read as the June rally's uptrend until 25 July (31 of 51 days), and the April 2022 slide read as ranging until ADX crossed 25 on 27 April. The owner chose to keep the textbook settings and judge trend and range spans from 2 × `adx_period` (28) candles in, rather than tune ADX to fit; crashes get no allowance. The lag is recorded in D53 for P6-4.
+- `test_regime.py`: each rule on a hand-built series:
+  - a steady rise, a fall and a tight zigzag;
+  - one wide candle after a calm stretch, and high volatility beating an uptrend;
+  - the 20–25 dead band and DI vs. slope disagreeing (both `unclear`), and warming up;
+  - history before the window changes nothing, a flat market divides by nothing, and the params are checked.
+- `shared/tests/test_indicators.py`: `adx()` against a hand-worked period-2 series, a steady rise (ADX 100, −DI 0), a flat market (all 0), lengths and bad inputs.
 
 ### P6-4 · Auto-switcher
 `engine` `frontend` · Depends on: P6-1, P6-3
@@ -636,6 +651,14 @@ Done (D50):
 - [ ] Backtester supports the switcher as one combined strategy
 
 **Done when:** an auto-switching backtest runs end to end and produces a full report.
+
+**Note: the regime detector's lag (from P6-3, D53).** ADX is smoothed twice, so the detector recognises a new trend or range about 2 × `adx_period` candles late. On 1d that's 2–4 weeks: summer 2023 read `trending_up` until Jul 25, though BTC had flattened out by late June. Most of the lag is in *leaving* a trend, because ADX takes weeks to fall below 20. Once this backtest exists, try two candidate fixes against the current rules:
+- **Kaufman's efficiency ratio** (net change ÷ the sum of absolute changes over 20 candles) as the strength measure. It has a fixed window and no smoothing tail.
+- **A fast trend exit:** `unclear` as soon as the DI lines cross or the EMA slope flips, rather than waiting for ADX < 20. "ADX falling" was considered and dropped: in July 2023 ADX bounced back up mid-fade, so that rule would flicker.
+
+Judge them in two steps:
+- **First, a lag/flip report over the 2019–2023 fixture:** days until each labeled span is recognised, and label changes per year. Faster labels also flip more, which means a longer minimum hold.
+- **Then this combined backtest:** keep a variant only if it makes more money net of switching. Don't tune to the 9 labeled spans. A shorter `adx_period` is the fallback: easy, but noisier everywhere.
 
 ### P6-6 · Grid and DCA strategies
 `strategy` · Depends on: P2-2
