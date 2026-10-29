@@ -164,6 +164,29 @@ def _dx(plus_di: float, minus_di: float) -> float:
     return 0.0 if total == 0 else 100 * abs(plus_di - minus_di) / total
 
 
+def efficiency_ratio(values: Sequence[float], period: int) -> list[float]:
+    """Kaufman's efficiency ratio, 0 to 1: how much of the movement went somewhere.
+
+    Over the `period` changes ending at a value, |net change| / the sum of |changes|:
+    1 for a straight line, near 0 for a market going back and forth, and 0 when it
+    didn't move at all. A fixed window with no smoothing, so it forgets a trend as soon
+    as the window has moved past it (P6-5b). `result[i]` belongs to `values[i + period]`,
+    so there are `len(values) - period` results, or none with `period` values or fewer.
+    """
+    if period < 1:
+        raise ValueError(f"efficiency ratio period must be at least 1, got {period}")
+    if len(values) <= period:
+        return []
+    moves = [abs(b - a) for a, b in itertools.pairwise(values)]
+    result = []
+    for end in range(period, len(values)):
+        # Summed afresh per window: a running sum would drift, and periods are short.
+        path = sum(moves[end - period : end])
+        net = abs(values[end] - values[end - period])
+        result.append(0.0 if path == 0 else net / path)
+    return result
+
+
 class Bands(NamedTuple):
     lower: float
     middle: float

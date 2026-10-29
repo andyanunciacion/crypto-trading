@@ -721,8 +721,8 @@ Done (D50):
 
 ### P6-5b · Regime detector lag
 `strategy` · Depends on: P6-5
-- [ ] Lag/flip report on the 2019–2023 fixture; Kaufman's efficiency ratio and a fast trend exit judged with the combined backtest against its baselines
-- [ ] Also weigh EMA crossover v2 (enter while fast > slow, a state, D31): P6-5 found an event entry and a late switch don't mix
+- [x] Lag/flip report on the 2019–2023 fixture; Kaufman's efficiency ratio and a fast trend exit judged with the combined backtest against its baselines
+- [x] Also weigh EMA crossover v2 (enter while fast > slow, a state, D31): P6-5 found an event entry and a late switch don't mix
 
 **Note: the regime detector's lag (from P6-3, D53).** ADX is smoothed twice, so the detector recognises a new trend or range about 2 × `adx_period` candles late. On 1d that's 2–4 weeks: summer 2023 read `trending_up` until Jul 25, though BTC had flattened out by late June. Most of the lag is in *leaving* a trend, because ADX takes weeks to fall below 20. Once this backtest exists, try two candidate fixes against the current rules:
 - **Kaufman's efficiency ratio** (net change ÷ the sum of absolute changes over 20 candles) as the strength measure. It has a fixed window and no smoothing tail.
@@ -733,6 +733,55 @@ Judge them in two steps:
 - **Then this combined backtest:** keep a variant only if it makes more money net of switching. Don't tune to the 9 labeled spans. A shorter `adx_period` is the fallback: easy, but noisier everywhere.
 
 **Done when:** the lag/flip report exists, and each variant is kept or dropped on the combined backtest's numbers against its baselines. A kept one bumps `RegimeDetector.version`.
+
+**Done** (D56): nothing was promoted. The detector stays at version 1 and EMA crossover keeps its cross entry.
+- **The owner's choices:**
+  - A probe showed the issue's "fast trend exit" (unclear on a DI cross or slope flip) is already the rule above ADX 25. In summer 2023 neither happened: +DI stayed above −DI and the EMA rose until Jul 24–25, while ADX climbed back to 34.7 mid-July. So the second variant became **ADX in, ER out** (a trend also needs the efficiency ratio at the range level).
+  - The efficiency ratio's levels **match ADX's base rates**: on the fixture, ADX ≥ 25 on 60.8% of candles and < 20 on 19.1%, so the levels are 0.15 and 0.05 (0.158 and 0.070 unrounded).
+  - The state entry would ship as an `entry` param at version 1. That was moot once it was dropped.
+  - After the numbers came in, the owner first chose to promote `er` and the state entry, as the rule said. Then `er` failed `test_regime_history.py` (below), and the owner chose to revert both.
+- **The study:**
+  - `engine/regime/study.py` (`uv run python -m engine.regime.study FILE...`, about a minute) runs four variants as subclasses of `RegimeDetector`, swapped into an `AutoSwitcher` as the switcher tests do: v1, `er` (ER(20) replaces ADX), `adx_er_exit` and `adx10`.
+  - `EmaStateEntry` (`ema_crossover_state`, not registered) is the state entry.
+  - The lag/flip measures are `regime/lag.py` (pure). `efficiency_ratio()` joined `shared/indicators.py`.
+  - The labeled spans moved to `regime/history.py`, shared with the history test.
+  - `record_history` takes `--symbol/--start/--end`; its defaults re-record the BTC fixture byte for byte. It recorded two holdouts: ETH/USDT 2019–2023 and BTC/USDT 2024-01 to 2026-09.
+- **The keep rule, fixed before any numbers:** a variant must beat v1's combined return (cross entry) in ≥ 6 of 9 hold × policy cells on BTC 2019–2023 and ≥ 2 of 3 (hold 3) on each holdout. The state entry is judged the same way, against the cross entry under the same detector.
+- **Lag (BTC 2019–2023, days from a span's start to its first reading):**
+
+  | | Uptrends | Downtrends | Ranges | Label changes/yr | Confirmed (hold 1/3/5)/yr |
+  |---|---|---|---|---|---|
+  | v1 | 7, 2 | 19, 22 | 25, 35 | 36 | 16 / 11 / 9 |
+  | `er` | 1, 0 | 10, 8 | 1, 19 | 103 | 35 / 13 / 6 |
+  | `adx_er_exit` | 7, 2 | 19, 22 | 25, 35 | 50 | 16 / 11 / 8 |
+  | `adx10` | 2, 0 | 8, 8 | 53, 33 | 47 | 17 / 14 / 10 |
+
+  Crashes read alike under all four (0–6 days), since ATR decides them.
+- **Combined backtest (total return; all fills at the next open, 0.1% fee, 0.05% slippage):**
+
+  | | BTC 2019–23 (9 cells) | ETH 2019–23 (hold 3) | BTC 2024–26 (hold 3) |
+  |---|---|---|---|
+  | v1, cross entry | −36% to −5% | −20% to +29% | −13% to −8% |
+  | v1, state entry | +162% to +456% | +195% to +435% | −25% to −20% |
+  | `er`, cross entry | −39% to −4% | −12% to +75% | −7% to +40% |
+  | `er`, state entry | +104% to +344% | +802% to +1193% | +10% to +34% |
+  | Best baseline | EMA alone +641% | buy-and-hold +1677% | EMA alone +45% |
+
+- **Verdicts:**
+  - `er` passed (6/9, 3/3, 3/3), and so did the state entry under it (9/9, 3/3, 2/3).
+  - The state entry under v1 failed (0/3 on BTC 2024–26), as did `adx_er_exit` (0/9; the summer-2023 fade was a slow drift, so the ratio stayed above its level) and `adx10` (1/3 on BTC 2024–26).
+  - With the unrounded levels (`--er-levels 0.16 0.07`) the verdicts were the same (`er` 8/9).
+- **Why `er` wasn't promoted after all:** as detector version 2 it failed 3 of the 9 labeled spans v1 passes.
+  - **The 2023 summer range** read as it on 9% of its days after the allowance. The ratio ignores how big a move is, so early August's 0.01%-a-day drift read `trending_down`.
+  - **The 2020 range** narrowly lost: unclear 17 days, ranging 15.
+  - **The Luna span's first day** read the March rally's `trending_up`.
+
+  Its backtest wins were also fragile. It beat v1 only while both lost money with the cross entry. With the state entry it won both holdouts but lost 5 of 9 cells on the main file.
+- **Nothing beat its baselines** on any file, so D55's rule stands: no money on auto-switching.
+- **Tests:**
+  - `test_regime_study.py`: the study's v1 makes D54's 57/41/34 switches; the matched levels are 0.15/0.05; each variant reads as its rule says; the memo returns the detector's readings; the state entry buys mid-rise where the cross entry waits; the keep rule counts as above.
+  - `test_regime_lag.py` (scripted labels) and `test_indicators.py` (`efficiency_ratio`).
+- **Checked:** the promoted version (detector v2 and the `entry` param) reproduced the study's report line for line before it was reverted. The reverted study gives the same report again.
 
 ### P6-5c · Auto-switching backtests from the dashboard
 `frontend` · Depends on: P6-5
