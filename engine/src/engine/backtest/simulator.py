@@ -17,6 +17,18 @@ The fill model:
   position at the stop's price, with slippage and the fee like any fill. A BUY whose
   stops can't be placed (no ATR) is skipped.
 
+Auto-switching (P6-5, D55), if the run has it, switches the strategy as an
+auto-switching bot does (bots/runner.py), with the same rule (regime/switcher.py):
+- After each candle's signal, the regime is checked at that candle. A switch it calls
+  for takes over from the next candle on, so its first signal fills an open later.
+- The switch policy says what happens to an open position, as on a live bot (D51):
+  `keep` leaves it to the config that bought it, whose SELL alone is acted on until
+  the run is flat; `close_first` sells it at the next open (exit `switch`), after a
+  BUY made on the same candle, as the bot places that before the switch is made;
+  `hand_over` lets the new config sell it. Its stops stay, whatever the policy.
+- Unlike a live bot, the new config is always warm by the next candle: it has every
+  candle here, where a bot fetches them over REST (D51).
+
 Pure and synchronous: no database, no exchange, no clock. Same inputs, same result.
 """
 
@@ -25,18 +37,22 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from itertools import pairwise
+from typing import Any
 
 import structlog
 
 from engine.backtest.models import (
     BacktestConfig,
     BacktestResult,
+    BacktestSwitch,
+    ConfigRef,
     EquityPoint,
     Fill,
     SkippedOrder,
 )
 from engine.exchange.models import Candle, OrderSide, Timeframe
 from engine.marketdata.timeframes import STEP
+from engine.regime.switcher import AutoSwitcher, same_config
 from engine.risk.sizing import (
     NotSized,
     atr_for,
@@ -47,7 +63,6 @@ from engine.risk.sizing import (
 )
 from engine.risk.stops import (
     NO_STOPS,
-    ExitKind,
     ExitState,
     NoLevels,
     after_candle,
@@ -56,6 +71,7 @@ from engine.risk.stops import (
 )
 from engine.risk.stops import lookback as stops_lookback
 from engine.strategies.base import Position, Signal, Strategy, StrategyParams
+from shared.backtest import FillExit
 
 # Stored with every run. Bump it when the fill model changes, so old runs aren't
 # "reproduced" by different rules.
@@ -83,13 +99,42 @@ def _side(signal: Signal) -> OrderSide:
     return "buy" if signal.action == "buy" else "sell"  # callers never pass a HOLD
 
 
-def warmup_needed[P: StrategyParams](strategy: Strategy[P], config: BacktestConfig) -> int:
-    """Candles a run needs before its start: for the strategy, and for ATR sizing or stops."""
-    return max(strategy.warmup_candles, _atr_window(config), 1)
+def warmup_needed[P: StrategyParams](
+    strategy: Strategy[P], config: BacktestConfig, switcher: AutoSwitcher | None = None
+) -> int:
+    """Candles a run needs before its start: for the strategy, for ATR sizing or stops,
+    and with auto-switching for the regime's readings and every config it maps."""
+    needed = max(strategy.warmup_candles, _atr_window(config), 1)
+    auto = _switcher(config, switcher)
+    if auto is None:
+        return needed
+    return max(needed, auto.window, *(s.warmup_candles for s in auto.targets.values()))
 
 
 def _atr_window(config: BacktestConfig) -> int:
     return max(lookback(config.sizing), stops_lookback(config.stops))
+
+
+def _switcher(config: BacktestConfig, given: AutoSwitcher | None) -> AutoSwitcher | None:
+    """The run's switcher: `given` (tests script one), or built from the config. Raises
+    ValueError if a mapped config doesn't build."""
+    if config.auto_switch is None:
+        if given is not None:
+            raise BacktestError("a switcher was given, but the config has no auto_switch")
+        return None
+    if given is None:
+        return AutoSwitcher(config.auto_switch)
+    if given.settings != config.auto_switch:
+        raise BacktestError("the switcher's settings aren't the config's auto_switch")
+    return given
+
+
+def config_ref(strategy: Strategy[Any]) -> ConfigRef:
+    return ConfigRef(
+        strategy=strategy.name,
+        version=strategy.version,
+        params=strategy.params.model_dump(mode="json"),
+    )
 
 
 @dataclass
@@ -100,6 +145,9 @@ class _Account:
     cash: Decimal
     position: Position | None = None
     exits: ExitState | None = None  # the open position's stops, if the run has any
+    # The config whose BUY opened the position (auto-switching runs only): its keeper,
+    # under the policy `keep`.
+    opened_by: Strategy[Any] | None = None
     fills: list[Fill] = field(default_factory=list)
     skipped: list[SkippedOrder] = field(default_factory=list)
     total_fees: Decimal = Decimal(0)
@@ -112,10 +160,17 @@ class _Account:
         self.skipped.append(SkippedOrder(signal_ts=signal.ts, side=side, reason=reason))
         log.debug("backtest.skipped", signal_ts=signal.ts.isoformat(), side=side, reason=reason)
 
-    def execute(self, signal: Signal, candle: Candle, history: Sequence[Candle]) -> None:
+    def execute(
+        self,
+        signal: Signal,
+        candle: Candle,
+        history: Sequence[Candle],
+        decided_by: Strategy[Any] | None = None,
+    ) -> None:
         """Fill `signal` (from the previous candle) at `candle`'s open, if it can be.
 
         `history` is the closed candles up to the signal's, for ATR sizing and stops.
+        `decided_by` is the config whose signal it is, in an auto-switching run.
         """
         side = _side(signal)
         price = fill_price(side, candle.open, self.config.slippage_rate)
@@ -158,8 +213,25 @@ class _Account:
             if too_small is not None:
                 self.skip(signal, side, too_small)
                 return
-        self._fill(candle.ts, side, price, amount)
+        by = None if decided_by is None else config_ref(decided_by)
+        self._fill(candle.ts, side, price, amount, decided_by=by)
         self.exits = exits  # a buy's levels; a sell leaves none
+        self.opened_by = decided_by if side == "buy" else None
+
+    def close(self, candle: Candle) -> None:
+        """Sell the whole position at `candle`'s open: an auto-switch's `close_first`."""
+        if self.position is None:
+            return
+        price = fill_price("sell", candle.open, self.config.slippage_rate)
+        amount = self.position.amount
+        too_small = below_minimum(amount, price, self.config.market_rules)
+        if too_small is not None:
+            reason = f"switch: {too_small}"
+            self.skipped.append(SkippedOrder(signal_ts=candle.ts, side="sell", reason=reason))
+            return
+        self.exits = None
+        self.opened_by = None
+        self._fill(candle.ts, "sell", price, amount, exit="switch")
 
     def watch(self, candle: Candle) -> None:
         """After `candle`'s open: sell if it hits a stop, or else let the trailing stop follow."""
@@ -178,6 +250,7 @@ class _Account:
             reason = f"{hit.kind}: {too_small}"
             self.skipped.append(SkippedOrder(signal_ts=candle.ts, side="sell", reason=reason))
             return
+        self.opened_by = None
         self._fill(candle.ts, "sell", price, amount, exit=hit.kind)
 
     def _fill(
@@ -186,7 +259,8 @@ class _Account:
         side: OrderSide,
         price: Decimal,
         amount: Decimal,
-        exit: ExitKind | None = None,
+        exit: FillExit | None = None,
+        decided_by: ConfigRef | None = None,
     ) -> None:
         paid = fee(price, amount, self.config.fee_rate)
         if side == "buy":
@@ -204,27 +278,46 @@ class _Account:
             fee=paid,
             cash_after=self.cash,
             exit=exit,
+            decided_by=decided_by,
         )
         self.fills.append(fill)
         log.debug("backtest.fill", **fill.model_dump(mode="json"))
 
 
 def run_backtest[P: StrategyParams](
-    strategy: Strategy[P], candles: Sequence[Candle], config: BacktestConfig
+    strategy: Strategy[P],
+    candles: Sequence[Candle],
+    config: BacktestConfig,
+    *,
+    switcher: AutoSwitcher | None = None,
 ) -> BacktestResult:
     """Run `strategy` over `candles`: its warm-up candles, then the range in `config`.
 
     `candles` must be contiguous (no gaps), with at least `warmup_candles` before
-    `config.start` and the last one opening one step before `config.end`.
+    `config.start` and the last one opening one step before `config.end`. With
+    `config.auto_switch`, `strategy` is the config the run starts on, and the switcher
+    is built from the settings unless given.
     """
     _check_strategy(strategy, config)
-    first = _first_in_range(candles, config, warmup_needed(strategy, config))
-    window = strategy.warmup_candles
+    auto = _switcher(config, switcher)
+    first = _first_in_range(candles, config, warmup_needed(strategy, config, auto))
     atr_window = _atr_window(config)
+    step = STEP[config.timeframe]
+    last = len(candles) - 1
     account = _Account(config=config, cash=config.initial_cash)
     signals: list[Signal] = []
     equity_curve: list[EquityPoint] = []
-    pending: Signal | None = None
+    switches: list[BacktestSwitch] = []
+    active: Strategy[Any] = strategy
+    # The signal to fill at the next open, and (auto-switching only) whose it is.
+    pending: tuple[Signal, Strategy[Any] | None] | None = None
+    close_pending = False  # a `close_first` switch sells at the next open
+
+    def on_candle(decider: Strategy[Any], i: int) -> Signal:
+        # Only the last `warmup_candles`: all on_candle uses (D28), and it keeps a long
+        # run from copying an ever-growing history on every candle.
+        window = decider.warmup_candles
+        return decider.on_candle(candles[max(0, i + 1 - window) : i + 1], account.position)
 
     # Starts on the last warm-up candle: its signal fills at the first open in range.
     for i in range(first - 1, len(candles)):
@@ -233,22 +326,61 @@ def run_backtest[P: StrategyParams](
             if pending is not None:
                 # Up to the signal's candle (i - 1): a live bot doesn't know candle i yet.
                 history = candles[max(0, i - atr_window) : i] if atr_window else ()
-                account.execute(pending, candle, history)
+                account.execute(pending[0], candle, history, pending[1])
                 pending = None
+            if close_pending:
+                account.close(candle)
+                close_pending = False
             account.watch(candle)  # stops, from the open on, including a buy's own candle
             equity_curve.append(
                 EquityPoint(ts=candle.ts, equity=account.cash + account.amount * candle.close)
             )
-        # Only the last `window` candles: all on_candle uses (D28), and it keeps a long
-        # run from copying an ever-growing history on every candle.
-        signal = strategy.on_candle(candles[max(0, i + 1 - window) : i + 1], account.position)
-        if signal.action == "hold":
+        signal: Signal | None = on_candle(active, i)
+        decider = None if auto is None else active
+        keeper = _keeper(auto, account, active)
+        if keeper is not None and signal is not None:
+            # As a live bot's _step: the position is the keeper's to sell, and only its
+            # SELL is acted on until the run is flat.
+            if signal.action != "hold":
+                signals.append(signal)
+                why = f"its position is {config_ref(keeper).label}'s to sell (switched with keep)"
+                account.skip(signal, _side(signal), why)
+            kept = on_candle(keeper, i)
+            signal, decider = (kept, keeper) if kept.action == "sell" else (None, None)
+        if signal is not None and signal.action != "hold":
+            signals.append(signal)
+            if i == last:
+                account.skip(signal, _side(signal), "signal on the last candle: no next candle")
+            else:
+                pending = (signal, decider)
+        if auto is None:
             continue
-        signals.append(signal)
-        if i == len(candles) - 1:
-            account.skip(signal, _side(signal), "signal on the last candle: no next candle")
-        else:
-            pending = signal
+        check = auto.check(candles[max(0, i + 1 - auto.window) : i + 1], active, step)
+        if check.switch is None:
+            continue
+        target = check.switch.target
+        switches.append(
+            BacktestSwitch(
+                ts=candle.ts,
+                regime=check.switch.regime,
+                from_config=config_ref(active),
+                to_config=config_ref(target),
+                reason=check.switch.reason,
+            )
+        )
+        log.debug("backtest.switch", **switches[-1].model_dump(mode="json"))
+        if auto.settings.policy == "close_first":
+            selling = pending is not None and pending[0].action == "sell"
+            buying = pending is not None and pending[0].action == "buy"
+            if not selling and (account.position is not None or buying):
+                if i == last:
+                    reason = "switch on the last candle: no next candle"
+                    account.skipped.append(
+                        SkippedOrder(signal_ts=candle.ts, side="sell", reason=reason)
+                    )
+                else:
+                    close_pending = True
+        active = target
 
     last_close = candles[-1].close
     return BacktestResult(
@@ -260,7 +392,22 @@ def run_backtest[P: StrategyParams](
         final_amount=account.amount,
         final_equity=account.cash + account.amount * last_close,
         total_fees=account.total_fees,
+        switches=switches,
     )
+
+
+def _keeper(
+    auto: AutoSwitcher | None, account: _Account, active: Strategy[Any]
+) -> Strategy[Any] | None:
+    """The config that still sells the open position, as a live bot works it out
+    (bots/store.py's _with_keeper): under `keep`, while the buy's config isn't the one
+    the run is on now. Switching back to it ends the keeper."""
+    opened_by = account.opened_by
+    if auto is None or auto.settings.policy != "keep" or opened_by is None:
+        return None
+    if account.position is None or same_config(opened_by, active):
+        return None
+    return opened_by
 
 
 def _check_strategy[P: StrategyParams](strategy: Strategy[P], config: BacktestConfig) -> None:

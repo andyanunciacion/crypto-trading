@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from shared.backtest import (
     BacktestReport,
+    BacktestSwitch,
     SkippedOrder,
     StoredResult,
     Trade,
@@ -68,6 +69,9 @@ class RunInputs(_Frozen):
     slippage_rate: Decimal
     sizing: dict[str, Any]
     stops: dict[str, Any]
+    # Its regime -> strategy mapping, min hold and policy (shared.regime.AutoSwitchSettings),
+    # with `strategy` above the config it started on; None for a plain run (P6-5).
+    auto_switch: dict[str, Any] | None
     candle_count: int
     candles_sha256: str
     backtester_version: int
@@ -88,6 +92,7 @@ class RunDetail(RunSummary):
     trades: list[Trade]  # closed round trips, oldest first
     equity: list[EquityPoint]  # one point per candle in the range
     skipped: list[SkippedOrder]  # signals that didn't become fills, and why
+    switches: list[BacktestSwitch]  # an auto-switching run's, oldest first
     fills: int
     signals: int
 
@@ -138,6 +143,7 @@ def _detail(row: RowMapping) -> RunDetail:
                 trades=[],
                 equity=[],
                 skipped=[],
+                switches=[],
                 fills=0,
                 signals=0,
             )
@@ -152,6 +158,7 @@ def _detail(row: RowMapping) -> RunDetail:
                     for p, fall in zip(result.equity_curve, falls, strict=True)
                 ],
                 skipped=result.skipped,
+                switches=result.switches,
                 fills=len(result.fills),
                 signals=len(result.signals),
             )

@@ -11,9 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from engine.backtest.models import BacktestConfig, BacktestResult
 from engine.backtest.simulator import BACKTESTER_VERSION
 from engine.exchange.models import Candle, MarketRules
+from engine.regime.detector import RegimeDetector
 from engine.risk.sizing import SIZING
 from engine.risk.stops import STOPS
 from shared.db.models import BacktestRunRow
+from shared.regime import AutoSwitchSettings
 
 
 def candles_sha256(candles: Sequence[Candle]) -> str:
@@ -38,6 +40,7 @@ class StoredRun:
     candle_count: int
     candles_sha256: str
     backtester_version: int
+    regime_detector_version: int | None  # auto-switching runs only
     result: BacktestResult
 
 
@@ -53,6 +56,7 @@ class BacktestRunStore:
         result: BacktestResult,
     ) -> int:
         """Store a finished run; returns its id. `candles` are all it ran on, warm-up included."""
+        auto = config.auto_switch
         stmt = (
             insert(BacktestRunRow)
             .values(
@@ -71,6 +75,8 @@ class BacktestRunStore:
                 market_rules=config.market_rules.model_dump(mode="json"),
                 sizing=SIZING.dump_python(config.sizing, mode="json"),
                 stops=STOPS.dump_python(config.stops, mode="json"),
+                auto_switch=None if auto is None else auto.model_dump(mode="json"),
+                regime_detector_version=None if auto is None else RegimeDetector.version,
                 candle_count=len(candles),
                 candles_sha256=candles_sha256(candles),
                 backtester_version=BACKTESTER_VERSION,
@@ -105,6 +111,9 @@ class BacktestRunStore:
             market_rules=MarketRules.model_validate(row["market_rules"]),
             sizing=SIZING.validate_python(row["sizing"]),
             stops=STOPS.validate_python(row["stops"]),
+            auto_switch=None
+            if row["auto_switch"] is None
+            else AutoSwitchSettings.model_validate(row["auto_switch"]),
         )
         return StoredRun(
             id=row["id"],
@@ -114,5 +123,6 @@ class BacktestRunStore:
             candle_count=row["candle_count"],
             candles_sha256=row["candles_sha256"],
             backtester_version=row["backtester_version"],
+            regime_detector_version=row["regime_detector_version"],
             result=BacktestResult.model_validate(row["result"]),
         )

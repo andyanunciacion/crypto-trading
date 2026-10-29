@@ -4,7 +4,9 @@ Run inside the stack (Postgres has no host port), after backfilling the candles:
     docker compose run --rm engine python -m engine.backtest.run ema_crossover BTC/USDT 1h
 Add `--params '{"fast": 9, "slow": 21}'` to change the strategy's settings. The range
 ends at the last stored candle and goes back `--days`; the strategy's warm-up candles
-come from before that.
+come from before that. `--auto-switch '{"mapping": {...}}'` switches strategy as the
+regime changes, as an auto-switching bot does (P6-5), starting on the strategy given,
+and also prints each of its configs run alone over the same candles (compare.py).
 """
 
 import argparse
@@ -14,7 +16,14 @@ from typing import Any
 
 import structlog
 
-from engine.backtest.cli import add_run_arguments, json_object_arg, run_settings
+from engine.backtest.cli import (
+    AUTO_SWITCH_HELP,
+    add_run_arguments,
+    auto_switch_arg,
+    json_object_arg,
+    run_settings,
+)
+from engine.backtest.compare import baselines, describe_baselines
 from engine.backtest.models import BacktestConfig, BacktestResult
 from engine.backtest.report import describe, report
 from engine.backtest.simulator import (
@@ -27,6 +36,7 @@ from engine.backtest.store import BacktestRunStore, candles_sha256
 from engine.exchange.models import Candle
 from engine.marketdata.store import CandleStore, Series
 from engine.marketdata.timeframes import STEP
+from engine.regime.detector import RegimeDetector
 from engine.strategies.base import Strategy
 from engine.strategies.registry import STRATEGIES, build, strategy_class
 from shared.config import Settings, load_settings
@@ -76,7 +86,8 @@ async def reproduce(candles: CandleStore, runs: BacktestRunStore, run_id: int) -
     """Run a stored backtest again from its stored inputs.
 
     Refuses if anything it depends on has changed since: the backtester, the strategy's
-    version or the candles. Otherwise the result must equal the stored one.
+    version (or a mapped one's), the regime detector's or the candles. Otherwise the
+    result must equal the stored one.
     """
     stored = await runs.load(run_id)
     config = stored.config
@@ -84,6 +95,12 @@ async def reproduce(candles: CandleStore, runs: BacktestRunStore, run_id: int) -
         raise BacktestError(
             f"run {run_id} used backtester version {stored.backtester_version}, "
             f"this is version {BACKTESTER_VERSION}"
+        )
+    detector = stored.regime_detector_version
+    if config.auto_switch is not None and detector != RegimeDetector.version:
+        raise BacktestError(
+            f"run {run_id} used regime detector version {detector}, "
+            f"this is version {RegimeDetector.version}"
         )
     strategy = build(config.strategy, config.strategy_version, config.params)
     history = await load_candles(candles, config, stored.warmup_candles)
@@ -103,6 +120,10 @@ async def run(args: argparse.Namespace, settings: Settings) -> None:
         config = await run_settings(args, candles, strategy)
         run_id, result = await backtest(candles, BacktestRunStore(db), strategy, config)
         print(describe(run_id, config, result))
+        if config.auto_switch is not None:
+            history = await load_candles(candles, config, warmup_needed(strategy, config))
+            found = await asyncio.to_thread(baselines, strategy, history, config)
+            print(describe_baselines(config, result, found))
     finally:
         await db.dispose()
 
@@ -117,6 +138,7 @@ def main() -> None:
         default={},
         help="strategy params as JSON (default: its own)",
     )
+    parser.add_argument("--auto-switch", type=auto_switch_arg, help=AUTO_SWITCH_HELP)
     args = parser.parse_args()
 
     settings = load_settings()

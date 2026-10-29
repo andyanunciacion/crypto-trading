@@ -247,6 +247,58 @@ async def test_a_run_shows_its_trades_equity_and_skipped_orders(api: Api) -> Non
         {"signal_ts": "2026-01-01T04:00:00Z", "side": "buy", "reason": "below min_cost"}
     ]
     assert (run["fills"], run["signals"], run["metrics"]["trade_count"]) == (4, 2, 2)
+    # Stored before auto-switching runs existed: none, and no switches.
+    assert (run["auto_switch"], run["switches"]) == (None, [])
+    assert run["trades"][0]["decided_by"] is None
+
+
+EMA = {"strategy": "ema_crossover", "version": 1, "params": {"fast": 9, "slow": 21}}
+FLAT = {"strategy": "stay_flat", "version": 1, "params": {}}
+AUTO_SWITCH = {
+    "mapping": {
+        "trending_up": EMA,
+        "ranging": {"strategy": "rsi_mean_reversion", "version": 1, "params": {"period": 14}},
+        "trending_down": FLAT,
+        "high_volatility": FLAT,
+    },
+    "min_hold": 3,
+    "policy": "close_first",
+}
+
+
+async def test_an_auto_switching_run_shows_its_mapping_switches_and_whose_trades(
+    api: Api,
+) -> None:
+    await clean(api)
+    await api.login()
+    fills = [dict(f) for f in RESULT["fills"]]
+    for buy in fills[0], fills[2]:
+        buy["decided_by"] = EMA
+    fills[1] = {**fills[1], "exit": "switch"}  # sold by a close_first switch to stay flat
+    switch = {
+        "ts": "2026-01-01T01:00:00Z",
+        "regime": "trending_down",
+        "from_config": EMA,
+        "to_config": FLAT,
+        "reason": "trending_down for 3 candles in a row (...): switch to stay_flat v1 {}",
+    }
+    run_id = await store_run(
+        api,
+        RESULT | {"fills": fills, "switches": [switch]},
+        auto_switch=AUTO_SWITCH,
+        regime_detector_version=1,
+    )
+
+    listed = (await api.client.get("/backtests")).json()[0]
+    run = (await api.client.get(f"/backtests/{run_id}")).json()
+
+    assert listed["auto_switch"] == AUTO_SWITCH
+    assert run["auto_switch"] == AUTO_SWITCH
+    assert run["switches"] == [switch]
+    assert [(t["exit"], t["decided_by"]) for t in run["trades"]] == [
+        ("switch", EMA),
+        (None, EMA),
+    ]
 
 
 async def test_an_unknown_run_is_a_404(api: Api) -> None:

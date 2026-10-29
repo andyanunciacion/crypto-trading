@@ -78,7 +78,9 @@
 2. [x] **Config history:** append-only `strategy_configs` with rollback from the UI. A bot's detail page lists every config it has had; Roll back on an earlier one adds a config copying it (`restored_from`) and switches to it, with a policy, as Edit does. A database trigger refuses any change to a stored config (D52).
 3. [x] **Regime detector:** trending up/down, ranging, high volatility from ADX, ATR, EMA slope; tested on labeled history. A pure, stateless `RegimeDetector` labels each closed candle, with `unclear` for the dead band between the range and trend lines; it passes nine well-known BTC spans from 2019–2023, judged after ADX's lag (D53).
 4. [x] **Auto-switcher:** regime → strategy mapping in settings, minimum hold time; switches logged, shown on the chart and in a switch log. Each bot maps every regime to a strategy (or Stay flat) on its page; once a new regime has read `min_hold` candles in a row, it switches as Edit would, with a policy. Every switch, by hand or by the regime, is recorded in `strategy_switches`, marked on the chart and listed in the bot's switch log (D54).
-5. [ ] **Combined backtest:** auto-switching backtested end to end as one strategy.
+5. [x] **Combined backtest:** auto-switching backtested end to end as one strategy. `engine.backtest.run --auto-switch` switches inside the simulator exactly as a live bot does (the same rule, takeover at the next candle, the three policies, stops kept). It reports the switches and how each config did, and is compared with each of its configs run alone and with buy-and-hold over the same candles. The Backtests page labels these runs and lists their switches (D55).
+   - 5b. [ ] **Regime detector lag:** a lag/flip report on the 2019–2023 fixture, then Kaufman's efficiency ratio and a fast trend exit judged with the combined backtest.
+   - 5c. [ ] **Auto-switching backtests from the dashboard:** the run form's own auto-switching section.
 6. [ ] **Grid and DCA strategies.**
 
 **Exit criteria:** a backtest with auto-switching runs end to end, and a manual switch in paper mode keeps positions correct.

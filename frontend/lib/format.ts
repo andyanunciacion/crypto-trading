@@ -84,9 +84,19 @@ const manilaTime = new Intl.DateTimeFormat("en-GB", {
   hour12: false,
 });
 
-/** A UTC timestamp in Manila time, e.g. "26 Oct, 20:00" (UX7). */
-export function formatManila(iso: string): string {
-  return manilaTime.format(new Date(iso));
+const manilaTimeWithYear = new Intl.DateTimeFormat("en-GB", {
+  timeZone: MANILA,
+  day: "numeric",
+  month: "short",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+/** A UTC timestamp in Manila time, e.g. "26 Oct, 20:00", or "26 Oct 2026, 20:00" with `year` (UX7). */
+export function formatManila(iso: string, year = false): string {
+  return (year ? manilaTimeWithYear : manilaTime).format(new Date(iso));
 }
 
 /** The same instant in UTC, for hovering, e.g. "2026-10-26 12:00:05 UTC". */

@@ -16,14 +16,21 @@ import json
 import sys
 from collections import Counter
 from collections.abc import Sequence
-from datetime import UTC
+from datetime import UTC, datetime
 from decimal import Decimal
 
-from engine.backtest.models import BacktestConfig, BacktestReport, BacktestResult, EquityPoint
+from engine.backtest.models import (
+    BacktestConfig,
+    BacktestReport,
+    BacktestResult,
+    ConfigRef,
+    EquityPoint,
+)
 from engine.backtest.store import BacktestRunStore, StoredRun
+from engine.marketdata.timeframes import STEP
 from engine.risk.sizing import SIZING
 from engine.risk.stops import NO_STOPS, STOPS
-from shared.backtest import drawdowns, metrics, sharpe, trades
+from shared.backtest import YEAR, drawdowns, metrics, sharpe, trades
 from shared.config import Settings, load_settings
 from shared.db.session import make_engine
 from shared.logs import configure_logging
@@ -67,8 +74,66 @@ def describe(run_id: int, config: BacktestConfig, result: BacktestResult) -> str
             f"  {len(result.fills)} fills, {len(result.skipped)} skipped orders"
             + (", still holding at the end" if r.open_trade else ""),
             *(exits_text if exits else []),
+            *([] if config.auto_switch is None else _auto_switching(config, result, r)),
         ]
     )
+
+
+def _auto_switching(config: BacktestConfig, result: BacktestResult, r: BacktestReport) -> list[str]:
+    """What an auto-switching run switched between, when, and how each config did."""
+    auto = config.auto_switch
+    assert auto is not None  # describe checked
+    quote = config.symbol.split("/")[1]
+    lines = [f"  auto-switching: min hold {auto.min_hold}, policy {auto.policy}"]
+    lines += [
+        f"    {regime}: {c.strategy} v{c.version} {json.dumps(c.params)}"
+        for regime, c in auto.mapping.items()
+    ]
+    years = (config.end - config.start) / YEAR  # a count per year: no money, so a float
+    per_year = f", {len(result.switches) / years:.1f} a year"
+    noun = "switch" if len(result.switches) == 1 else "switches"
+    lines.append(f"  {len(result.switches)} {noun}{per_year}:")
+    lines += [
+        f"    {s.ts:%Y-%m-%d %H:%M} {s.regime}: {s.from_config.label} -> {s.to_config.label}"
+        for s in result.switches
+    ]
+    lines.append("  by config (the one that bought):")
+    active = _candles_active(config, result)
+    labels = list(active)
+    labels += [
+        t.decided_by.label for t in r.trades if t.decided_by and t.decided_by.label not in labels
+    ]
+    for label in labels:
+        made = [t for t in r.trades if t.decided_by is not None and t.decided_by.label == label]
+        pnl = sum((t.pnl for t in made), Decimal(0))
+        won = f", {sum(t.pnl > 0 for t in made) / len(made) * 100:.1f}% won" if made else ""
+        noun = "trade" if len(made) == 1 else "trades"
+        lines.append(
+            f"    {label}: {active.get(label, 0)} candles active, {len(made)} {noun},"
+            f" P&L {pnl:+.2f} {quote}{won}"
+        )
+    sold = [f for f in result.fills if f.exit == "switch"]
+    if sold:
+        fees = sum((f.fee for f in sold), Decimal(0))
+        lines.append(
+            f"  {len(sold)} positions sold by a switch (close_first), fees {fees:.2f} {quote}"
+        )
+    return lines
+
+
+def _candles_active(config: BacktestConfig, result: BacktestResult) -> dict[str, int]:
+    """How many candles of the range each config decided, in the order they first did.
+    A switch confirmed at one candle's close decides from the next one on."""
+    step = STEP[config.timeframe]
+    start_on = ConfigRef(
+        strategy=config.strategy, version=config.strategy_version, params=config.params
+    )
+    spans: list[tuple[str, datetime]] = [(start_on.label, config.start)]
+    spans += [(s.to_config.label, max(s.ts + step, config.start)) for s in result.switches]
+    active: dict[str, int] = {}
+    for (label, begins), (_, ends) in zip(spans, [*spans[1:], ("", config.end)], strict=True):
+        active[label] = active.get(label, 0) + (ends - begins) // step
+    return active
 
 
 def equity_csv(initial_cash: Decimal, curve: Sequence[EquityPoint]) -> str:

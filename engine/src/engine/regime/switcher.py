@@ -29,8 +29,8 @@ from typing import Any
 from engine.exchange.models import Candle
 from engine.regime.detector import RegimeDetector, RegimeReading
 from engine.strategies.base import Strategy
-from engine.strategies.registry import build
-from shared.regime import AutoSwitchSettings, MappedRegime
+from engine.strategies.registry import build, strategy_class
+from shared.regime import AutoSwitchSettings, MappedConfig, MappedRegime
 
 
 @dataclass(frozen=True)
@@ -110,6 +110,37 @@ class AutoSwitcher:
                 f"switch to {target.name} v{target.version} {params}",
             )
         return RegimeCheck(reading, held, regime, switch)
+
+
+class MappingRefused(ValueError):
+    """A regime's config doesn't build: `cause` says why (pydantic's ValidationError for
+    bad params, a ValueError for an unknown strategy)."""
+
+    def __init__(self, regime: MappedRegime, cause: ValueError) -> None:
+        super().__init__(f"{regime}: {cause}")
+        self.regime = regime
+        self.cause = cause
+
+
+def with_versions(settings: AutoSwitchSettings) -> AutoSwitchSettings:
+    """`settings` with each regime's config checked and stored at its strategy's version
+    now, params with their defaults filled in: what a bot (control/bots.py) and a
+    backtest (P6-5) store. Raises MappingRefused for the first that doesn't build."""
+    mapping = {}
+    for regime, mapped in settings.mapping.items():
+        try:
+            version = strategy_class(mapped.strategy).version
+            strategy = build(mapped.strategy, version, mapped.params)
+        except ValueError as exc:  # includes pydantic's ValidationError
+            raise MappingRefused(regime, exc) from None
+        mapping[regime] = MappedConfig(
+            strategy=strategy.name,
+            version=strategy.version,
+            params=strategy.params.model_dump(mode="json"),
+        )
+    checked = settings.model_copy(update={"mapping": mapping})
+    AutoSwitcher(checked)  # builds, as it will when it's used
+    return checked
 
 
 def same_config(a: Strategy[Any], b: Strategy[Any]) -> bool:

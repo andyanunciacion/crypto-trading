@@ -19,8 +19,24 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { ApiError, backtest as fetchRun } from "@/lib/api";
-import { EXIT_LABELS, rangeDays, type Metrics, type RunDetail } from "@/lib/backtests";
-import { describeParams, describeSizing, describeStops } from "@/lib/bots";
+import {
+  EXIT_LABELS,
+  describeConfig,
+  rangeDays,
+  type ConfigRef,
+  type Metrics,
+  type RunDetail,
+} from "@/lib/backtests";
+import {
+  REGIMES,
+  describeParams,
+  describeSizing,
+  describeStops,
+  policyLabel,
+  regimeLabel,
+  type AutoSwitchSettings,
+  type MappedConfig,
+} from "@/lib/bots";
 import { priceDigits, shiftPoint } from "@/lib/format";
 
 /**
@@ -77,11 +93,13 @@ export default function BacktestPage() {
 
 function Results({ run }: { run: RunDetail }) {
   const quote = run.currency;
+  const auto = run.auto_switch;
   return (
     <>
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
         <h1 id="run" className="text-xl font-semibold">
-          Run #{run.id}: {run.strategy} on {run.symbol} {run.timeframe}
+          Run #{run.id}: {auto === null ? run.strategy : "auto-switching"} on {run.symbol}{" "}
+          {run.timeframe}
         </h1>
         <span className="text-muted-foreground text-sm">
           {rangeDays(run)} days, <Timestamp iso={run.range_start} /> to{" "}
@@ -106,6 +124,8 @@ function Results({ run }: { run: RunDetail }) {
         )}
       </Card>
 
+      {auto !== null && <AutoSwitching settings={auto} run={run} />}
+
       <h2 id="trades" className="text-lg font-semibold">
         Trades
       </h2>
@@ -126,17 +146,19 @@ function Results({ run }: { run: RunDetail }) {
                 <TableHead className="text-right">Fees</TableHead>
                 <TableHead className="text-right">P&amp;L</TableHead>
                 <TableHead className="text-right">Return</TableHead>
+                {auto !== null && <TableHead>Bought by</TableHead>}
                 <TableHead>Sold by</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {run.trades.map((trade) => (
                 <TableRow key={trade.entry_ts}>
+                  {/* A backtest can span years, so its trades carry theirs. */}
                   <TableCell>
-                    <Timestamp iso={trade.entry_ts} />
+                    <Timestamp iso={trade.entry_ts} year />
                   </TableCell>
                   <TableCell>
-                    <Timestamp iso={trade.exit_ts} />
+                    <Timestamp iso={trade.exit_ts} year />
                   </TableCell>
                   <TableCell className="text-right">
                     <Money
@@ -170,6 +192,11 @@ function Results({ run }: { run: RunDetail }) {
                   <TableCell className="text-right">
                     <Ratio value={trade.return_} pnl />
                   </TableCell>
+                  {auto !== null && (
+                    <TableCell className="text-xs">
+                      {trade.decided_by === null ? "—" : <ConfigName config={trade.decided_by} />}
+                    </TableCell>
+                  )}
                   <TableCell className="text-muted-foreground text-xs">
                     {trade.exit === null ? "sell signal" : EXIT_LABELS[trade.exit]}
                   </TableCell>
@@ -215,7 +242,7 @@ function Results({ run }: { run: RunDetail }) {
       <h2 className="text-lg font-semibold">Run with</h2>
       <Card className="px-6 py-4">
         <dl className="grid grid-cols-1 gap-x-6 gap-y-2 text-sm sm:grid-cols-[max-content_1fr]">
-          <Setting term="Strategy">
+          <Setting term={auto === null ? "Strategy" : "Started on"}>
             {run.strategy} v{run.strategy_version}:{" "}
             <span className="font-mono">{describeParams(run.params)}</span>
           </Setting>
@@ -242,6 +269,88 @@ function Results({ run }: { run: RunDetail }) {
         </dl>
       </Card>
     </>
+  );
+}
+
+/** A strategy config: its name and version, then its params, small. */
+function ConfigName({ config }: { config: ConfigRef | MappedConfig }) {
+  return (
+    <>
+      {describeConfig(config)}
+      <span className="text-muted-foreground block font-mono">{describeParams(config.params)}</span>
+    </>
+  );
+}
+
+/**
+ * An auto-switching run's regime mapping and every switch it made (P6-5), as a bot's
+ * page shows its own (D54). A switch confirmed at a candle's close trades from the next.
+ */
+function AutoSwitching({ settings, run }: { settings: AutoSwitchSettings; run: RunDetail }) {
+  const n = run.switches.length;
+  return (
+    <section aria-labelledby="auto" className="flex flex-col gap-2">
+      <h2 id="auto" className="text-lg font-semibold">
+        Auto-switching
+      </h2>
+      <p className="text-muted-foreground -mt-1 text-sm">
+        Started on {run.strategy}; switched once a new regime held for {settings.min_hold} closed
+        candle{settings.min_hold === 1 ? "" : "s"} in a row. An open position on a switch:{" "}
+        {policyLabel(settings.policy).toLowerCase()}. {n} switch{n === 1 ? "" : "es"}.
+      </p>
+      <Card className="py-2">
+        <Table aria-labelledby="auto">
+          <TableHeader>
+            <TableRow>
+              <TableHead>Regime</TableHead>
+              <TableHead>Strategy</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {REGIMES.map(({ value, label }) => (
+              <TableRow key={value} data-regime={value}>
+                <TableCell>{label}</TableCell>
+                <TableCell className="text-xs">
+                  <ConfigName config={settings.mapping[value]} />
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </Card>
+      {n > 0 && (
+        <Card className="py-2">
+          <Table aria-label="Switches">
+            <TableHeader>
+              <TableRow>
+                <TableHead>Confirmed</TableHead>
+                <TableHead>Regime</TableHead>
+                <TableHead>From</TableHead>
+                <TableHead>To</TableHead>
+                <TableHead>Why</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {run.switches.map((s) => (
+                <TableRow key={s.ts} data-switch={s.ts}>
+                  <TableCell>
+                    <Timestamp iso={s.ts} />
+                  </TableCell>
+                  <TableCell>{regimeLabel(s.regime)}</TableCell>
+                  <TableCell className="text-xs">
+                    <ConfigName config={s.from_config} />
+                  </TableCell>
+                  <TableCell className="text-xs">
+                    <ConfigName config={s.to_config} />
+                  </TableCell>
+                  <TableCell className="min-w-60 text-xs whitespace-normal">{s.reason}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Card>
+      )}
+    </section>
   );
 }
 
