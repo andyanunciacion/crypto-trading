@@ -3,7 +3,7 @@
  * with their metrics. Mirrors `shared/backtest_jobs.py` and `backend/backtests/store.py`.
  * Ratios (returns, drawdowns, win rate) are fractions, as the API sends them: 0.05 = 5%.
  */
-import type { Settings } from "@/lib/bots";
+import type { AutoSwitchSettings, MappedRegime, Settings } from "@/lib/bots";
 import type { Decimal } from "@/lib/format";
 
 /** `engine.backtest.run`'s arguments. */
@@ -64,6 +64,8 @@ export type RunSummary = {
   slippage_rate: Decimal;
   sizing: Record<string, unknown>;
   stops: Record<string, unknown>;
+  /** Auto-switching (P6-5): the strategy above is the config it started on. Null: a plain run. */
+  auto_switch: AutoSwitchSettings | null;
   candle_count: number;
   candles_sha256: string;
   backtester_version: number;
@@ -71,7 +73,20 @@ export type RunSummary = {
   problem: string | null;
 };
 
-export type ExitKind = "stop_loss" | "trailing_stop" | "take_profit";
+/** A stop's sale, or a `close_first` auto-switch's. */
+export type ExitKind = "stop_loss" | "trailing_stop" | "take_profit" | "switch";
+
+/** A strategy at a version, with its params (`shared/backtest.py`'s ConfigRef). */
+export type ConfigRef = { strategy: string; version: number; params: Record<string, unknown> };
+
+/** A switch an auto-switching run made: confirmed at `ts`'s close, `to_config` from the next candle. */
+export type BacktestSwitch = {
+  ts: string;
+  regime: MappedRegime;
+  from_config: ConfigRef;
+  to_config: ConfigRef;
+  reason: string;
+};
 
 export type Trade = {
   entry_ts: string;
@@ -83,6 +98,8 @@ export type Trade = {
   pnl: Decimal;
   return_: Decimal;
   exit: ExitKind | null;
+  /** In an auto-switching run, the config that bought it; null otherwise. */
+  decided_by: ConfigRef | null;
 };
 
 export type EquityPoint = { ts: string; equity: Decimal; drawdown: Decimal };
@@ -93,6 +110,7 @@ export type RunDetail = RunSummary & {
   trades: Trade[];
   equity: EquityPoint[];
   skipped: SkippedOrder[];
+  switches: BacktestSwitch[];
   fills: number;
   signals: number;
 };
@@ -115,4 +133,10 @@ export const EXIT_LABELS: Record<ExitKind, string> = {
   stop_loss: "stop-loss",
   trailing_stop: "trailing stop",
   take_profit: "take-profit",
+  switch: "switch (close first)",
 };
+
+/** "ema_crossover v1": a config's strategy and version (its params are shown beside it). */
+export function describeConfig(config: { strategy: string; version?: number | null }): string {
+  return config.version == null ? config.strategy : `${config.strategy} v${config.version}`;
+}

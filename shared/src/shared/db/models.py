@@ -107,6 +107,9 @@ class BacktestRunRow(Base):
     sizing: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=ALL_IN_SIZING)
     # Its stops (engine/risk/stops.py); {} is none, as for every run before P4-2.
     stops: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default="{}")
+    # Its auto-switching (shared.regime.AutoSwitchSettings, P6-5); NULL is a plain run.
+    auto_switch: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    regime_detector_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     candle_count: Mapped[int] = mapped_column(Integer)  # warm-up included
     candles_sha256: Mapped[str] = mapped_column(Text)  # proves a re-run uses the same candles
     backtester_version: Mapped[int] = mapped_column(Integer)

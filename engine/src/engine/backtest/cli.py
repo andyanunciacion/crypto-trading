@@ -24,9 +24,11 @@ from engine.exchange.adapter import ExchangeAdapter
 from engine.exchange.models import MarketRules, Timeframe
 from engine.marketdata.store import CandleStore, Series
 from engine.marketdata.timeframes import STEP, floor
+from engine.regime.switcher import MappingRefused, with_versions
 from engine.risk.sizing import ALL_IN, SIZING, Sizing
 from engine.risk.stops import NO_STOPS, STOPS, Stops
 from engine.strategies.base import Strategy
+from shared.regime import AutoSwitchSettings
 
 
 def decimal_arg(text: str) -> Decimal:
@@ -62,6 +64,19 @@ def stops_arg(text: str) -> Stops:
         raise argparse.ArgumentTypeError(f"bad stops: {_problems(e)}") from None
 
 
+def auto_switch_arg(text: str) -> AutoSwitchSettings:
+    """Auto-switching as JSON, as a bot's (`bots.auto_switch`): each regime's config is
+    checked and stored at its strategy's version now (regime/switcher.py)."""
+    try:
+        return with_versions(AutoSwitchSettings.model_validate(json_object_arg(text)))
+    except ValidationError as e:
+        raise argparse.ArgumentTypeError(f"bad auto-switch: {_problems(e)}") from None
+    except MappingRefused as e:
+        cause = e.cause
+        detail = _problems(cause) if isinstance(cause, ValidationError) else str(cause)
+        raise argparse.ArgumentTypeError(f"bad auto-switch: {e.regime}: {detail}") from None
+
+
 def _problems(e: ValidationError) -> str:
     # One line per problem, without pydantic's links to its docs.
     return "; ".join(f"{'.'.join(map(str, err['loc']))}: {err['msg']}" for err in e.errors())
@@ -78,6 +93,14 @@ STOPS_HELP = (
     '({"kind": "percent", "percent": 6} or {"kind": "r", "multiple": 2}), plus atr_period '
     '(default 14), e.g. {"stop_loss": {"kind": "atr", "multiple": 2}, '
     '"take_profit": {"kind": "r", "multiple": 2}}'
+)
+AUTO_SWITCH_HELP = (
+    "switch strategy as the regime changes, as an auto-switching bot does (default off; "
+    "the strategy above is the one it starts on), as JSON: every regime mapped, plus "
+    "min_hold (default 3) and policy (keep, close_first or hand_over; default keep), e.g. "
+    '{"mapping": {"trending_up": {"strategy": "ema_crossover", "params": {"fast": 9, '
+    '"slow": 21}}, "ranging": {"strategy": "rsi_mean_reversion"}, "trending_down": '
+    '{"strategy": "stay_flat"}, "high_volatility": {"strategy": "stay_flat"}}, "min_hold": 3}'
 )
 
 
@@ -121,6 +144,8 @@ class RunSettings(BaseModel):
     sizing: Sizing = ALL_IN
     stops: Stops = NO_STOPS
     exchange: str = "mexc"
+    # The run CLI's --auto-switch only; the dashboard sends none yet (P6-5c).
+    auto_switch: AutoSwitchSettings | None = None
 
 
 class MarketRulesSource(Protocol):
@@ -159,6 +184,7 @@ async def build_config(
         market_rules=rules,
         sizing=settings.sizing,
         stops=settings.stops,
+        auto_switch=settings.auto_switch,
     )
     _check_history(config, warmup_needed(strategy, config), series, bounds.first)
     return config
@@ -227,5 +253,6 @@ async def run_settings(
         sizing=args.sizing,
         stops=args.stops,
         exchange=args.exchange,
+        auto_switch=getattr(args, "auto_switch", None),  # run's option, not sweep's
     )
     return await build_config(settings, candles, strategy, rules or PublicRules(args.exchange))

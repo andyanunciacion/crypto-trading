@@ -9,6 +9,7 @@ the same numbers for the same run (D48).
 engine: it's the engine's `BacktestResult` with the signals left as JSON.
 """
 
+import json
 from collections.abc import Sequence
 from datetime import timedelta
 from decimal import Decimal
@@ -18,10 +19,14 @@ from typing import Literal, Protocol
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, JsonValue
 
 from shared.candles import TIMEFRAME_STEPS
+from shared.regime import MappedRegime
 
 # The engine's OrderSide and ExitKind (a stop's sell); engine/tests checks they match.
 Side = Literal["buy", "sell"]
 ExitKind = Literal["stop_loss", "trailing_stop", "take_profit"]
+# What sold a position other than a SELL signal: a stop, or an auto-switch with the
+# policy `close_first` (P6-5; a live bot's exits of kind `switch`, D51).
+FillExit = ExitKind | Literal["switch"]
 
 # Crypto trades every day of the year, so a year is 365 days of candles, not the 252
 # trading days used for stocks.
@@ -33,6 +38,19 @@ class _Frozen(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
 
+class ConfigRef(_Frozen):
+    """A strategy config: a strategy at a version, with its params."""
+
+    strategy: str
+    version: int
+    params: dict[str, JsonValue]
+
+    @property
+    def label(self) -> str:
+        # As the switcher's reasons name a config (engine/regime/switcher.py).
+        return f"{self.strategy} v{self.version} {json.dumps(self.params)}"
+
+
 class Fill(_Frozen):
     ts: AwareDatetime  # open time of the candle it filled at
     side: Side
@@ -40,9 +58,23 @@ class Fill(_Frozen):
     amount: Decimal = Field(gt=0)  # in the base currency
     fee: Decimal = Field(ge=0)  # in the quote currency
     cash_after: Decimal = Field(ge=0)
-    # The stop that sold it; None for a fill from a signal. Runs stored before stops
-    # existed have no such field and load as None.
-    exit: ExitKind | None = None
+    # The stop or switch that sold it; None for a fill from a signal. Runs stored before
+    # stops existed have no such field and load as None.
+    exit: FillExit | None = None
+    # In an auto-switching run, the config whose signal it was; None in any other run,
+    # and for an exit.
+    decided_by: ConfigRef | None = None
+
+
+class BacktestSwitch(_Frozen):
+    """A switch an auto-switching run made (P6-5): confirmed at the close of the candle
+    at `ts`, so `to_config` decides from the next candle on."""
+
+    ts: AwareDatetime
+    regime: MappedRegime
+    from_config: ConfigRef
+    to_config: ConfigRef
+    reason: str  # the switcher's, as a live bot logs it
 
 
 class SkippedOrder(_Frozen):
@@ -69,6 +101,7 @@ class StoredResult(_Frozen):
     final_amount: Decimal  # coin still held at the end; 0 when flat
     final_equity: Decimal  # cash + coin at the last close
     total_fees: Decimal
+    switches: list[BacktestSwitch] = []  # auto-switching runs only (P6-5)
 
 
 class Outcome(Protocol):
@@ -97,7 +130,8 @@ class Trade(_Frozen):
     fees: Decimal = Field(ge=0)  # both fills' fees
     pnl: Decimal  # net of both fees, in the quote currency
     return_: Decimal  # pnl as a fraction of what the buy cost, fee included
-    exit: ExitKind | None = None  # the stop that sold it; None for a SELL signal
+    exit: FillExit | None = None  # the stop or switch that sold it; None for a SELL signal
+    decided_by: ConfigRef | None = None  # the buy's config, in an auto-switching run
 
 
 class BacktestReport(_Frozen):
@@ -145,6 +179,7 @@ def trades(fills: Sequence[Fill]) -> list[Trade]:
                 pnl=pnl,
                 return_=pnl / cost,
                 exit=fill.exit,
+                decided_by=entry.decided_by,
             )
         )
         entry = None

@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState } from "react";
 import { BacktestForm } from "@/components/backtest-form";
 import { Plain, Ratio } from "@/components/backtest-metrics";
 import { Timestamp } from "@/components/timestamp";
+import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Table,
@@ -134,7 +135,17 @@ export default function BacktestsPage() {
                     </div>
                   </TableCell>
                   <TableCell className="min-w-40 whitespace-normal">
-                    <div>{run.strategy}</div>
+                    {run.auto_switch === null ? (
+                      <div>{run.strategy}</div>
+                    ) : (
+                      // The strategy is only where it started: say so, or it reads as a plain run.
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <Badge variant="secondary">auto-switching</Badge>
+                        <span className="text-muted-foreground text-xs">
+                          starts on {run.strategy}
+                        </span>
+                      </div>
+                    )}
                     <div className="text-muted-foreground font-mono text-xs">
                       {describeParams(run.params)}
                     </div>

@@ -16,8 +16,10 @@ export default function globalSetup(): void {
   compose(["down", "-v", "--remove-orphans"]); // whatever a failed run left behind
   // --wait: until the API and the dashboard report healthy (their dependencies start first).
   compose(["up", "-d", "--build", "--wait", "api", "frontend"]);
-  // The bot before the engine: the engine loads bots when it starts.
-  compose(["build", "engine"]);
+  // The bot before the engine: the engine loads bots when it starts. The backtester has
+  // its own image of the engine's code; built here too, or a stale one runs the page's
+  // backtests while the CLI runs the new code.
+  compose(["build", "engine", "backtester"]);
   compose([
     "run",
     "--rm",

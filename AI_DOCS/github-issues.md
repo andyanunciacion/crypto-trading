@@ -687,9 +687,42 @@ Done (D50):
 
 ### P6-5 · Combined auto-switching backtest
 `strategy` · Depends on: P6-4
-- [ ] Backtester supports the switcher as one combined strategy
+- [x] Backtester supports the switcher as one combined strategy
 
 **Done when:** an auto-switching backtest runs end to end and produces a full report.
+
+**Done** (D55):
+- **The owner's choices:** the detector experiments (the note below) move to P6-5b; dashboard runs to P6-5c; the CLI prints baselines, not stored.
+- `test_backtest_auto_switch.py` (done-when): the BTC/USDT 1d 2019–2023 fixture, with holds 1/3/5 under `keep` and 3 under `close_first` and `hand_over`.
+  - Every switch (candle and target) equals `AutoSwitcher.check()` fed candle by candle, as `test_auto_switch_replay.py` does.
+  - Every fill pairs into trades with the config that bought each, the equity curve covers the range, and the report prints.
+- On a scripted detector:
+  - A switch confirmed at a candle takes over at the next, and its signal fills at the open after.
+  - `hand_over`: the new config sells.
+  - `keep`: the buyer sells, even through two switches, the new config's signals are skipped with the reason, and the new config trades once flat.
+  - `close_first`: the position is sold at the next open (exit `switch`, fee and slippage). A BUY on the confirming candle is bought and then sold at that open, as live does it. A SELL on it sells once. Flat, nothing.
+  - A stop-loss still fires after a hand-over. The warm-up counts the detector's window and every mapped config. Without `auto_switch` nothing changes.
+- `test_backtest_compare.py`: each distinct config alone equals a plain run of it. Buy-and-hold buys all in at the first open (checked by hand). The table ranks by return.
+- `test_backtest_store.py`: a run stores its settings and the detector's version, round-trips exactly and reproduces. It's refused once the detector's version moves on; a plain run stores none.
+- `test_backtest_cli.py`: `--auto-switch` stores each config at its version with its defaults. Bad params, an unknown strategy (both naming the regime), an unmapped regime and non-objects are refused.
+- `test_backtests.py`: the list and detail carry `auto_switch`, the switches and each trade's `decided_by`. An older run reads with none.
+- **Found on the first comparison** (the fixture, from 2019-12-19, a hold of 3; D55): auto-switching lost to every config it switches between. It made −30% (`keep`), −26% (`close_first`) and −5% (`hand_over`) in 5 or 6 trades, against EMA 9/21 alone +641% (24 trades), buy-and-hold +480% and RSI +62%. EMA buys on the cross (D31), early in a trend, but is switched on weeks later, once ADX confirms the trend (D53), so it mostly waits for a fresh cross. P6-5b and EMA crossover v2 (a state entry) are the levers.
+- Checked on the main stack (2026-10-29, after `up --build`, migration 0015 applied):
+  - `engine.backtest.run ema_crossover BTC/USDT 1d --days 165 --auto-switch ...` (hold 1, hand over) stored run 51: 5 switches, no trades, and the baselines printed (EMA alone +12%, RSI +9%, buy-and-hold +2%).
+  - The same mapping on 4h, 300 days, a hold of 3 and close first, stored run 52: −9.97% in 14 trades, 11 of them sold by a switch, from 53 switches. The candles each config decided add up to the range: 452 + 642 + 706 = 1800. Alone, EMA made −20%, RSI −24.5% and buy-and-hold −7.8%.
+- Checked by hand in Chrome on the same stack:
+  - The runs list shows "auto-switching · starts on ema_crossover" on both runs, and plain runs as before.
+  - Run 52's page has the mapping, all 53 switches with their reasons, and the trades' "Bought by" and "switch (close first)". Light and dark themes; no console errors.
+  - The first switch is on the last warm-up candle, so it takes over at the range's first candle, as intended. The first trade is the documented same-open buy-then-sell (−3 USDT).
+- The hand check found two things, fixed:
+  - "On a switch, close first its position" now reads "An open position on a switch: close first".
+  - A backtest's trades can span years, so their Entry and Exit times now show the year (`Timestamp`'s `year`).
+- The e2e suite found one more, fixed, from P5-5: `global-setup.ts` rebuilt the engine's image but never the backtester's. The page's backtest ran on a 37-hour-old image, whose fills have no `decided_by`. Its numbers matched the CLI's, but `backtests.spec.ts`'s stored-result check failed. The setup now builds both.
+
+### P6-5b · Regime detector lag
+`strategy` · Depends on: P6-5
+- [ ] Lag/flip report on the 2019–2023 fixture; Kaufman's efficiency ratio and a fast trend exit judged with the combined backtest against its baselines
+- [ ] Also weigh EMA crossover v2 (enter while fast > slow, a state, D31): P6-5 found an event entry and a late switch don't mix
 
 **Note: the regime detector's lag (from P6-3, D53).** ADX is smoothed twice, so the detector recognises a new trend or range about 2 × `adx_period` candles late. On 1d that's 2–4 weeks: summer 2023 read `trending_up` until Jul 25, though BTC had flattened out by late June. Most of the lag is in *leaving* a trend, because ADX takes weeks to fall below 20. Once this backtest exists, try two candidate fixes against the current rules:
 - **Kaufman's efficiency ratio** (net change ÷ the sum of absolute changes over 20 candles) as the strength measure. It has a fixed window and no smoothing tail.
@@ -698,6 +731,14 @@ Done (D50):
 Judge them in two steps:
 - **First, a lag/flip report over the 2019–2023 fixture:** days until each labeled span is recognised, and label changes per year. Faster labels also flip more, which means a longer minimum hold.
 - **Then this combined backtest:** keep a variant only if it makes more money net of switching. Don't tune to the 9 labeled spans. A shorter `adx_period` is the fallback: easy, but noisier everywhere.
+
+**Done when:** the lag/flip report exists, and each variant is kept or dropped on the combined backtest's numbers against its baselines. A kept one bumps `RegimeDetector.version`.
+
+### P6-5c · Auto-switching backtests from the dashboard
+`frontend` · Depends on: P6-5
+- [ ] `auto_switch` on `RunBacktestCommand`; an auto-switching section in `BacktestForm` reusing `AutoSwitchSheet`'s mapping fields
+
+**Done when:** a run from the form equals `engine.backtest.run --auto-switch` with the same arguments (e2e). The baselines stay CLI-only unless this issue decides to store them.
 
 ### P6-6 · Grid and DCA strategies
 `strategy` · Depends on: P2-2

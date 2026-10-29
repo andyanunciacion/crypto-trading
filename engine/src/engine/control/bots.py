@@ -64,7 +64,7 @@ from engine.bots.create import Listings, create_paper_bot
 from engine.bots.store import Bot, UnknownBot, load_bot, open_orders
 from engine.exchange.errors import ExchangeError
 from engine.exchange.models import Timeframe
-from engine.regime.switcher import AutoSwitcher, RegimeCheck
+from engine.regime.switcher import MappingRefused, RegimeCheck, with_versions
 from engine.risk.kill import SWITCH, KillSwitch
 from engine.risk.paper import PaperDesk
 from engine.risk.sizing import SIZING
@@ -84,7 +84,7 @@ from shared.commands import (
     SwitchStrategyCommand,
 )
 from shared.db.models import BotRow, StrategyConfigRow, StrategySwitchRow
-from shared.regime import AutoSwitchSettings, MappedConfig
+from shared.regime import AutoSwitchSettings
 
 # Who switched a bot's config (strategy_switches.trigger).
 Trigger = Literal["manual", "rollback", "regime"]
@@ -628,23 +628,13 @@ def _auto_settings(raw: dict[str, JsonValue]) -> AutoSwitchSettings:
     one, at its strategy's version now, which is stored with it. Refused with what's
     wrong."""
     try:
-        settings = AutoSwitchSettings.model_validate(raw)
+        return with_versions(AutoSwitchSettings.model_validate(raw))
     except ValidationError as exc:
         raise Refused(describe(exc)) from None
-    mapping = {}
-    for regime, mapped in settings.mapping.items():
-        try:
-            strategy = _strategy(mapped.strategy, mapped.params)
-        except Refused as exc:
-            raise Refused(f"{regime}: {exc}") from None
-        mapping[regime] = MappedConfig(
-            strategy=strategy.name,
-            version=strategy.version,
-            params=strategy.params.model_dump(mode="json"),
-        )
-    checked = settings.model_copy(update={"mapping": mapping})
-    AutoSwitcher(checked)  # builds, as the bot will when it loads
-    return checked
+    except MappingRefused as exc:
+        cause = exc.cause
+        detail = describe(cause) if isinstance(cause, ValidationError) else str(cause)
+        raise Refused(f"{exc.regime}: {detail}") from None
 
 
 def _strategy(name: str, params: dict[str, JsonValue]) -> Strategy[Any]:

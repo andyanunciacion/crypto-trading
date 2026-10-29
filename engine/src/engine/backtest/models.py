@@ -14,7 +14,16 @@ from engine.marketdata.timeframes import floor
 from engine.risk.sizing import ALL_IN, Sizing
 from engine.risk.stops import NO_STOPS, Stops
 from engine.strategies.base import Signal
-from shared.backtest import BacktestReport, EquityPoint, Fill, SkippedOrder, Trade
+from shared.backtest import (
+    BacktestReport,
+    BacktestSwitch,
+    ConfigRef,
+    EquityPoint,
+    Fill,
+    SkippedOrder,
+    Trade,
+)
+from shared.regime import AutoSwitchSettings
 
 __all__ = [
     "DEFAULT_FEE_RATE",
@@ -22,6 +31,8 @@ __all__ = [
     "BacktestConfig",
     "BacktestReport",
     "BacktestResult",
+    "BacktestSwitch",
+    "ConfigRef",
     "EquityPoint",
     "Fill",
     "SkippedOrder",
@@ -69,6 +80,10 @@ class BacktestConfig(_Frozen):
     market_rules: MarketRules
     sizing: Sizing = ALL_IN  # how much each BUY spends (risk/sizing.py, D39)
     stops: Stops = NO_STOPS  # when a position is sold regardless (risk/stops.py, D40)
+    # Switch strategy as the regime changes, as an auto-switching bot does (P6-5, D55).
+    # The strategy above is the config the run starts on. Every mapped config carries
+    # its version (regime/switcher.py's with_versions).
+    auto_switch: AutoSwitchSettings | None = None
 
     @model_validator(mode="after")
     def _range_is_whole_candles(self) -> Self:
@@ -92,3 +107,4 @@ class BacktestResult(_Frozen):
     final_amount: Decimal  # coin still held at the end; 0 when flat
     final_equity: Decimal  # cash + coin at the last close
     total_fees: Decimal
+    switches: list[BacktestSwitch] = []  # auto-switching runs only, in order

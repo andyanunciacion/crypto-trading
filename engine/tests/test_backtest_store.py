@@ -15,10 +15,12 @@ from engine.backtest.simulator import BacktestError, run_backtest
 from engine.backtest.store import BacktestRunStore, candles_sha256
 from engine.exchange.models import Candle, MarketRules
 from engine.marketdata.store import CandleStore, Series
+from engine.regime.detector import RegimeDetector
 from engine.risk.sizing import AtrRisk
 from engine.risk.stops import Percent, Stops
 from engine.strategies.ema_crossover import EmaCrossover, EmaCrossoverParams
 from shared.db.session import make_engine
+from shared.regime import AutoSwitchSettings
 
 T0 = datetime(2025, 1, 1, tzinfo=UTC)
 HOUR = timedelta(hours=1)
@@ -131,6 +133,59 @@ async def test_a_run_with_stops_stores_them_and_reproduces(stores: Stores) -> No
     assert stored.config.stops == stops
     assert stored.result == result
     assert await reproduce(stores.candles, stores.runs, run_id) == result
+
+
+AUTO = AutoSwitchSettings.model_validate(
+    {
+        "mapping": {
+            "trending_up": {
+                "strategy": "ema_crossover",
+                "version": 1,
+                "params": {"fast": 3, "slow": 8},
+            },
+            "ranging": {"strategy": "rsi_mean_reversion", "version": 1, "params": {"period": 2}},
+            "trending_down": {"strategy": "stay_flat", "version": 1},
+            "high_volatility": {"strategy": "stay_flat", "version": 1},
+        },
+        "min_hold": 1,
+        "policy": "close_first",
+    }
+)
+# The detector's 199 candles before the first reading.
+AUTO_CONFIG = CONFIG.model_copy(update={"start": T0 + 199 * HOUR, "auto_switch": AUTO})
+
+
+async def test_an_auto_switching_run_stores_its_settings_and_reproduces(stores: Stores) -> None:
+    run_id, result = await backtest(stores.candles, stores.runs, STRATEGY, AUTO_CONFIG)
+    assert result.switches  # the wave goes from trending to ranging and back
+
+    stored = await stores.runs.load(run_id)
+
+    assert stored.config.auto_switch == AUTO
+    assert stored.regime_detector_version == RegimeDetector.version
+    assert stored.warmup_candles == 199
+    assert stored.result == result  # its switches, and which config made each fill
+    assert await reproduce(stores.candles, stores.runs, run_id) == result
+
+
+async def test_a_plain_run_stores_no_auto_switching(stores: Stores) -> None:
+    run_id, _ = await backtest(stores.candles, stores.runs, STRATEGY, CONFIG)
+
+    stored = await stores.runs.load(run_id)
+
+    assert stored.config.auto_switch is None
+    assert stored.regime_detector_version is None
+    assert stored.result.switches == []
+
+
+async def test_a_new_detector_version_refuses_to_reproduce(
+    stores: Stores, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id, _ = await backtest(stores.candles, stores.runs, STRATEGY, AUTO_CONFIG)
+    monkeypatch.setattr(RegimeDetector, "version", 2)  # as if its rules changed since
+
+    with pytest.raises(BacktestError, match="regime detector version 1, this is version 2"):
+        await reproduce(stores.candles, stores.runs, run_id)
 
 
 async def test_changed_candles_refuse_to_reproduce(stores: Stores) -> None:
