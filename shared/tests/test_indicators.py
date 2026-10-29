@@ -4,7 +4,16 @@ import math
 
 import pytest
 
-from shared.indicators import Bands, Directional, adx, atr, bollinger, ema, rsi
+from shared.indicators import (
+    Bands,
+    Directional,
+    adx,
+    atr,
+    bollinger,
+    efficiency_ratio,
+    ema,
+    rsi,
+)
 
 
 def test_ema_matches_a_hand_calculation() -> None:
@@ -174,3 +183,30 @@ def test_adx_needs_equal_series_and_a_positive_period() -> None:
         adx([1.0, 2.0], [1.0, 2.0], [1.0, 2.0], 0)
     with pytest.raises(ValueError, match="same length"):
         adx([1.0, 2.0], [1.0], [1.0, 2.0], 1)
+
+
+def test_efficiency_ratio_matches_a_hand_calculation() -> None:
+    # Period 3. Changes: +2, -1, +3, +1.
+    # At 15 (index 3): net |15 - 11| = 4, path 2 + 1 + 3 = 6 -> 2/3.
+    # At 16 (index 4): net |16 - 13| = 3, path 1 + 3 + 1 = 5 -> 3/5.
+    assert efficiency_ratio([11.0, 13.0, 12.0, 15.0, 16.0], 3) == [
+        pytest.approx(2 / 3),
+        pytest.approx(3 / 5),
+    ]
+
+
+def test_efficiency_ratio_of_a_straight_line_is_one_and_of_a_zigzag_zero() -> None:
+    assert efficiency_ratio([float(i) for i in range(8)], 4) == [pytest.approx(1.0)] * 4
+    assert efficiency_ratio([float(i) for i in range(8, 0, -1)], 4) == [pytest.approx(1.0)] * 4
+    assert efficiency_ratio([1.0, 2.0] * 4, 2) == [0.0] * 6
+
+
+def test_efficiency_ratio_of_a_flat_market_is_zero() -> None:
+    assert efficiency_ratio([5.0] * 4, 2) == [0.0, 0.0]
+
+
+def test_efficiency_ratio_has_one_value_per_full_window_and_a_positive_period() -> None:
+    assert len(efficiency_ratio([1.0] * 10, 3)) == 7
+    assert efficiency_ratio([1.0] * 3, 3) == []
+    with pytest.raises(ValueError, match="period"):
+        efficiency_ratio([1.0, 2.0], 0)
