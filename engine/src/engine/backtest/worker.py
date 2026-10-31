@@ -29,7 +29,6 @@ from pydantic import ValidationError
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from engine.backoff import Backoff
 from engine.backtest.cli import (
     MarketRulesSource,
     NotEnoughHistory,
@@ -46,6 +45,7 @@ from engine.control.catalog import publish as publish_catalog
 from engine.exchange.errors import ExchangeError
 from engine.marketdata.store import CandleStore
 from engine.strategies.registry import build, strategy_class
+from shared.backoff import Backoff
 from shared.backtest_jobs import (
     BACKTEST_COMMANDS_KEY,
     BacktestJob,

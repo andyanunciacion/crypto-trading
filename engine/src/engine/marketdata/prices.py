@@ -18,8 +18,8 @@ from typing import Protocol
 import structlog
 from redis.asyncio import Redis
 
-from engine.backoff import Backoff
 from engine.exchange.models import Ticker
+from shared.backoff import Backoff
 from shared.prices import PriceFeed, PriceUpdate, price_channel, price_key
 
 # A liquid pair's best bid/ask changes many times a second, so 30 s of silence means

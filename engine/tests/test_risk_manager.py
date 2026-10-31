@@ -36,7 +36,7 @@ from engine.strategies.base import Position
 from shared.db.models import BotRow, OrderRow, RiskEventRow
 from shared.db.session import make_engine
 from shared.prices import PriceUpdate
-from shared.testing import insert_bot, set_limits
+from shared.testing import alert_of, insert_bot, set_limits
 
 T0 = datetime(2026, 10, 23, 12, 0, tzinfo=UTC)
 BTC = "BTC/USDT"
@@ -297,6 +297,7 @@ async def test_every_buy_is_logged_with_its_inputs() -> None:
             "account": ACCOUNT_JSON,
         }
     ]
+    assert alert_of(logs[0]) is None  # an allowed buy isn't an alert (D59)
 
 
 BREACHED = [
@@ -333,6 +334,7 @@ async def test_each_limit_blocks_a_buy_and_records_it(account: Account, rule: st
     assert [(log["event"], log["decision"], log["rule"]) for log in logs] == [
         ("risk.decision", "blocked", rule)
     ]
+    assert alert_of(logs[0]) == "risk_block"  # D59
 
 
 # --- Circuit breakers (D42) -------------------------------------------------------------
@@ -365,6 +367,7 @@ async def test_each_breaker_pauses_buys_and_records_why(market: Market, rule: st
         rule,
         outcome.decision.detail,
     )
+    assert alert_of(logged) == "risk_block"  # D59
 
 
 async def test_a_tripped_breaker_decides_before_the_limits() -> None:
@@ -406,6 +409,7 @@ async def test_three_failed_orders_in_ten_minutes_pause_the_bot() -> None:
     )
     assert accounts.paused == [(BOT, reason)]
     (tripped,) = [log for log in logs if log["event"] == "risk.breaker.tripped"]
+    assert alert_of(tripped) == "breaker"  # D59
     assert tripped == {
         "event": "risk.breaker.tripped",
         "log_level": "warning",
@@ -497,10 +501,12 @@ async def test_failures_with_the_error_breaker_off_pause_nothing() -> None:
 async def test_a_buy_over_the_coin_cap_is_placed_smaller_and_recorded() -> None:
     risk, broker, accounts = manager()
 
-    outcome = await risk.submit(BOT, order(amount="9.99"), REASON)
+    with capture_logs() as logs:
+        outcome = await risk.submit(BOT, order(amount="9.99"), REASON)
 
     # 25% of 1000 at 100: 2.5 BTC.
     assert outcome.decision.decision == "resized"
+    assert [alert_of(log) for log in logs] == ["risk_resize"]  # D59
     assert outcome.decision.requested_amount == Decimal("9.99")
     ((_, placed, reason),) = broker.placed
     assert placed == order(amount="2.5")

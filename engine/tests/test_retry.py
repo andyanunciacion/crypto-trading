@@ -3,7 +3,6 @@
 import pytest
 from structlog.testing import capture_logs
 
-from engine.backoff import Backoff
 from engine.exchange.errors import (
     AuthError,
     ExchangeError,
@@ -11,6 +10,7 @@ from engine.exchange.errors import (
     OrderRejected,
 )
 from engine.exchange.retry import with_retries
+from shared.backoff import Backoff
 
 
 class Script:

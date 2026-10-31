@@ -817,10 +817,19 @@ Judge them in two steps:
 
 ### P7-1 · Telegram alerts
 `ops` · Depends on: P3-3
-- [ ] Alerts bot service consuming engine events; per-event toggles (`alert_settings`); daily summary
-- [ ] Alert preferences on the Settings page (moved from P5-7, D50): a toggle per event the service sends
+- [x] Alerts bot service consuming engine events; per-event toggles (`alert_settings`); daily summary
+- [x] Alert preferences on the Settings page (moved from P5-7, D50): a toggle per event the service sends
 
 **Done when:** a paper trade, a risk block and an error each produce a Telegram message.
+
+**Done (D59):**
+- **The owner's choices:** the events come from the log stream (no engine change), the summary at 08:00 Manila about the day before, and toggles with no code.
+- **The service:** `alerts`, a 7th Compose service from the API's image (`backend/alerts/`). It reads the `logs` stream from a cursor in Redis, maps lines with `shared.alerts.to_alert()`, checks `alert_settings` (migration 0017) for each batch, holds back repeats (`Quieter`: a block per bot and rule an hour, an error per service, event and bot every 10 min) and sends with python-telegram-bot, one a second, at least once. Without `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` it only logs. `chat-id`, `test` and `summary` subcommands help set it up.
+- **The events:** trade (one per order: average price, fee, why, a closing sell's realized P&L), stop, blocked and shrunk buys (shrunk off by default), the error breaker, switches, the kill switch, any error line, and the daily summary.
+- **Robust:** database reads give up after 5 s and fall back, so an error alert still goes with the database down. Telegram's flood control is waited out, network errors retried, refusals dropped and shown on the Settings page. The token never reaches a log.
+- **The page:** Settings → Alerts (`AlertSettingsForm`), with whether the service is running and Telegram set up. "alerts" is on the Logs page's service filter. The e2e stack blanks the token.
+- **Also:** `Backoff` moved to `shared/backoff.py`.
+- **Tests:** `test_alerts.py` (mapping, quieter, the migration's defaults), `test_alerts_format.py`, `test_alerts_telegram.py` (fake bot: interval, flood control, retries, refusals, no token in logs), `test_alerts_service.py` (test Redis and DB: cursor, toggles, quieting, trades from their rows or their line, the database down, the summary once a day), `test_alert_settings.py`, and `alert_of()` checks in the engine tests that log those lines; e2e `settings.spec.ts` toggles an alert.
 
 ### P7-2 · Telegram commands
 `ops` `security` · Depends on: P7-1, P4-5

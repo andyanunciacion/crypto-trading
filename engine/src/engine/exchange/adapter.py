@@ -26,7 +26,6 @@ import ccxt.pro as ccxt_pro  # the WebSocket clients
 import structlog
 from pydantic import BaseModel, SecretStr, ValidationError
 
-from engine.backoff import Backoff
 from engine.exchange import errors
 from engine.exchange.models import (
     Balance,
@@ -39,6 +38,7 @@ from engine.exchange.models import (
     order_problems,
 )
 from engine.exchange.retry import with_retries
+from shared.backoff import Backoff
 
 log = structlog.get_logger()
 

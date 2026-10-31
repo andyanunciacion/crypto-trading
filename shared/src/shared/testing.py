@@ -12,7 +12,8 @@ CI so they can't quietly stop running.
 import os
 import shutil
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from typing import Any
 
 import pytest
 from sqlalchemy import URL, update
@@ -22,8 +23,10 @@ from testcontainers.community.postgres import PostgresContainer
 from testcontainers.core.container import DockerContainer
 from testcontainers.core.wait_strategies import LogMessageWaitStrategy
 
+from shared.alerts import to_alert
 from shared.db.migrate import upgrade
 from shared.db.models import BotRow, RiskSettingsRow
+from shared.logs import mirrored_line, read_entry
 
 # Keep both in step with compose.yaml.
 TIMESCALE_IMAGE = "timescale/timescaledb:2.31.0-pg16"
@@ -125,6 +128,21 @@ async def set_limits(db: AsyncEngine, mode: str = "paper", **limits: object) -> 
     }
     async with db.begin() as conn:
         await conn.execute(update(RiskSettingsRow).where(RiskSettingsRow.mode == mode).values(row))
+
+
+def alert_of(captured: Mapping[str, Any], service: str = "engine") -> str | None:
+    """The alert (shared/alerts.py, D59) a line `capture_logs()` caught is, read as the
+    alerts service reads it from the logs stream; None if it isn't one.
+
+    The tests that make the engine log the lines alerts are made from check them with
+    this, so renaming an event or a field the alerts rely on fails there.
+    """
+    event_dict = {k: v for k, v in captured.items() if k != "log_level"}
+    entry = read_entry(
+        "0-0", mirrored_line({**event_dict, "level": captured["log_level"]}, service).encode()
+    )
+    alert = None if entry is None else to_alert(entry)
+    return None if alert is None else alert.event
 
 
 @pytest.fixture(scope="session")

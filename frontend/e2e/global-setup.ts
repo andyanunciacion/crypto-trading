@@ -7,7 +7,8 @@ import { newSecret } from "./totp";
  * Starts the e2e stack from scratch and creates its one user, `e2e`, with a random
  * password and TOTP secret, and one running paper bot, `e2e-bot`, for the market chart
  * and the kill switch (bots.spec.ts makes its own, from the dashboard). It backfills
- * 120 days of BTC/USDT 4h candles for the backtests, and starts the backtester.
+ * 120 days of BTC/USDT 4h candles for the backtests, and starts the backtester and the
+ * alerts service (which only logs here).
  * Environment variables set here reach the tests.
  *
  * The engine connects to MEXC for prices and candles, so this needs the internet.
@@ -17,9 +18,9 @@ export default function globalSetup(): void {
   // --wait: until the API and the dashboard report healthy (their dependencies start first).
   compose(["up", "-d", "--build", "--wait", "api", "frontend"]);
   // The bot before the engine: the engine loads bots when it starts. The backtester has
-  // its own image of the engine's code; built here too, or a stale one runs the page's
-  // backtests while the CLI runs the new code.
-  compose(["build", "engine", "backtester"]);
+  // its own image of the engine's code (and alerts of the API's); built here too, or a
+  // stale one runs the page's backtests while the CLI runs the new code.
+  compose(["build", "engine", "backtester", "alerts"]);
   compose([
     "run",
     "--rm",
@@ -50,7 +51,8 @@ export default function globalSetup(): void {
     "--days",
     "120",
   ]);
-  compose(["up", "-d", "--wait", "engine", "backtester"]);
+  // Alerts with Telegram blanked (stack.ts): they're only logged.
+  compose(["up", "-d", "--wait", "engine", "backtester", "alerts"]);
 
   const password = randomBytes(18).toString("base64url");
   const secret = newSecret();

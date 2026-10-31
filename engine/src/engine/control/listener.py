@@ -24,9 +24,9 @@ import structlog
 from pydantic import ValidationError
 from redis.asyncio import Redis
 
-from engine.backoff import Backoff
 from engine.control.bots import BotControl
 from engine.risk.kill import KillSwitch
+from shared.backoff import Backoff
 from shared.commands import (
     BLOCK_SECONDS,
     COMMAND,

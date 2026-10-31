@@ -90,6 +90,8 @@ async def test_every_other_route_refuses_a_caller_without_a_session(api: Api) ->
         "POST /exchange-accounts",
         "PUT /exchange-accounts/{account_id}",
         "DELETE /exchange-accounts/{account_id}",
+        "GET /alert-settings",
+        "PUT /alert-settings/{event}",
     } <= set(checked)
 
 

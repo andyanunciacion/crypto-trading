@@ -29,7 +29,6 @@ from typing import Annotated, Literal, get_args
 import structlog
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
-from engine.backoff import Backoff
 from engine.exchange.adapter import ExchangeAdapter
 from engine.exchange.errors import ExchangeNetworkError
 from engine.exchange.models import Candle, MarketRules, Timeframe
@@ -41,6 +40,7 @@ from engine.marketdata.candle_stream import (
     fetch_range,
 )
 from engine.marketdata.timeframes import STEP, floor
+from shared.backoff import Backoff
 from shared.config import load_settings
 from shared.logs import configure_logging
 

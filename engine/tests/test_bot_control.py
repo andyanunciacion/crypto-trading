@@ -57,7 +57,7 @@ from shared.db.models import (
 )
 from shared.db.session import make_engine
 from shared.prices import PriceUpdate
-from shared.testing import set_limits
+from shared.testing import alert_of, set_limits
 
 BTC = "BTC/USDT"
 T0 = datetime(2026, 10, 22, 12, 0, tzinfo=UTC)
@@ -957,6 +957,7 @@ async def test_a_rollback_restores_the_earlier_params_and_keeps_both_in_history(
         (switch,) = [log for log in logs if log["event"] == "bot.switch"]
         assert (switch["old"]["id"], switch["new"]["id"], switch["restored_from"]) == (2, 3, 1)
         assert switch["switching"] is True
+        assert alert_of(switch) == "switch"  # D59
         await until(lambda: runner.switching == [])
         await setup.closes(runner, 31, "110", bid="109.9")  # EMA 3/5's BUY, as config 3
 

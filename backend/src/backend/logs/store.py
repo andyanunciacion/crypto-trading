@@ -42,7 +42,7 @@ class LogQuery(BaseModel):
         default=None, max_length=10
     )
     bot_id: int | None = Field(default=None, ge=1)
-    service: Literal["engine", "backtester", "api"] | None = None
+    service: Literal["engine", "backtester", "api", "alerts"] | None = None
     before: str | None = Field(default=None, pattern=r"^\d{1,20}-\d{1,20}$")  # a stream id
     limit: int = Field(default=DEFAULT_ROWS, ge=1, le=MAX_ROWS)
 
