@@ -36,6 +36,7 @@ from engine.backtest.cli import (
     PublicRules,
     RunSettings,
     build_config,
+    checked_auto_switch,
 )
 from engine.backtest.run import backtest
 from engine.backtest.simulator import BacktestError
@@ -182,15 +183,18 @@ class BacktestWorker:
             settings = RunSettings.model_validate(
                 command.model_dump(include=fields) | {"exchange": self._exchange_id}
             )
+            if command.auto_switch is not None:
+                auto = checked_auto_switch(command.auto_switch)
+                settings = settings.model_copy(update={"auto_switch": auto})
         except ValidationError as exc:
             raise Refused(describe(exc)) from None
-        except ValueError as exc:  # an unknown strategy
+        except ValueError as exc:  # an unknown strategy, a mapping that doesn't build
             raise Refused(str(exc)) from None
         if "/" not in command.symbol:
             raise Refused(f"{command.symbol!r} isn't a symbol like BTC/USDT")
         try:
             config = await build_config(settings, self._candles, strategy, self._rules)
-            run_id, _ = await backtest(self._candles, self._runs, strategy, config)
+            run_id, _, _ = await backtest(self._candles, self._runs, strategy, config)
         except NotEnoughHistory as exc:
             raise Refused(str(exc), exc.max_days) from None
         except BacktestError as exc:  # no candles, a gap

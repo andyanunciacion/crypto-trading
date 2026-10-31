@@ -22,6 +22,7 @@ from shared.backtest_jobs import (
     write_job,
 )
 from shared.db.models import BacktestRunRow, CandleRow
+from shared.regime import AutoSwitchSettings
 
 D = Decimal
 HOUR = timedelta(hours=1)
@@ -129,10 +130,50 @@ async def test_a_run_is_queued_for_the_backtester_as_a_job(api: Api) -> None:
     assert command.stops == {"stop_loss": {"kind": "percent", "percent": "3"}}
 
 
+async def test_a_plain_run_queues_no_auto_switching(api: Api) -> None:
+    await clean(api)
+    await api.login()
+
+    await api.client.post("/backtests", json=REQUEST)
+
+    popped = await api.redis.rpop(BACKTEST_COMMANDS_KEY)
+    assert popped is not None and not isinstance(popped, list)
+    assert RunBacktestCommand.model_validate_json(popped).auto_switch is None
+
+
+async def test_an_auto_switching_run_is_queued_with_its_mapping(api: Api) -> None:
+    await clean(api)
+    await api.login()
+    # As the form sends it: no versions (the backtester fills them in), no detector.
+    sent = {
+        "mapping": {
+            "trending_up": {"strategy": "ema_crossover", "params": {"fast": 9, "slow": 21}},
+            "ranging": {"strategy": "rsi_mean_reversion", "params": {"period": 14}},
+            "trending_down": {"strategy": "stay_flat", "params": {}},
+            "high_volatility": {"strategy": "stay_flat", "params": {}},
+        },
+        "min_hold": 3,
+        "policy": "keep",
+    }
+
+    response = await api.client.post("/backtests", json=REQUEST | {"auto_switch": sent})
+
+    assert response.status_code == 202
+    popped = await api.redis.rpop(BACKTEST_COMMANDS_KEY)
+    assert popped is not None and not isinstance(popped, list)
+    command = RunBacktestCommand.model_validate_json(popped)
+    assert command.auto_switch == AutoSwitchSettings.model_validate(sent)
+    assert command.auto_switch is not None
+    assert command.auto_switch.mapping["ranging"].version is None  # the backtester's to fill
+
+
 async def test_a_bad_request_is_a_422_and_queues_nothing(api: Api) -> None:
     await clean(api)
     await api.login()
     without_fee = {k: v for k, v in REQUEST.items() if k != "fee_rate"}
+    unmapped = {"mapping": {"trending_up": {"strategy": "ema_crossover"}}}
+    flat = {"strategy": "stay_flat"}
+    every_regime = {r: flat for r in ("trending_up", "trending_down", "ranging", "high_volatility")}
 
     for body in (
         without_fee,
@@ -140,8 +181,13 @@ async def test_a_bad_request_is_a_422_and_queues_nothing(api: Api) -> None:
         REQUEST | {"cash": "0"},
         REQUEST | {"slippage": "1"},
         REQUEST | {"withdraw": True},
+        REQUEST | {"auto_switch": unmapped},
+        REQUEST | {"auto_switch": {"mapping": every_regime, "min_hold": 0}},
+        REQUEST | {"auto_switch": {"mapping": every_regime, "policy": "sell_everything"}},
     ):
-        assert (await api.client.post("/backtests", json=body)).status_code == 422
+        response = await api.client.post("/backtests", json=body)
+        assert response.status_code == 422
+        assert '"input"' not in response.text  # no 422 echoes what was sent (app.py)
     assert await api.redis.llen(BACKTEST_COMMANDS_KEY) == 0
 
 
@@ -299,6 +345,59 @@ async def test_an_auto_switching_run_shows_its_mapping_switches_and_whose_trades
         ("switch", EMA),
         (None, EMA),
     ]
+
+
+def baseline(label: str, config: dict[str, Any] | None, result: dict[str, Any]) -> dict[str, Any]:
+    """A stored baseline (shared.backtest.BaselineResult): what its metrics need."""
+    kept = ("fills", "equity_curve", "final_amount", "final_equity", "total_fees")
+    return {"label": label, "config": config} | {k: result[k] for k in kept}
+
+
+# Stay flat never buys: its equity is the starting cash throughout.
+FLAT_RESULT = RESULT | {
+    "fills": [],
+    "equity_curve": [{"ts": p["ts"], "equity": "1000"} for p in RESULT["equity_curve"]],
+    "final_equity": "1000",
+    "total_fees": "0",
+}
+
+
+async def test_an_auto_switching_run_shows_its_baselines_metrics(api: Api) -> None:
+    await clean(api)
+    await api.login()
+    stored = [
+        baseline('ema_crossover v1 {"fast": 9, "slow": 21}', EMA, RESULT),
+        baseline("stay_flat v1 {}", FLAT, FLAT_RESULT),
+        baseline("buy and hold", None, RESULT),
+    ]
+    run_id = await store_run(
+        api, auto_switch=AUTO_SWITCH, regime_detector_version=1, baselines=stored
+    )
+
+    run = (await api.client.get(f"/backtests/{run_id}")).json()
+
+    assert [(b["label"], b["config"]) for b in run["baselines"]] == [
+        ('ema_crossover v1 {"fast": 9, "slow": 21}', EMA),
+        ("stay_flat v1 {}", FLAT),
+        ("buy and hold", None),
+    ]
+    # Worked out when shown, with the function the run's own metrics use (D30).
+    assert run["baselines"][0]["metrics"] == run["metrics"]
+    flat = run["baselines"][1]["metrics"]
+    assert (D(flat["total_return"]), flat["trade_count"], flat["win_rate"]) == (D(0), 0, None)
+    # The list leaves them out, as it does the trades.
+    assert "baselines" not in (await api.client.get("/backtests")).json()[0]
+
+
+async def test_a_run_without_stored_baselines_shows_none(api: Api) -> None:
+    await clean(api)
+    await api.login()
+    # A plain run, and an auto-switching one stored before baselines were (migration 0016).
+    plain = await store_run(api)
+    older = await store_run(api, auto_switch=AUTO_SWITCH, regime_detector_version=1)
+
+    for run_id in plain, older:
+        assert (await api.client.get(f"/backtests/{run_id}")).json()["baselines"] is None
 
 
 async def test_an_unknown_run_is_a_404(api: Api) -> None:

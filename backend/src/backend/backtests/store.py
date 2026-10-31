@@ -18,6 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from shared.backtest import (
     BacktestReport,
     BacktestSwitch,
+    BaselineResult,
+    ConfigRef,
     SkippedOrder,
     StoredResult,
     Trade,
@@ -88,11 +90,22 @@ class EquityPoint(_Frozen):
     drawdown: Decimal  # the fall from the highest equity so far, as a fraction of it
 
 
+class Baseline(_Frozen):
+    """What an auto-switching run is judged against (D57): a config alone, or buy-and-hold."""
+
+    label: str
+    config: ConfigRef | None  # None for buy-and-hold
+    metrics: Metrics
+
+
 class RunDetail(RunSummary):
     trades: list[Trade]  # closed round trips, oldest first
     equity: list[EquityPoint]  # one point per candle in the range
     skipped: list[SkippedOrder]  # signals that didn't become fills, and why
     switches: list[BacktestSwitch]  # an auto-switching run's, oldest first
+    # An auto-switching run's, in the engine's order (compare.py); None for a plain run
+    # or one stored before they were (migration 0016).
+    baselines: list[Baseline] | None
     fills: int
     signals: int
 
@@ -133,6 +146,20 @@ def _summary(row: RowMapping) -> RunSummary:
             return RunSummary(**_inputs(row), metrics=_shown(report))
 
 
+def _baselines(row: RowMapping) -> list[Baseline] | None:
+    if row["baselines"] is None:
+        return None
+    shown: list[Baseline] = []
+    for stored in row["baselines"]:
+        try:
+            b = BaselineResult.model_validate(stored)
+            report = metrics(row["initial_cash"], row["timeframe"], b)
+        except (ValidationError, ValueError):
+            return None  # stored by an older backtester, as _report allows for the run's
+        shown.append(Baseline(label=b.label, config=b.config, metrics=_shown(report)))
+    return shown
+
+
 def _detail(row: RowMapping) -> RunDetail:
     match _report(row):
         case str(problem):
@@ -144,6 +171,7 @@ def _detail(row: RowMapping) -> RunDetail:
                 equity=[],
                 skipped=[],
                 switches=[],
+                baselines=None,
                 fills=0,
                 signals=0,
             )
@@ -159,6 +187,7 @@ def _detail(row: RowMapping) -> RunDetail:
                 ],
                 skipped=result.skipped,
                 switches=result.switches,
+                baselines=_baselines(row),
                 fills=len(result.fills),
                 signals=len(result.signals),
             )

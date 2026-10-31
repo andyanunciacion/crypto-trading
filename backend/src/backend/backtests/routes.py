@@ -37,6 +37,7 @@ from backend.backtests.store import (
     read_runs,
 )
 from shared.backtest_jobs import BacktestJob, RunBacktestCommand, queue, read_job
+from shared.regime import AutoSwitchSettings
 
 log = structlog.get_logger()
 
@@ -66,6 +67,9 @@ class BacktestRequest(BaseModel):
     slippage: Decimal | None = Field(default=None, ge=0, lt=1)  # None: the pair's default
     sizing: dict[str, JsonValue] = Field(default_factory=_all_in)
     stops: dict[str, JsonValue] = Field(default_factory=dict)
+    # `--auto-switch` (P6-5c): every regime mapped is checked here, each config's params
+    # by the backtester.
+    auto_switch: AutoSwitchSettings | None = None
 
 
 def _now(state: State) -> datetime:

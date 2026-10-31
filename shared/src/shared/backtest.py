@@ -104,6 +104,21 @@ class StoredResult(_Frozen):
     switches: list[BacktestSwitch] = []  # auto-switching runs only (P6-5)
 
 
+class BaselineResult(_Frozen):
+    """One of the baselines an auto-switching run is judged against (P6-5c, D57): a config
+    it switches between, run alone over the same candles, or buy-and-hold. Stored with the
+    run (`backtest_runs.baselines`) with only what the metrics need, which are worked out
+    when shown, like the run's own (D30)."""
+
+    label: str
+    config: ConfigRef | None  # None for buy-and-hold, which no run can switch to
+    fills: list[Fill]
+    equity_curve: list[EquityPoint]
+    final_amount: Decimal
+    final_equity: Decimal
+    total_fees: Decimal
+
+
 class Outcome(Protocol):
     """What the metrics need from a run's result: a `StoredResult` or the engine's own."""
 

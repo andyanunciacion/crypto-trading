@@ -8,12 +8,14 @@ from datetime import UTC, datetime
 from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from engine.backtest.compare import Baseline
 from engine.backtest.models import BacktestConfig, BacktestResult
 from engine.backtest.simulator import BACKTESTER_VERSION
 from engine.exchange.models import Candle, MarketRules
 from engine.regime.detector import RegimeDetector
 from engine.risk.sizing import SIZING
 from engine.risk.stops import STOPS
+from shared.backtest import BaselineResult
 from shared.db.models import BacktestRunRow
 from shared.regime import AutoSwitchSettings
 
@@ -42,6 +44,8 @@ class StoredRun:
     backtester_version: int
     regime_detector_version: int | None  # auto-switching runs only
     result: BacktestResult
+    # An auto-switching run's (compare.py, D57); None for a plain run or one stored before.
+    baselines: list[BaselineResult] | None
 
 
 class BacktestRunStore:
@@ -54,6 +58,7 @@ class BacktestRunStore:
         warmup_candles: int,
         candles: Sequence[Candle],
         result: BacktestResult,
+        baselines: Sequence[Baseline] | None = None,
     ) -> int:
         """Store a finished run; returns its id. `candles` are all it ran on, warm-up included."""
         auto = config.auto_switch
@@ -83,6 +88,9 @@ class BacktestRunStore:
                 final_equity=result.final_equity,
                 total_fees=result.total_fees,
                 result=result.model_dump(mode="json"),
+                baselines=None
+                if baselines is None
+                else [b.stored().model_dump(mode="json") for b in baselines],
             )
             .returning(BacktestRunRow.id)
         )
@@ -125,4 +133,7 @@ class BacktestRunStore:
             backtester_version=row["backtester_version"],
             regime_detector_version=row["regime_detector_version"],
             result=BacktestResult.model_validate(row["result"]),
+            baselines=None
+            if row["baselines"] is None
+            else [BaselineResult.model_validate(b) for b in row["baselines"]],
         )

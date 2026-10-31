@@ -23,6 +23,8 @@ from uuid import UUID, uuid4
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, JsonValue
 from redis.asyncio import Redis
 
+from shared.regime import AutoSwitchSettings
+
 BACKTEST_COMMANDS_KEY = "backtest:commands"
 JOB_TTL_SECONDS = 3600
 
@@ -60,6 +62,10 @@ class RunBacktestCommand(_Frozen):
     # As backtest_runs.sizing and .stops store them; the backtester reads them.
     sizing: dict[str, JsonValue] = Field(default_factory=lambda: _ALL_IN.copy())
     stops: dict[str, JsonValue] = Field(default_factory=dict)
+    # Switch strategy as the regime changes (P6-5c), starting on `strategy`, as `run
+    # --auto-switch` does; None is a plain run. Its configs come without versions: the
+    # backtester checks each one's params and fills them in.
+    auto_switch: AutoSwitchSettings | None = None
 
 
 JobStatus = Literal["queued", "running", "done", "failed"]

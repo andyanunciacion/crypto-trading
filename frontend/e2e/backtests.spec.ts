@@ -98,3 +98,87 @@ test("a backtest from the page shows the CLI's metrics for the same inputs", asy
   ).split("\n");
   expect(cli).toBe(ui);
 });
+
+/**
+ * P6-5c's "done when": an auto-switching backtest from the form is the run
+ * `engine.backtest.run --auto-switch` makes with the same arguments, baselines included.
+ * The form's starting mapping, each strategy with its defaults, a hold of 3 and `keep`.
+ */
+test("an auto-switching backtest from the page is the CLI's, baselines and all", async ({
+  page,
+}) => {
+  test.setTimeout(240_000);
+  await signIn(page);
+  await page.goto("/backtests");
+
+  const form = page.getByRole("form", { name: "New backtest" });
+  await form.getByLabel("Timeframe").selectOption("4h");
+  await form.getByLabel("Days").fill("60");
+  await expect(form.getByLabel("Strategy when ranging")).toBeHidden();
+  await form.getByLabel("Switch strategy by regime").check();
+  await expect(form.getByLabel("Strategy when trending up")).toHaveValue("ema_crossover");
+  await expect(form.getByLabel("Strategy when trending down")).toHaveValue("stay_flat");
+  await expect(form.getByLabel("Strategy when ranging")).toHaveValue("rsi_mean_reversion");
+  await expect(form.getByLabel("Strategy when high volatility")).toHaveValue("stay_flat");
+  await expect(form.getByLabel("Minimum hold, in candles")).toHaveValue("3");
+  await expect(form.getByRole("radio", { name: /^Keep/ })).toBeChecked();
+  await expect(form.getByTestId("stored-range")).toContainText("199 candles");
+  await form.getByLabel("Minimum hold, in candles").fill("0");
+  await expect(form.getByRole("button", { name: "Run backtest" })).toBeDisabled();
+  await form.getByLabel("Minimum hold, in candles").fill("3");
+  await form.getByRole("button", { name: "Run backtest" }).click();
+
+  await expect(page).toHaveURL(/\/backtests\/\d+$/, { timeout: 180_000 });
+  const uiRun = Number(new URL(page.url()).pathname.split("/").pop());
+  await expect(page.getByRole("heading", { name: /auto-switching on BTC\/USDT 4h/ })).toBeVisible();
+  // The run and its baselines: EMA (where it starts, and the uptrend's), stay flat (two
+  // regimes'), RSI, and buy-and-hold.
+  const table = page.getByRole("table", { name: "Against each config alone" });
+  await expect(table.locator("tbody tr")).toHaveCount(5);
+  const returns = await table
+    .locator('[data-metric="total_return"]')
+    .evaluateAll((cells) => cells.map((cell) => cell.getAttribute("data-value") ?? ""));
+
+  const autoSwitch = {
+    mapping: {
+      trending_up: { strategy: "ema_crossover" },
+      trending_down: { strategy: "stay_flat" },
+      ranging: { strategy: "rsi_mean_reversion" },
+      high_volatility: { strategy: "stay_flat" },
+    },
+    min_hold: 3,
+    policy: "keep",
+  };
+  const printed = composeOutput([
+    "run",
+    "--rm",
+    "-T",
+    "engine",
+    "python",
+    "-m",
+    "engine.backtest.run",
+    "ema_crossover",
+    "BTC/USDT",
+    "4h",
+    "--days",
+    "60",
+    "--auto-switch",
+    JSON.stringify(autoSwitch),
+  ]);
+  const cliRun = Number(/^run (\d+):/m.exec(printed)?.[1]);
+  expect(cliRun).toBeGreaterThan(uiRun);
+  // Every return the page ranks, the CLI prints, best first both times.
+  expect(printed).toContain("against each config alone, over the same candles:");
+  for (const value of returns) {
+    expect(printed).toContain(`${fixed(shiftPoint(value, 2), 2, true)}%  max drawdown`);
+  }
+
+  // The same mapping (versions filled in), range, candles, fills and baselines.
+  const [ui, cli] = psql(
+    `SELECT auto_switch::text, range_start, range_end, candles_sha256, md5(result::text),
+            md5(baselines::text)
+       FROM backtest_runs WHERE id IN (${uiRun}, ${cliRun}) ORDER BY id`,
+  ).split("\n");
+  expect(ui).toContain('"version": 1');
+  expect(cli).toBe(ui);
+});

@@ -117,6 +117,9 @@ class BacktestRunRow(Base):
     final_equity: Mapped[Decimal] = mapped_column(Numeric)
     total_fees: Mapped[Decimal] = mapped_column(Numeric)
     result: Mapped[dict[str, Any]] = mapped_column(JSONB)  # signals, fills, equity curve
+    # An auto-switching run's baselines (shared.backtest.BaselineResult, P6-5c); NULL for a
+    # plain run, or one stored before they were.
+    baselines: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
 
 
 # --- Bots (P3) --------------------------------------------------------------------------

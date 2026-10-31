@@ -3,13 +3,13 @@
 import { Shuffle } from "lucide-react";
 import { useRef, useState, type FormEvent } from "react";
 
-import { allValid } from "@/components/strategy-setup";
-import { StrategyParamsForm } from "@/components/strategy-params-form";
+import {
+  AutoSwitchFields,
+  autoSwitchPayload,
+  initialAutoSwitch,
+} from "@/components/auto-switch-fields";
 import { SwitchPolicyFields } from "@/components/switch-policy-fields";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { NativeSelect } from "@/components/ui/native-select";
 import {
   Sheet,
   SheetContent,
@@ -20,38 +20,12 @@ import {
 } from "@/components/ui/sheet";
 import { ApiError, catalog as fetchCatalog, setAutoSwitch } from "@/lib/api";
 import {
-  REGIMES,
-  fieldProblem,
-  initialValues,
-  toSettings,
   type AutoSwitchSettings,
   type BotReply,
   type BotSetup,
   type Catalog,
-  type Choice,
-  type FieldSpec,
-  type MappedRegime,
   type SwitchPolicy,
 } from "@/lib/bots";
-
-/** What each regime starts as when auto-switching is first set up. */
-const STARTING: Record<MappedRegime, string> = {
-  trending_up: "ema_crossover",
-  trending_down: "stay_flat",
-  ranging: "rsi_mean_reversion",
-  high_volatility: "stay_flat",
-};
-
-const MIN_HOLD: FieldSpec = {
-  name: "min_hold",
-  type: "integer",
-  default: "3",
-  minimum: "1",
-  exclusive_minimum: false,
-  maximum: "100",
-  exclusive_maximum: false,
-  description: null,
-};
 
 /**
  * Auto-switching (P6-4, D54), from the bot's page: a strategy for each regime, how many
@@ -148,31 +122,6 @@ export function AutoSwitchSheet({
   );
 }
 
-type Row = { strategy: string; values: Record<string, string> };
-
-/** The inputs for `choice`'s params: `params`' values where it has them. */
-function valuesFor(choice: Choice | undefined, params: Record<string, unknown> | undefined) {
-  const fields = choice?.fields ?? [];
-  const values = initialValues(fields);
-  for (const field of fields) {
-    const value = params?.[field.name];
-    if (typeof value === "number" || typeof value === "string") values[field.name] = String(value);
-  }
-  return values;
-}
-
-function startingRows(bot: BotSetup, catalog: Catalog): Record<MappedRegime, Row> {
-  const choose = (name: string) =>
-    catalog.strategies.find((s) => s.name === name) ?? catalog.strategies[0];
-  return Object.fromEntries(
-    REGIMES.map(({ value: regime }) => {
-      const stored = bot.auto_switch?.mapping[regime];
-      const choice = choose(stored?.strategy ?? STARTING[regime]);
-      return [regime, { strategy: choice?.name ?? "", values: valuesFor(choice, stored?.params) }];
-    }),
-  ) as Record<MappedRegime, Row>;
-}
-
 function AutoSwitchForm({
   bot,
   holding,
@@ -188,25 +137,12 @@ function AutoSwitchForm({
   onCancel: () => void;
   onSaved: (reply: BotReply, settings: AutoSwitchSettings) => void;
 }) {
-  const [rows, setRows] = useState(() => startingRows(bot, catalog));
-  const [minHold, setMinHold] = useState(String(bot.auto_switch?.min_hold ?? MIN_HOLD.default));
+  const [inputs, setInputs] = useState(() => initialAutoSwitch(catalog, bot.auto_switch));
   const [policy, setPolicy] = useState<SwitchPolicy>(bot.auto_switch?.policy ?? bot.switch_policy);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const fieldsOf = (row: Row) =>
-    catalog.strategies.find((s) => s.name === row.strategy)?.fields ?? [];
-  const holdProblem = fieldProblem(MIN_HOLD, minHold);
-  const valid =
-    holdProblem === null &&
-    REGIMES.every(({ value }) => {
-      const row = rows[value];
-      return row.strategy !== "" && allValid(fieldsOf(row), row.values);
-    });
-
-  function setRow(regime: MappedRegime, row: Row) {
-    setRows((current) => ({ ...current, [regime]: row }));
-  }
+  const payload = autoSwitchPayload(catalog, inputs);
 
   function sendingNow(value: boolean) {
     setSending(value);
@@ -215,15 +151,9 @@ function AutoSwitchForm({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (!valid) return;
+    if (payload === null) return;
     const settings: AutoSwitchSettings = {
-      mapping: Object.fromEntries(
-        REGIMES.map(({ value }) => {
-          const row = rows[value];
-          return [value, { strategy: row.strategy, params: toSettings(fieldsOf(row), row.values) }];
-        }),
-      ) as AutoSwitchSettings["mapping"],
-      min_hold: Number(minHold.trim()),
+      ...payload,
       policy,
       // Kept as stored: the dashboard doesn't edit the detector's settings yet.
       ...(bot.auto_switch?.detector ? { detector: bot.auto_switch.detector } : {}),
@@ -250,58 +180,14 @@ function AutoSwitchForm({
       className="flex flex-col gap-6"
       aria-label={`Auto-switching for ${bot.name}`}
     >
-      {REGIMES.map(({ value: regime, label, hint }) => {
-        const row = rows[regime];
-        const hintId = `auto-${regime}-hint`;
-        return (
-          <fieldset key={regime} className="flex flex-col gap-3" aria-describedby={hintId}>
-            <legend className="mb-2 text-sm font-semibold">{label}</legend>
-            <p id={hintId} className="text-muted-foreground -mt-2 text-xs">
-              {hint}
-            </p>
-            <NativeSelect
-              aria-label={`Strategy when ${label.toLowerCase()}`}
-              value={row.strategy}
-              onChange={(event) => {
-                const next = event.target.value;
-                const choice = catalog.strategies.find((s) => s.name === next);
-                setRow(regime, { strategy: next, values: valuesFor(choice, undefined) });
-              }}
-            >
-              {catalog.strategies.map((s) => (
-                <option key={s.name} value={s.name}>
-                  {s.title}
-                </option>
-              ))}
-            </NativeSelect>
-            <StrategyParamsForm
-              idPrefix={`auto-${regime}`}
-              fields={fieldsOf(row)}
-              values={row.values}
-              onChange={(values) => setRow(regime, { ...row, values })}
-            />
-          </fieldset>
-        );
-      })}
-
-      <div className="flex flex-col gap-1.5">
-        <Label htmlFor="auto-min-hold">Minimum hold, in candles</Label>
-        <Input
-          id="auto-min-hold"
-          inputMode="numeric"
-          value={minHold}
-          aria-invalid={holdProblem !== null}
-          aria-describedby="auto-min-hold-hint"
-          onChange={(event) => setMinHold(event.target.value)}
-          className="w-32 font-mono"
-        />
-        <p id="auto-min-hold-hint" className="text-muted-foreground text-xs">
-          {holdProblem !== null && <span className="text-loss">{holdProblem} · </span>}
-          How many closed {bot.timeframe} candles in a row a new regime must read before the bot
-          switches (1–100). Longer is steadier, but later: the detector already sees a turn a few
-          candles late.
-        </p>
-      </div>
+      <AutoSwitchFields
+        idPrefix="auto"
+        catalog={catalog}
+        inputs={inputs}
+        onChange={setInputs}
+        timeframe={bot.timeframe}
+        switcher="the bot"
+      />
 
       <SwitchPolicyFields idPrefix="auto" policy={policy} holding={holding} onChange={setPolicy} />
 
@@ -319,7 +205,7 @@ function AutoSwitchForm({
         <Button type="button" variant="outline" disabled={sending} onClick={onCancel}>
           Cancel
         </Button>
-        <Button type="submit" disabled={!valid || sending}>
+        <Button type="submit" disabled={payload === null || sending}>
           {bot.auto_switch === null ? "Turn on" : "Save"}
         </Button>
       </div>
