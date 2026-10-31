@@ -87,7 +87,7 @@
 
 ## Phase 7 — Alerts and monitoring
 
-1. [ ] **Telegram alerts:** trades, stop-loss hits, switches, errors, limit breaches, daily summary; on/off per event type, on the Settings page (moved from P5-7, D50).
+1. [x] **Telegram alerts:** trades, stop-loss hits, switches, errors, limit breaches, daily summary; on/off per event type, on the Settings page (moved from P5-7, D50). The alerts service reads the log stream every service writes (D59).
 2. [ ] **Telegram commands:** /status, /pnl, /pause, /kill, only from your chat ID.
 3. [ ] **Heartbeat:** alert if the engine stops sending updates.
 4. [ ] **Health + errors:** health endpoint per service; Sentry wired into API and engine.

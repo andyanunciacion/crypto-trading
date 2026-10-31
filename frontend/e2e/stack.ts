@@ -14,7 +14,14 @@ export const FRONTEND_PORT = 3100;
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
 
 function stackEnv(): NodeJS.ProcessEnv {
-  return { ...process.env, API_PORT: String(API_PORT), FRONTEND_PORT: String(FRONTEND_PORT) };
+  return {
+    ...process.env,
+    API_PORT: String(API_PORT),
+    FRONTEND_PORT: String(FRONTEND_PORT),
+    // Blank, so the alerts service only logs: the tests must never message the owner's phone.
+    TELEGRAM_BOT_TOKEN: "",
+    TELEGRAM_CHAT_ID: "",
+  };
 }
 
 /** Runs SQL in the e2e stack's database; returns psql's unaligned, tuples-only output. */

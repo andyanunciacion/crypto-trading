@@ -9,7 +9,8 @@ import { totp } from "./totp";
  * and raising a limit without a TOTP code is rejected.
  *
  * Starts from the seeded paper limits (ARCHITECTURE §6) and puts them back afterwards,
- * so the other specs see them unchanged. No exchange keys are stored at first or after.
+ * so the other specs see them unchanged. No exchange keys are stored at first or after,
+ * and every alert has its default (P7-1, D59).
  */
 
 const SEED = `
@@ -18,6 +19,7 @@ const SEED = `
     max_failed_orders = 3, failed_orders_minutes = 10, spike_pct = 3, spike_minutes = 5
   WHERE mode = 'paper';
   TRUNCATE exchange_accounts RESTART IDENTITY;
+  UPDATE alert_settings SET enabled = (event <> 'risk_resize');
 `;
 // Made up, never real keys; gitleaks:allow tells the secret scan so.
 const KEY = "mx0vglE2ETESTKEY0123456789abQ7r5"; // gitleaks:allow
@@ -112,4 +114,25 @@ test("exchange keys are stored encrypted and never shown again", async ({ page }
       `api_key_enc LIKE '%${KEY}%' OR api_secret_enc LIKE '%${SECRET}%' FROM exchange_accounts;`,
   );
   expect(stored).toBe("e2e|Q7r5|gAAAA|gAAAA|f");
+});
+
+test("an alert turns off and on again with no code, and stays as saved", async ({ page }) => {
+  const trades = () => psql("SELECT enabled FROM alert_settings WHERE event = 'trade';");
+  await signIn(page);
+  await page.goto("/settings?tab=alerts");
+  // The e2e stack's alerts service runs with Telegram blanked (stack.ts).
+  await expect(page.getByText("Telegram isn't set up")).toBeVisible();
+  const box = page.getByRole("checkbox", { name: "Trades", exact: true });
+  await expect(box).toBeChecked();
+  await expect(page.getByRole("checkbox", { name: "Shrunk buys", exact: true })).not.toBeChecked();
+
+  await box.uncheck();
+  await expect(page.getByText("Trades: off. It applies within a second.")).toBeVisible();
+  expect(trades()).toBe("f");
+  await page.reload();
+  await expect(box).not.toBeChecked();
+
+  await box.check();
+  await expect(page.getByText("Trades: on. It applies within a second.")).toBeVisible();
+  expect(trades()).toBe("t");
 });

@@ -23,7 +23,6 @@ from typing import Any
 import pytest
 from conftest import FIXTURES_DIR
 
-from engine.backoff import Backoff
 from engine.backtest.models import BacktestConfig, BacktestResult, default_slippage
 from engine.backtest.simulator import run_backtest
 from engine.exchange.errors import ExchangeNetworkError
@@ -45,6 +44,7 @@ from engine.strategies.bollinger_breakout import BollingerBreakout, BollingerBre
 from engine.strategies.ema_crossover import EmaCrossover, EmaCrossoverParams
 from engine.strategies.rsi_mean_reversion import RsiMeanReversion, RsiMeanReversionParams
 from engine.strategies.runner import SignalRunner
+from shared.backoff import Backoff
 
 RECORDING = Recording.load(FIXTURES_DIR / "mexc/live_btcusdt_1m.json.gz")
 

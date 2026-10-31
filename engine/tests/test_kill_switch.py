@@ -46,7 +46,7 @@ from shared.commands import (
 from shared.db.models import BotRow, OrderRow, PositionRow, RiskEventRow
 from shared.db.session import make_engine
 from shared.prices import PriceUpdate
-from shared.testing import set_limits
+from shared.testing import alert_of, set_limits
 
 BTC = "BTC/USDT"
 T0 = datetime(2026, 10, 22, 12, 0, tzinfo=UTC)
@@ -546,6 +546,8 @@ async def test_a_bad_command_is_logged_and_the_next_one_still_runs(setup: Setup)
     assert [log["error"] for log in logs if log["event"] == "command.invalid"] == [
         "ValidationError"
     ]
+    # The kill switch's reply is an alert (D59).
+    assert [alert_of(log) for log in logs if log["event"] == "kill_switch.done"] == ["kill_switch"]
 
 
 REDIS_READ_TIMEOUT = 5  # redis-py's default socket timeout, which the engine's client keeps

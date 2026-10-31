@@ -31,7 +31,7 @@ from engine.strategies.base import Position
 from shared.db.models import ORDER_STATUSES, TRADING_MODES, OrderRow, PositionRow
 from shared.db.session import make_engine
 from shared.prices import PriceUpdate
-from shared.testing import insert_bot
+from shared.testing import alert_of, insert_bot
 
 T0 = datetime(2026, 10, 23, 12, 0, tzinfo=UTC)
 BTC = "BTC/USDT"
@@ -147,7 +147,8 @@ async def test_a_buy_fills_in_parts_at_the_ask_then_at_the_later_ask(setup: Setu
     # Only 0.5 BTC on offer at the 100 ask, 2 wanted with a 101 limit.
     setup.quotes.price = quote(ask="100", ask_size="0.5")
 
-    placed = await setup.broker.place_order(BOT, order("buy", "2", "101"), REASON)
+    with capture_logs() as logs:
+        placed = await setup.broker.place_order(BOT, order("buy", "2", "101"), REASON)
 
     # Reserved 101 x 2 x 1.001 = 202.202. Filled 0.5 at 100: released 50.5505,
     # paid 50 + 0.05 fee. Free: 1000 - 202.202 + 50.5505 - 50.05 = 798.2985.
@@ -164,7 +165,8 @@ async def test_a_buy_fills_in_parts_at_the_ask_then_at_the_later_ask(setup: Setu
     # Later the ask is 100.5 with plenty on offer. The order crossed when placed and
     # still does, so the rest keeps taking: at the 100.5 ask, not its 101 limit.
     setup.clock.now = T0 + timedelta(seconds=5)
-    fills = await setup.broker.on_price(quote(ask="100.5", ask_size="3", ts=setup.clock.now))
+    with capture_logs() as later:
+        fills = await setup.broker.on_price(quote(ask="100.5", ask_size="3", ts=setup.clock.now))
 
     assert fills == [
         BrokerFill(
@@ -185,6 +187,9 @@ async def test_a_buy_fills_in_parts_at_the_ask_then_at_the_later_ask(setup: Setu
     assert await setup.broker.position(BOT, BTC) == Position(
         amount=d("2"), avg_entry=d("100.375"), last_entry=d("100.375")
     )
+    # One trade alert, when its last slice filled (D59).
+    filled = [e for e in [*logs, *later] if e["event"] == "broker.order.filled"]
+    assert [alert_of(e) for e in filled] == [None, "trade"]
 
 
 async def test_a_position_knows_what_its_last_buy_paid(setup: Setup) -> None:
@@ -385,10 +390,13 @@ async def test_cancelling_releases_what_the_rest_of_the_order_held(setup: Setup)
     setup.quotes.price = quote(ask_size="0.25")
     placed = await setup.broker.place_order(BOT, order("buy", "1", "100"), REASON)
 
-    canceled = await setup.broker.cancel_order(placed.client_order_id)
+    with capture_logs() as logs:
+        canceled = await setup.broker.cancel_order(placed.client_order_id)
 
     # 0.25 filled at 100 (25 + 0.025 fee); the 0.75 x 100 x 1.001 still held comes back.
     assert (canceled.status, canceled.filled) == ("canceled", d("0.25"))
+    # What filled traded: a trade alert (D59).
+    assert [alert_of(e) for e in logs if e["event"] == "broker.order.canceled"] == ["trade"]
     assert await setup.broker.balances(BOT) == {"USDT": usdt("974.975"), "BTC": btc("0.25")}
     # Cancelling again changes nothing.
     assert await setup.broker.cancel_order(placed.client_order_id) == canceled

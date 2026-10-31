@@ -44,6 +44,19 @@ SWITCH_TRIGGERS = ("manual", "rollback", "regime")
 ALL_IN_SIZING = '{"mode": "all_in"}'
 # The exchanges an account's keys can be for (CCXT ids): MEXC, and Binance's testnet (D23).
 EXCHANGES = ("mexc", "binance")
+# What the alerts service can send (P7-1). Must match shared.alerts.AlertEvent (a test
+# checks this).
+ALERT_EVENTS = (
+    "trade",
+    "stop",
+    "risk_block",
+    "risk_resize",
+    "breaker",
+    "switch",
+    "kill_switch",
+    "error",
+    "daily_summary",
+)
 
 
 class Base(DeclarativeBase):
@@ -439,4 +452,19 @@ class ExchangeAccountRow(Base):
     key_hint: Mapped[str] = mapped_column(Text)  # the API key's last 4 characters
     sandbox: Mapped[bool] = mapped_column(Boolean, server_default=false())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AlertSettingRow(Base):
+    """Whether the alerts service sends one kind of alert (P7-1, D59): one row per event.
+
+    Set from the Settings page, which the API writes itself, as it writes risk_settings
+    (D50). The alerts service reads them for each batch it sends, so it keeps no copy.
+    """
+
+    __tablename__ = "alert_settings"
+    __table_args__ = (CheckConstraint(f"event IN {ALERT_EVENTS!r}", name="event"),)
+
+    event: Mapped[str] = mapped_column(Text, primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

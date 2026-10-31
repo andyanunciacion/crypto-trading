@@ -116,6 +116,35 @@ services:
       retries: 3
       start_period: 10s
 
+  # Sends Telegram alerts about what the other services do (P7-1, D59): trades, risk
+  # blocks, errors, a daily summary. It reads the logs stream they all write, plus the
+  # database, and never trades. The API's image, as the backtester uses the engine's.
+  alerts:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file: .env
+    environment:
+      # From .env too, but through here so the e2e stack can blank them (frontend/e2e/
+      # stack.ts) and its tests never message your phone. Without them it only logs.
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+    command: ["python", "-m", "backend.alerts"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # Its heartbeat file, touched every 10 s, also while a message waits on Telegram.
+      test: ["CMD", "python", "-c", "import os, sys, time; sys.exit(time.time() - os.path.getmtime('/tmp/alerts-heartbeat') > 30)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   frontend:
     build:
       context: ./frontend

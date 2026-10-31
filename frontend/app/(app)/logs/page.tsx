@@ -168,7 +168,7 @@ function EngineLog({ query, botName }: { query: string; botName: (id: number) =>
             </button>
           </>
         ) : (
-          `Newest first, read again every ${REFRESH_SECONDS} s. Info and above from the engine, the backtester and the API; the last ~50,000 lines are kept.`
+          `Newest first, read again every ${REFRESH_SECONDS} s. Info and above from the engine, the backtester, the API and the alerts service; the last ~50,000 lines are kept.`
         )}
       </p>
       {shown.entries.length === 0 ? (

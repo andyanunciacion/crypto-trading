@@ -55,7 +55,7 @@ export const LOG_VIEWS: Record<string, { label: string; level?: string; events?:
   errors: { label: "Errors", level: "error" },
 };
 
-export const SERVICES = ["engine", "backtester", "api"] as const;
+export const SERVICES = ["engine", "backtester", "api", "alerts"] as const;
 export const RISK_DECISIONS = ["blocked", "resized"] as const;
 
 /** The API's query for the "Show" view, an event prefix (which replaces the view's

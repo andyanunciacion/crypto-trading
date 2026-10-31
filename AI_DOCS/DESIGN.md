@@ -38,7 +38,7 @@ Login (password + TOTP)
     ├── Backtests     run form → results (metrics, equity curve, trades)
     ├── History       trades & orders, filters, CSV export
     ├── Logs          engine decisions, risk events, errors
-    └── Settings      risk limits, exchange keys (alerts from P7; 2FA is reset on the server)
+    └── Settings      risk limits, exchange keys, alerts (2FA is reset on the server)
 ```
 
 ## 5. Screen inventory
@@ -55,7 +55,7 @@ Login (password + TOTP)
 | History with filters and CSV export (orders and fills, D49) | 5.6 | ✅ |
 | Logs (engine log and risk events, D49) | 5.6 | ✅ |
 | Settings (risk limits and exchange keys, D50) | 5.7 | ✅ |
-| Alert preferences (per event, on Settings) | 7.1 | ⬜ |
+| Alert preferences (per event, on Settings, D59) | 7.1 | ✅ |
 | Strategy switch markers, switch log and auto-switching (bot detail, D54) | 6.4 | ✅ |
 
 ## 6. Key UX decisions (proposed; validate during paper trading)
@@ -108,6 +108,7 @@ A placeholder until (if ever) a brand is needed: shadcn/ui's neutral theme, syst
   - ✅ History (D49): Orders | Fills with bot, market, side, status, why, and From/To **Manila days** (To included). Export CSV downloads exactly the rows the filters match, named by those days. A row's time is a button that opens `TradeExplainPanel` (UX9).
   - ✅ `CodeDialog` (UX4, D50): asks for a TOTP code before a change that adds risk, with focus in the code field; a wrong or used code, or a lock, is shown in it. The code just used to sign in won't do (each is good once). P9's going-live (UX3) can reuse it.
   - ✅ `RiskLimitsForm` (D50): a mode's limits and circuit breakers, each with its unit, an Off box and a one-line hint, the breaker pairs as one sentence ("Pause a bot after [3] failed orders within [10] min"). Lowering saves at once; anything the API calls looser opens `CodeDialog` listing each change ("Max drawdown: 10% → 15%").
+  - ✅ `AlertSettingsForm` (D59, Settings → Alerts): a box per alert with its label and a one-line description, saved as it's ticked (no code: an alert changes nothing about trading; put back if the save fails), under a line saying whether the alerts service is running and Telegram set up, the last message and the last error.
   - ✅ `ExchangeKeys` (D50): the stored accounts by label, exchange and the key's last 4 characters, with Replace and Delete (a confirmation, no code); a form with the reminder "spot read and trade only, never withdrawal, IP-locked", whose password fields are cleared once saved.
   - ✅ Logs (D49): the engine log (Show: everything / decisions / warnings and errors / errors; an event prefix, typed and applied on Enter; bot; service), newest first and read again every 5 s, held still while looking back. Levels are words, warnings and errors colored too. A row's fields open in a native `<details>`. Risk events: bot, decision, rule, days, with each one's inputs.
 - **Freshness cutoffs (UX5):** the engine is stale after 30 s without a heartbeat (as Docker's health check), a price after 10 s (the PaperBroker won't fill on an older one), and the feed itself after 5 s without a snapshot. A stale number is greyed out, with a warning icon and the word "stale". The prices shown are the oldest of the ones the engine streams, so a stuck stream can't hide behind a busy one.

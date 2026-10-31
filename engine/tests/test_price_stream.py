@@ -15,10 +15,10 @@ from decimal import Decimal
 import pytest
 from structlog.testing import capture_logs
 
-from engine.backoff import Backoff
 from engine.exchange.errors import ExchangeError, ExchangeNetworkError
 from engine.exchange.models import Ticker
 from engine.marketdata.prices import PriceStream
+from shared.backoff import Backoff
 from shared.prices import PriceUpdate
 
 BTC = "BTC/USDT"

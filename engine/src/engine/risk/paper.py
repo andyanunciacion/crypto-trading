@@ -18,13 +18,13 @@ import structlog
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from engine.backoff import Backoff
 from engine.brokers.paper import PaperBroker, RulesSource
 from engine.exchange.models import Balance
 from engine.marketdata.quotes import QuoteSource
 from engine.risk.account import PaperAccounts
 from engine.risk.breakers import PriceSwings
 from engine.risk.manager import RiskManager
+from shared.backoff import Backoff
 from shared.prices import PriceUpdate, price_channel
 
 log = structlog.get_logger()

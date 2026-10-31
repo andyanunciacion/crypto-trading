@@ -13,8 +13,8 @@ from collections.abc import Awaitable, Callable
 
 import structlog
 
-from engine.backoff import Backoff
 from engine.exchange.errors import ExchangeNetworkError
+from shared.backoff import Backoff
 
 log = structlog.get_logger()
 

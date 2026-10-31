@@ -29,9 +29,9 @@ from typing import Protocol
 
 import structlog
 
-from engine.backoff import Backoff
 from engine.exchange.models import Candle, Timeframe
 from engine.marketdata.timeframes import STEP
+from shared.backoff import Backoff
 
 # MEXC returns at most 500 candles per request, however many are asked for.
 PAGE_LIMIT = 500

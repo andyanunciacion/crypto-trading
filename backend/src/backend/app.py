@@ -24,6 +24,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from redis.asyncio import Redis
 from sqlalchemy import URL
 
+from backend.alert_settings import routes as alert_settings_routes
 from backend.auth import routes as auth_routes
 from backend.auth.confirm import CodeRefused, handle_code_refused
 from backend.auth.crypto import Secrets
@@ -133,6 +134,7 @@ def create_app(
     protected.include_router(log_routes.router)
     protected.include_router(risk_settings_routes.router)
     protected.include_router(key_routes.router)
+    protected.include_router(alert_settings_routes.router)
 
     app.add_exception_handler(RequestValidationError, _validation_failed)
     app.add_exception_handler(CodeRefused, handle_code_refused)

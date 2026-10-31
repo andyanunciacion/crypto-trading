@@ -15,10 +15,10 @@ from decimal import Decimal
 import pytest
 from structlog.testing import capture_logs
 
-from engine.backoff import Backoff
 from engine.exchange.errors import ExchangeNetworkError
 from engine.exchange.models import Candle, Timeframe
 from engine.marketdata.candle_stream import PAGE_LIMIT, CandleStream, KlineHook
+from shared.backoff import Backoff
 
 BTC = "BTC/USDT"
 T0 = datetime(2026, 10, 22, 12, 0, tzinfo=UTC)

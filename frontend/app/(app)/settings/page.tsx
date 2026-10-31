@@ -3,6 +3,7 @@
 import { useSearchParams } from "next/navigation";
 import { Suspense } from "react";
 
+import { AlertSettingsForm } from "@/components/alert-settings-form";
 import { ExchangeKeys } from "@/components/exchange-keys";
 import { PageTabs } from "@/components/page-tabs";
 import { RiskLimitsForm } from "@/components/risk-limits-form";
@@ -10,10 +11,13 @@ import { RiskLimitsForm } from "@/components/risk-limits-form";
 const TABS = [
   { id: "limits", label: "Risk limits" },
   { id: "keys", label: "Exchange keys" },
-];
+  { id: "alerts", label: "Alerts" },
+] as const;
+type Tab = (typeof TABS)[number]["id"];
 
 function Settings() {
-  const tab = useSearchParams().get("tab") === "keys" ? "keys" : "limits";
+  const asked = useSearchParams().get("tab");
+  const tab: Tab = TABS.find((t) => t.id === asked)?.id ?? "limits";
   return (
     <section aria-labelledby="settings" className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
@@ -22,21 +26,26 @@ function Settings() {
         </h1>
         <PageTabs
           label="Settings views"
-          tabs={TABS}
+          tabs={[...TABS]}
           current={tab}
           href={(id) => `/settings?tab=${id}`}
         />
       </div>
-      {tab === "limits" ? <RiskLimitsForm /> : <ExchangeKeys />}
+      {tab === "limits" ? (
+        <RiskLimitsForm />
+      ) : tab === "keys" ? (
+        <ExchangeKeys />
+      ) : (
+        <AlertSettingsForm />
+      )}
       <p className="text-muted-foreground max-w-3xl text-xs">
-        Alerts come with Telegram (P7). Two-factor sign-in is managed on the server:{" "}
-        <code>python -m backend.users reset-totp</code>.
+        Two-factor sign-in is managed on the server: <code>python -m backend.users reset-totp</code>
       </p>
     </section>
   );
 }
 
-/** Settings (DESIGN §4, D50): the risk limits and circuit breakers, and exchange keys. */
+/** Settings (DESIGN §4, D50, D59): risk limits and circuit breakers, exchange keys, alerts. */
 export default function SettingsPage() {
   // useSearchParams needs a Suspense boundary, so the page can still prerender.
   return (

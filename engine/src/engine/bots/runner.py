@@ -79,7 +79,6 @@ import structlog
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from engine.backoff import Backoff
 from engine.backtest.models import DEFAULT_FEE_RATE, default_slippage
 from engine.bots.exits import (
     ExitCause,
@@ -108,6 +107,7 @@ from engine.risk.stops import NO_STOPS, ExitState, NoLevels, levels_at_entry, re
 from engine.risk.stops import lookback as stops_lookback
 from engine.strategies.base import Signal
 from engine.strategies.runner import SignalRunner
+from shared.backoff import Backoff
 from shared.prices import PriceUpdate
 
 log = structlog.get_logger()

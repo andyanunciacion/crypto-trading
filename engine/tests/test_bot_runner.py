@@ -41,7 +41,7 @@ from engine.strategies.rsi_mean_reversion import RsiMeanReversion, RsiMeanRevers
 from shared.db.models import BotRow, OrderRow, RiskEventRow
 from shared.db.session import make_engine
 from shared.prices import PriceUpdate
-from shared.testing import set_limits
+from shared.testing import alert_of, set_limits
 
 BTC = "BTC/USDT"
 T0 = datetime(2026, 10, 22, 12, 0, tzinfo=UTC)
@@ -589,6 +589,7 @@ async def test_a_failing_bot_doesnt_stop_the_others(setup: Setup) -> None:
     assert [(e["bot_id"], e["error"], e["detail"]) for e in errors] == [
         (99, "RuntimeError", "boom")
     ]
+    assert [alert_of(e) for e in errors] == ["error"]  # D59
     buy = await setup.desk.risk.get_order("b1-202610221230-b")
     assert buy is not None and buy.status == "closed"
 
@@ -878,6 +879,8 @@ async def test_a_stop_loss_sells_the_position(setup: Setup) -> None:
         "b1-202610221230-x1",
         "closed",
     )
+    # A stop alert, and a trade alert for its sell (D59).
+    assert sorted(a for a in map(alert_of, logs) if a is not None) == ["stop", "trade"]
     # Flat again: later prices do nothing.
     await setup.price(runner, bid="90")
     assert await setup.order_rows() == 2
@@ -1017,6 +1020,7 @@ async def test_an_exit_the_bid_falls_below_is_placed_again(setup: Setup) -> None
     )
     (logged,) = [log for log in logs if log["event"] == "bot.exit"]
     assert (logged["again"], logged["canceled"]) == (True, ["b1-202610221230-x1"])
+    assert alert_of(logged) is None  # the stop alert went when it first fired (D59)
     assert await setup.desk.risk.position(bot.id, BTC) is None
 
 

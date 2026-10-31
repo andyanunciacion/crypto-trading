@@ -4,6 +4,7 @@
  * session cookie goes along by itself, and no CORS is needed (D44).
  */
 
+import type { AlertEvent, AlertSetting, AlertsView } from "@/lib/alerts";
 import type { BacktestJob, CandleRange, NewBacktest, RunDetail, RunSummary } from "@/lib/backtests";
 import type {
   AutoSwitchSettings,
@@ -285,6 +286,20 @@ export async function replaceExchangeKeys(id: number, keys: NewKeys): Promise<Ex
 
 export async function deleteExchangeAccount(id: number): Promise<void> {
   await call(`/exchange-accounts/${id}`, { method: "DELETE" });
+}
+
+/** Which alerts go to Telegram, and how the alerts service is doing (D59). */
+export async function alertSettings(): Promise<AlertsView> {
+  return (await (await call("/alert-settings")).json()) as AlertsView;
+}
+
+/** Turn one alert on or off; no code needed (D59). */
+export async function saveAlertSetting(event: AlertEvent, enabled: boolean): Promise<AlertSetting> {
+  const response = await call(`/alert-settings/${event}`, {
+    method: "PUT",
+    body: JSON.stringify({ enabled }),
+  });
+  return (await response.json()) as AlertSetting;
 }
 
 export async function botCommand(

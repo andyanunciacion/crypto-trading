@@ -2,7 +2,7 @@
 
 import random
 
-from engine.backoff import Backoff
+from shared.backoff import Backoff
 
 
 def test_waits_double_within_their_jitter_range() -> None:

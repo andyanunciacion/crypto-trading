@@ -43,6 +43,11 @@ def _json_default(value: object) -> object:
     return str(value)
 
 
+def mirrored_line(event_dict: EventDict, service: str) -> str:
+    """A log line as the mirror sends it to the stream: its JSON, with the service."""
+    return json.dumps({**event_dict, "service": service}, default=_json_default)
+
+
 class LogMirror:
     """A structlog processor that keeps INFO-or-above lines for `ship()` to send.
 
@@ -77,8 +82,7 @@ class LogMirror:
         ):
             if len(self._lines) == self._lines.maxlen:
                 self._dropped += 1
-            line = json.dumps({**event_dict, "service": self.service}, default=_json_default)
-            self._lines.append((next(self._numbers), line))
+            self._lines.append((next(self._numbers), mirrored_line(event_dict, self.service)))
         return event_dict
 
     async def flush(self, redis: Redis) -> int:
