@@ -263,16 +263,18 @@ export function CandleChart({
       lines.set(name, line);
     }
     const first = lines.values().next().value;
+    // Flat levels: RSI's on its oscillator line, a grid's (P6-6) on the candles.
+    const guided = indicators?.pane === "oscillator" ? first : candles;
+    for (const [title, price] of Object.entries(indicators?.guides ?? {})) {
+      guided?.createPriceLine({
+        price,
+        title,
+        lineStyle: LineStyle.Dashed,
+        lineWidth: 1,
+        axisLabelVisible: true,
+      });
+    }
     if (indicators?.pane === "oscillator" && first) {
-      for (const [title, price] of Object.entries(indicators.guides)) {
-        first.createPriceLine({
-          price,
-          title,
-          lineStyle: LineStyle.Dashed,
-          lineWidth: 1,
-          axisLabelVisible: true,
-        });
-      }
       // The price pane two thirds, the oscillator one third.
       const [price, oscillatorPane] = chart.panes();
       price?.setStretchFactor(2);

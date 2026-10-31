@@ -15,6 +15,7 @@ The engine owns the strategies; this module is in `shared` so the API can draw t
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -34,7 +35,7 @@ class ChartLines:
     warmup: int  # the strategy's warmup_candles
     pane: Pane
     names: tuple[str, ...]
-    guides: dict[str, float]  # flat levels drawn across the pane, e.g. RSI's oversold
+    guides: dict[str, float]  # flat levels drawn across the pane, e.g. RSI's oversold, a grid's
     at: Callable[[Sequence[float]], dict[str, float]]  # a window's closes -> each line's value
 
 
@@ -96,6 +97,33 @@ def _rsi_mean_reversion(params: Mapping[str, Any]) -> ChartLines:
     )
 
 
+class _Grid(_Params):
+    lower: Decimal
+    upper: Decimal
+    grids: int
+
+
+def _grid(params: Mapping[str, Any]) -> ChartLines:
+    # Its lines are fixed prices, drawn across the candles (P6-6). What it holds hangs on
+    # the position, which a chart of candles doesn't know, so there are no other lines.
+    p = _Grid.model_validate(params)
+    step = (p.upper - p.lower) / p.grids
+    lines = [p.lower + i * step for i in range(p.grids)] + [p.upper]  # as engine/strategies/grid.py
+    return ChartLines(
+        warmup=200,  # grid.WINDOW
+        pane="price",
+        names=(),
+        guides={f"grid {i}": float(line) for i, line in enumerate(lines)},
+        at=lambda closes: {},
+    )
+
+
+def _dca(params: Mapping[str, Any]) -> ChartLines:
+    # Its dip and take-profit levels are measured from the position's average entry,
+    # which a chart of candles doesn't know (P6-6).
+    return ChartLines(warmup=2, pane="price", names=(), guides={}, at=lambda closes: {})
+
+
 def _stay_flat(params: Mapping[str, Any]) -> ChartLines:
     # No indicators: it only sells what it holds (P6-4).
     return ChartLines(warmup=1, pane="price", names=(), guides={}, at=lambda closes: {})
@@ -105,6 +133,8 @@ _LINES: dict[str, Callable[[Mapping[str, Any]], ChartLines]] = {
     "ema_crossover": _ema_crossover,
     "bollinger_breakout": _bollinger_breakout,
     "rsi_mean_reversion": _rsi_mean_reversion,
+    "grid": _grid,
+    "dca": _dca,
     "stay_flat": _stay_flat,
 }
 

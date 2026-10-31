@@ -12,6 +12,8 @@ closed candle, each bot in turn:
    mode, risk/sizing.py) and hands it to the RiskManager, which decides on it and
    places it. The client order ID comes from the
    bot, the candle and the side, so a retried candle returns the first order (D18).
+   A strategy that scales in (grid, DCA; P6-6) may buy while holding, adding to the
+   position, but not while a stop's exit is selling it.
 
 An error stays with the bot and candle it happened on: it's logged (`bot.error`) and
 the bot carries on at the next candle, so one bot can't stop the others or the engine.
@@ -91,7 +93,7 @@ from engine.bots.exits import (
     on_bid,
     save_levels,
 )
-from engine.bots.orders import Skip, exit_order, order_for
+from engine.bots.orders import Planned, Skip, exit_order, order_for
 from engine.bots.store import Bot, open_orders
 from engine.brokers.base import client_order_id
 from engine.exchange.models import Balance, Candle, MarketRules, OrderSide, Timeframe
@@ -699,6 +701,21 @@ class BotRunner:
         if signal.action == "hold":
             return
         side: OrderSide = "buy" if signal.action == "buy" else "sell"
+        scales_in = decided_by[1].strategy.scales_in
+        if side == "buy" and position is not None and scales_in:
+            held = await load_held(self._db, bot.id, bot.symbol, mode=self._risk.mode)
+            if held is not None and held.exits:
+                # A stop fired: the position is sold until it's gone, not added to.
+                log.info(
+                    "bot.skipped",
+                    bot_id=bot.id,
+                    name=bot.name,
+                    symbol=bot.symbol,
+                    signal_ts=signal.ts.isoformat(),
+                    side=side,
+                    reason="its position is being sold",
+                )
+                return
         base, quote_currency = bot.symbol.split("/")
         balances = await self._risk.balances(bot.id)
         quote = await self._quotes.latest(bot.exchange, bot.symbol)
@@ -726,6 +743,7 @@ class BotRunner:
             slippage=default_slippage(bot.symbol),
             stops=bot.stops,
             stops_atr=None if stops is None else stops.atr,
+            scales_in=scales_in,
         )
         fields = {
             "bot_id": bot.id,
@@ -738,7 +756,7 @@ class BotRunner:
             log.info("bot.skipped", **fields, reason=planned.reason)
             return
         outcome = await self._risk.submit(
-            bot.id, planned.request, _reason(bot, decided_by, signal, planned.sizing, stops)
+            bot.id, planned.request, _reason(bot, decided_by, signal, planned, stops)
         )
         order = outcome.order
         log.info(
@@ -983,22 +1001,24 @@ def _reason(
     bot: Bot,
     decided_by: tuple[int, SignalRunner[Any]],
     signal: Signal,
-    sizing: str | None,
+    planned: Planned,
     stops: StopPlan | None,
 ) -> dict[str, JsonValue]:
     """What an order records about why it was placed: the signal, the bot and the config
-    whose signal it was (the bot's, or its keeper's), and for a buy how it was sized and
-    the stops it gets once it fills."""
+    whose signal it was (the bot's, or its keeper's), for a buy how it was sized and the
+    stops it gets once it fills, and for a sell of part of the position how much."""
     reason: dict[str, JsonValue] = {
         "signal": signal.model_dump(mode="json"),
         "bot": {"id": bot.id, "name": bot.name},
         "strategy_config": _config_json(*decided_by),
     }
-    if sizing is not None:
+    if planned.sizing is not None:
         reason["sizing"] = {
             "settings": SIZING.dump_python(bot.sizing, mode="json"),
-            "detail": sizing,
+            "detail": planned.sizing,
         }
+    if planned.sold is not None:
+        reason["sell"] = {"detail": planned.sold}
     if stops is not None:
         reason["stops"] = stops.to_json()
     return reason

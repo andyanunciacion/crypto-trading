@@ -247,7 +247,14 @@ export default function OverviewPage() {
               <TableBody>
                 {bots.map((bot) => (
                   <TableRow key={bot.id} data-bot={bot.name}>
-                    <TableCell className="font-medium">{bot.name}</TableCell>
+                    <TableCell className="font-medium">
+                      <Link
+                        href={`/bots/${bot.id}`}
+                        className="decoration-muted-foreground hover:decoration-foreground underline underline-offset-4"
+                      >
+                        {bot.name}
+                      </Link>
+                    </TableCell>
                     <TableCell>
                       <StatusBadge status={bot.status} />
                     </TableCell>

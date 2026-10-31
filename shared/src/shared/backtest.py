@@ -135,12 +135,13 @@ class Outcome(Protocol):
 
 
 class Trade(_Frozen):
-    """A round trip: a buy fill and the sell fill that closed it."""
+    """A sell, and what it sold had cost: a round trip. With several buys or sells to a
+    position (P6-6), each sell is one, against the position's average entry."""
 
-    entry_ts: AwareDatetime
+    entry_ts: AwareDatetime  # the position's first buy
     exit_ts: AwareDatetime
-    amount: Decimal = Field(gt=0)
-    entry_price: Decimal = Field(gt=0)
+    amount: Decimal = Field(gt=0)  # what the sell sold
+    entry_price: Decimal = Field(gt=0)  # the average entry
     exit_price: Decimal = Field(gt=0)
     fees: Decimal = Field(ge=0)  # both fills' fees
     pnl: Decimal  # net of both fees, in the quote currency
@@ -168,36 +169,56 @@ class BacktestReport(_Frozen):
 
 
 def trades(fills: Sequence[Fill]) -> list[Trade]:
-    """Pair each buy with the sell after it. A buy still open at the end isn't a trade yet."""
+    """Each sell, as a trade against the average cost of what it sold. What's still held
+    at the end isn't a trade yet.
+
+    A position can be bought in several buys and sold in several sells (P6-6, D58). Each
+    sell takes its share of what the position cost, the buys' fees included, as the paper
+    ledger books `realized_pnl`. A position bought once and sold at once is one trade, as
+    before: a buy paired with the sell after it.
+    """
     closed: list[Trade] = []
-    entry: Fill | None = None
+    held = Decimal(0)
+    value = Decimal(0)  # what the coins held were bought for, at their fill prices
+    fees = Decimal(0)  # the buys' fees on the coins held
+    opening: Fill | None = None  # the buy that opened the position
     for fill in fills:
         if fill.side == "buy":
-            if entry is not None:
-                raise ValueError(f"buy at {fill.ts} while the buy at {entry.ts} is still open")
-            entry = fill
+            if opening is None:
+                opening = fill
+            held += fill.amount
+            value += fill.price * fill.amount
+            fees += fill.fee
             continue
-        if entry is None:
-            raise ValueError(f"sell at {fill.ts} with no buy before it")
-        if fill.amount != entry.amount:
-            raise ValueError(f"sell of {fill.amount} at {fill.ts} doesn't close {entry.amount}")
-        cost = entry.price * entry.amount + entry.fee
+        if opening is None:
+            raise ValueError(f"sell at {fill.ts} with nothing held")
+        if fill.amount > held:
+            raise ValueError(f"sell of {fill.amount} at {fill.ts} is more than the {held} held")
+        # Its share of the cost; the last sell takes all that's left, so nothing is lost
+        # to rounding.
+        sold_value = value if fill.amount == held else value * fill.amount / held
+        sold_fees = fees if fill.amount == held else fees * fill.amount / held
+        cost = sold_value + sold_fees
         pnl = fill.price * fill.amount - fill.fee - cost
         closed.append(
             Trade(
-                entry_ts=entry.ts,
+                entry_ts=opening.ts,
                 exit_ts=fill.ts,
-                amount=entry.amount,
-                entry_price=entry.price,
+                amount=fill.amount,
+                entry_price=value / held,
                 exit_price=fill.price,
-                fees=entry.fee + fill.fee,
+                fees=sold_fees + fill.fee,
                 pnl=pnl,
                 return_=pnl / cost,
                 exit=fill.exit,
-                decided_by=entry.decided_by,
+                decided_by=opening.decided_by,
             )
         )
-        entry = None
+        held -= fill.amount
+        value -= sold_value
+        fees -= sold_fees
+        if held == 0:
+            opening = None
     return closed
 
 

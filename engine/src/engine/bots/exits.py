@@ -27,6 +27,7 @@ strategy with the policy `close_first` (D51), as kind `switch`.
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal, cast
 
@@ -44,7 +45,7 @@ from engine.risk.stops import (
     exit_at_price,
 )
 from engine.strategies.base import Position
-from shared.db.models import OrderRow, PositionRow
+from shared.db.models import FillRow, OrderRow, PositionRow
 
 # Why an exit sells: one of the stops, the kill switch closing everything (D43), one
 # bot stopped and closed from the Bots page (D47), or a strategy switch that closes first
@@ -130,7 +131,7 @@ async def load_held(db: AsyncEngine, bot_id: int, symbol: str, *, mode: Mode) ->
         ).one_or_none()
         if row is None:
             return None
-        buy = await opening_buy(conn, bot_id, symbol, mode=mode)
+        buy = await opening_buy(conn, bot_id, symbol, row.opened_at, mode=mode)
         if buy is None:
             return None
         exits = (
@@ -177,24 +178,26 @@ async def load_held(db: AsyncEngine, bot_id: int, symbol: str, *, mode: Mode) ->
 
 
 async def opening_buy(
-    conn: AsyncConnection, bot_id: int, symbol: str, *, mode: Mode
+    conn: AsyncConnection, bot_id: int, symbol: str, opened_at: datetime, *, mode: Mode
 ) -> Row[tuple[str, dict[str, Any]]] | None:
-    """The buy that opened the bot's open position in `symbol`: its client order ID and
-    `reason`. Call it once you know there is one; None if no buy of the bot ever filled.
+    """The buy that opened the bot's open position in `symbol`, opened at `opened_at`:
+    its client order ID and `reason`. None if no buy of the bot filled then.
 
-    One position at a time, and a buy only when flat: the newest buy that filled
-    anything opened the open one.
+    The position opened with that buy's first fill (`positions.opened_at` is its time),
+    so it's the buy whose fill comes first from then on. Later buys may add to the
+    position (grid, DCA; P6-6), but its stops and exits stay the opening buy's.
     """
     query = (
         select(OrderRow.client_order_id, OrderRow.reason)
+        .join(FillRow, FillRow.order_id == OrderRow.id)
         .where(
             OrderRow.bot_id == bot_id,
             OrderRow.symbol == symbol,
             OrderRow.mode == mode,
             OrderRow.side == "buy",
-            OrderRow.filled > 0,
+            FillRow.ts >= opened_at,
         )
-        .order_by(OrderRow.id.desc())
+        .order_by(FillRow.ts, FillRow.id)
         .limit(1)
     )
     return (await conn.execute(query)).one_or_none()

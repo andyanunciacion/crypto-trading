@@ -65,7 +65,7 @@ class Accounts(Protocol):
 
     async def market(self, bot_id: int, symbol: str, settings: RiskSettings) -> Market: ...
 
-    async def snapshot(self, symbol: str) -> Account: ...
+    async def snapshot(self, bot_id: int, symbol: str) -> Account: ...
 
     async def record(self, event: RiskEvent) -> None: ...
 
@@ -179,7 +179,7 @@ class RiskManager:
             return Checked(SELLS_ALLOWED, request), {}
         settings = await self._accounts.settings()
         market = await self._accounts.market(bot_id, request.symbol, settings)
-        account = await self._accounts.snapshot(request.symbol)
+        account = await self._accounts.snapshot(bot_id, request.symbol)
         rules = await self._rules.market_rules(request.symbol)
         inputs: dict[str, JsonValue] = {
             "settings": settings.model_dump(mode="json"),

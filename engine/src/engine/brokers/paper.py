@@ -302,7 +302,13 @@ class PaperBroker(Broker):
         return {currency: b for currency, b in balances.items() if b.total > 0}
 
     async def position(self, bot_id: int, symbol: str) -> Position | None:
-        query = select(PositionRow.amount, PositionRow.avg_entry).where(
+        """The bot's open position, with what its last buy paid (DCA's dips, D58).
+
+        The last buy is the newest buy order with a fill since the position opened, so a
+        previous position's buys never count (as `bots/exits.py`'s `opening_buy`); what it
+        paid is its fills' average. A position no buy of the bot filled has none.
+        """
+        query = select(PositionRow.amount, PositionRow.avg_entry, PositionRow.opened_at).where(
             PositionRow.bot_id == bot_id,
             PositionRow.symbol == symbol,
             PositionRow.mode == self.mode,
@@ -310,9 +316,35 @@ class PaperBroker(Broker):
         )
         async with self._db.connect() as conn:
             row = (await conn.execute(query)).one_or_none()
-        if row is None:
-            return None
-        return Position(amount=row.amount, avg_entry=row.avg_entry)
+            if row is None:
+                return None
+            since = FillRow.ts >= row.opened_at
+            last_buy = (
+                select(OrderRow.id)
+                .join(FillRow, FillRow.order_id == OrderRow.id)
+                .where(
+                    OrderRow.bot_id == bot_id,
+                    OrderRow.symbol == symbol,
+                    OrderRow.mode == self.mode,
+                    OrderRow.side == "buy",
+                    since,
+                )
+                .order_by(FillRow.ts.desc(), FillRow.id.desc())
+                .limit(1)
+                .scalar_subquery()
+            )
+            fills = (
+                await conn.execute(
+                    select(FillRow.price, FillRow.amount).where(FillRow.order_id == last_buy, since)
+                )
+            ).all()
+        bought = sum((f.amount for f in fills), Decimal(0))
+        paid = sum((f.price * f.amount for f in fills), Decimal(0))
+        return Position(
+            amount=row.amount,
+            avg_entry=row.avg_entry,
+            last_entry=paid / bought if bought > 0 else None,
+        )
 
     # --- Internals --------------------------------------------------------------------
 

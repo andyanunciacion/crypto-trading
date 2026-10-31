@@ -25,6 +25,7 @@ from engine.risk.sizing import (
     buy_amount,
     entry_amount,
     lookback,
+    sell_amount,
 )
 
 D = Decimal
@@ -246,3 +247,41 @@ def test_buy_amount_leaves_room_for_the_fee_and_rounds_down() -> None:
     # 1000 / 300 = 3.333..., down (never up) to the 0.01 step.
     assert buy_amount(D(1000), D(300), D(0), D(1), D("0.01")) == D("3.33")
     assert buy_amount(D(1000), D(100), D(0), D("0.5"), D("0.0001")) == D(5)
+
+
+# --- Sells: all of a position, or part of it (P6-6, D58) ---------------------------------
+
+
+def sell(held: str, fraction: str | None) -> Sized | NotSized:
+    return sell_amount(D(held), None if fraction is None else D(fraction), D(100), RULES)
+
+
+def test_a_sell_with_no_fraction_sells_everything() -> None:
+    result = sell("2.5", None)
+    assert amount(result) == D("2.5")
+    assert isinstance(result, Sized) and result.detail == "all 2.5 held"
+    assert amount(sell("2.5", "1")) == D("2.5")
+
+
+def test_a_fraction_sells_that_share_rounded_down() -> None:
+    # A quarter of 2.5 = 0.625, on the step already.
+    result = sell("2.5", "0.25")
+    assert amount(result) == D("0.625")
+    assert isinstance(result, Sized) and result.detail == "0.25 of 2.5 held = 0.625"
+    # A third of 1 = 0.3333..., down (never up) to 0.3333.
+    assert amount(sell("1", str(D(1) / 3))) == D("0.3333")
+
+
+def test_a_remainder_too_small_to_sell_goes_too() -> None:
+    # 0.995 of 1 leaves 0.005, worth 0.5: under the 1 minimum cost, so nobody could ever
+    # sell it. Everything goes instead.
+    result = sell("1", "0.995")
+    assert amount(result) == D(1)
+    assert isinstance(result, Sized) and "the rest 0.005 couldn't be sold" in result.detail
+
+
+def test_a_slice_too_small_is_refused_never_rounded_up() -> None:
+    # 0.005 of 1 = 0.005, worth 0.5: under the 1 minimum cost.
+    assert "below min_cost" in refused(sell("1", "0.005"))
+    # A position too small to sell at all.
+    assert "below min_cost" in refused(sell("0.005", None))

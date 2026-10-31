@@ -71,6 +71,7 @@ def plan(
     atr: str | None = None,
     stops: Stops = NO_STOPS,
     stops_atr: str | None = None,
+    scales_in: bool = False,
 ) -> Planned | Skip:
     side = "b" if sig.action == "buy" else "s"
     return order_for(
@@ -88,6 +89,7 @@ def plan(
         slippage=SLIPPAGE,
         stops=stops,
         stops_atr=None if stops_atr is None else d(stops_atr),
+        scales_in=scales_in,
     )
 
 
@@ -146,6 +148,12 @@ def test_a_size_hint_spends_that_share_of_the_cash() -> None:
 
 def test_no_buy_while_holding() -> None:
     assert order(signal("buy"), position=HOLDING) == Skip("already holding")
+
+
+def test_a_strategy_that_scales_in_buys_while_holding() -> None:
+    # Grid and DCA (P6-6) add to their position, sized like any buy.
+    placed = order(signal("buy"), position=HOLDING, scales_in=True)
+    assert placed == request("buy", "9.9850", "100.05")
 
 
 def test_no_buy_without_an_ask() -> None:
@@ -260,6 +268,24 @@ def test_a_sell_limit_on_the_step_stays_put() -> None:
     placed = order(signal("sell"), position=HOLDING, price=quote(bid="100"))
 
     assert placed == request("sell", "0.5", "99.95")
+
+
+def test_a_sell_hint_sells_that_share_of_the_position() -> None:
+    # Half of the 0.5 held: 0.25, at the same limit as a whole sell.
+    placed = plan(signal("sell", size_hint="0.5"), position=HOLDING)
+
+    assert isinstance(placed, Planned)
+    assert placed.request == request("sell", "0.25", "99.85")
+    assert (placed.sizing, placed.sold) == (None, "0.5 of 0.5 held = 0.25")
+    # A whole sell says nothing about it.
+    whole = plan(signal("sell"), position=HOLDING)
+    assert isinstance(whole, Planned) and whole.sold is None
+
+
+def test_a_share_too_small_to_sell_is_skipped() -> None:
+    # 0.001 of 0.5 = 0.0005, worth 0.0005 x 99.85 = 0.049925 < 1.
+    skipped = order(signal("sell", size_hint="0.001"), position=HOLDING)
+    assert isinstance(skipped, Skip) and "below min_cost 1" in skipped.reason
 
 
 def test_no_sell_while_flat() -> None:

@@ -12,8 +12,8 @@ from engine.backtest.simulator import run_backtest
 from engine.exchange.models import Candle, MarketRules, OrderSide, Timeframe
 from engine.risk.stops import ExitKind, Percent, Stops
 from engine.strategies.ema_crossover import EmaCrossover, EmaCrossoverParams
+from shared.backtest import ConfigRef, Side, StoredResult, metrics
 from shared.backtest import ExitKind as SharedExitKind
-from shared.backtest import Side, StoredResult, metrics
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 HOUR = timedelta(hours=1)
@@ -26,6 +26,10 @@ RULES = MarketRules(
     min_amount=D("0.0001"),
     min_cost=D("1"),
 )
+
+
+CONFIG_A = ConfigRef(strategy="a", version=1, params={})
+CONFIG_B = ConfigRef(strategy="b", version=1, params={})
 
 
 def at(hour: int) -> datetime:
@@ -128,10 +132,76 @@ def test_an_open_buy_is_not_a_trade_yet() -> None:
 
 
 def test_fills_out_of_order_are_an_error() -> None:
-    with pytest.raises(ValueError, match="sell"):
+    with pytest.raises(ValueError, match="nothing held"):
         trades([WIN[1]])
-    with pytest.raises(ValueError, match="buy"):
-        trades([WIN[0], LOSS[0]])
+    with pytest.raises(ValueError, match="more than"):
+        trades([WIN[0], fill(2, "sell", "120", "10", "1.2", "1200")])
+
+
+# Scaling in and out (P6-6, D58): two buys, then two sells of part of the position.
+#   buy  2 @ 100 on candle 1: fee 0.20
+#   buy  2 @  80 on candle 2: fee 0.16. Holds 4 at an average of (200 + 160) / 4 = 90,
+#     which cost 360 + 0.36 in fees = 360.36.
+#   sell 1 @  95 on candle 3: fee 0.095. A quarter of the position, so a quarter of its
+#     cost: 90.09 (90 + 0.09 of the buys' fees). pnl 95 - 0.095 - 90.09 = 4.815.
+#   sell 3 @ 110 on candle 4: fee 0.33. The rest, which cost 270.27 (270 + 0.27).
+#     pnl 330 - 0.33 - 270.27 = 59.4.
+# Cash: -200.20 - 160.16 + 94.905 + 329.67 = +64.215, the two trades' pnl together.
+SCALED = [
+    fill(1, "buy", "100", "2", "0.2", "799.8"),
+    fill(2, "buy", "80", "2", "0.16", "639.64"),
+    fill(3, "sell", "95", "1", "0.095", "734.545"),
+    fill(4, "sell", "110", "3", "0.33", "1064.215"),
+]
+
+
+def test_each_sell_is_a_trade_against_the_average_cost_of_what_it_sold() -> None:
+    assert trades(SCALED) == [
+        Trade(
+            entry_ts=at(1),  # the position's first buy
+            exit_ts=at(3),
+            amount=D(1),
+            entry_price=D(90),  # the average entry
+            exit_price=D(95),
+            fees=D("0.185"),  # 0.09 of the buys' fees, and its own 0.095
+            pnl=D("4.815"),
+            return_=D("4.815") / D("90.09"),
+        ),
+        Trade(
+            entry_ts=at(1),
+            exit_ts=at(4),
+            amount=D(3),
+            entry_price=D(90),
+            exit_price=D(110),
+            fees=D("0.6"),  # 0.27 + 0.33
+            pnl=D("59.4"),
+            return_=D("59.4") / D("270.27"),
+        ),
+    ]
+    assert sum(t.pnl for t in trades(SCALED)) == D("64.215")
+
+
+def test_a_buy_after_a_partial_sell_averages_with_what_is_left() -> None:
+    # Hold 4 at 90 (cost 360.36), sell 2, buy 2 more at 60: 2 at 90 (cost 180.18) plus
+    # 2 at 60 (cost 120 + 0.12) = 4 at an average of 75, costing 300.30.
+    fills = [
+        *SCALED[:2],
+        fill(3, "sell", "95", "2", "0.19", "829.45"),
+        fill(4, "buy", "60", "2", "0.12", "709.33"),
+        fill(5, "sell", "70", "4", "0.28", "989.05"),
+    ]
+
+    last = trades(fills)[-1]
+
+    assert (last.entry_ts, last.entry_price) == (at(1), D(75))
+    assert last.pnl == D(280) - D("0.28") - D("300.3")  # -20.58
+
+
+def test_the_trades_of_one_position_name_its_opening_buys_config() -> None:
+    first = SCALED[0].model_copy(update={"decided_by": CONFIG_A})
+    second = SCALED[1].model_copy(update={"decided_by": CONFIG_B})
+
+    assert [t.decided_by for t in trades([first, second, *SCALED[2:]])] == [CONFIG_A, CONFIG_A]
 
 
 # --- Drawdown ---------------------------------------------------------------------------

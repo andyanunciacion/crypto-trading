@@ -64,6 +64,7 @@ ACCOUNT_JSON: JsonValue = {
     "open_positions": 0,
     "coin_exposure": "0",
     "daily_loss_hit": False,
+    "adds": False,
 }
 SETTINGS_JSON: JsonValue = {
     "max_open_positions": 3,
@@ -187,7 +188,7 @@ class FakeBroker(Broker):
 
     async def position(self, bot_id: int, symbol: str) -> Position | None:
         assert (bot_id, symbol) == (BOT, BTC)
-        return Position(amount=Decimal("0.5"), avg_entry=Decimal(100))
+        return Position(amount=Decimal("0.5"), avg_entry=Decimal(100), last_entry=Decimal(100))
 
 
 @dataclass
@@ -208,7 +209,7 @@ class FakeAccounts:
         assert (symbol, settings) == (BTC, self.settings_)
         return self.market_
 
-    async def snapshot(self, symbol: str) -> Account:
+    async def snapshot(self, bot_id: int, symbol: str) -> Account:
         assert symbol == BTC
         self.snapshots += 1
         return self.account
@@ -592,7 +593,7 @@ async def test_two_buys_at_once_cannot_both_take_the_last_slot() -> None:
 
         broker: FakeBroker = field(default_factory=FakeBroker)
 
-        async def snapshot(self, symbol: str) -> Account:
+        async def snapshot(self, bot_id: int, symbol: str) -> Account:
             placed = len(self.broker.placed)
             await asyncio.sleep(0)
             return replace(FLAT, open_positions=placed)
@@ -663,7 +664,9 @@ async def test_reads_pass_through() -> None:
     assert await risk.get_order("b1-202610231200-b") == placed
     assert await risk.get_order("b1-nothing") is None
     assert await risk.balances(BOT) == await broker.balances(BOT)
-    assert await risk.position(BOT, BTC) == Position(amount=Decimal("0.5"), avg_entry=Decimal(100))
+    assert await risk.position(BOT, BTC) == Position(
+        amount=Decimal("0.5"), avg_entry=Decimal(100), last_entry=Decimal(100)
+    )
 
 
 # --- With a real PaperBroker and PaperAccounts ----------------------------------------
@@ -723,7 +726,9 @@ async def test_a_paper_block_is_written_to_risk_events(db: AsyncEngine) -> None:
     await risk.submit(BOT, order(), REASON)  # opens a position
     await set_limits(db, max_open_positions=1)
 
-    blocked = await risk.submit(BOT, order(cid="b1-202610231201-b"), REASON)
+    # A second coin would be a second position.
+    eth = order(cid="b1-202610231201-b").model_copy(update={"symbol": "ETH/USDT"})
+    blocked = await risk.submit(BOT, eth, REASON)
 
     assert blocked.order is None
     async with db.connect() as conn:
@@ -734,6 +739,20 @@ async def test_a_paper_block_is_written_to_risk_events(db: AsyncEngine) -> None:
     assert rows[0].inputs["account"]["open_positions"] == 1
     assert rows[0].inputs["settings"]["max_open_positions"] == 1
     assert await risk.get_order("b1-202610231201-b") is None  # never placed
+
+
+async def test_a_paper_buy_that_adds_to_the_bots_position_opens_none(db: AsyncEngine) -> None:
+    # Grid and DCA (P6-6) buy more of a coin they hold: still one position.
+    risk = await paper(db)
+    await risk.submit(BOT, order(), REASON)
+    await set_limits(db, max_open_positions=1)
+
+    added = await risk.submit(BOT, order(cid="b1-202610231201-b"), REASON)
+
+    assert added.order is not None and added.order.reason["risk"] == WITHIN
+    assert await risk.position(BOT, BTC) == Position(
+        amount=Decimal(1), avg_entry=Decimal(100), last_entry=Decimal(100)
+    )
 
 
 async def risk_events(db: AsyncEngine) -> list[tuple[str, str, str]]:

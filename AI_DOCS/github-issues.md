@@ -798,9 +798,18 @@ Judge them in two steps:
 
 ### P6-6 · Grid and DCA strategies
 `strategy` · Depends on: P2-2
-- [ ] Grid (range, number of grids); DCA (amount, interval, dip trigger)
+- [x] Grid (range, number of grids); DCA (amount, interval, dip trigger)
 
 **Done when:** both pass tests on known series and run in the backtester.
+
+**Done (D58):**
+- **The owner's choices:** backtester and paper bots together; the grid decides on closes (no resting orders); DCA's amount is the bot's sizing, with an optional take-profit.
+- **The contract:** `Strategy.scales_in` lets a BUY while holding add to the position; a SELL's `size_hint` sells that share of it (`sell_amount()` in `risk/sizing.py`, for the simulator and `bots/orders.py` alike).
+- **Grid** (`strategies/grid.py`: `lower`, `upper`, `grids`): a slice below each line, sold one line up, everything at or above the top. Stateless over a 200-candle replay; hints are slices of the bot's sizing (the whole grid's budget). **DCA** (`strategies/dca.py`: `interval`, `dip_percent`, `take_profit_percent`): a buy every `interval` candles by open time, one more on a dip through the level below the last buy, and everything sold at the take-profit. Version 2 measures the dip from the last buy (`Position.last_entry`, filled in by the simulator and `PaperBroker.position()`); version 1 measured it from the average, and run 57 showed it buying on every wobble.
+- **Backtester:** adds are sized with the coins in the equity, averaged as the ledger averages, with stops placed again from the new average; `close_first` closes what a partial sell leaves. `trades()` makes each sell a trade against the average cost.
+- **Paper:** `max_open_positions` lets an add through (`Account.adds`); `opening_buy()` finds the buy that opened the current position (stop exits, the stop plan and the keeper stay its); no add while a stop's exit sells the position; a partial sell records `"sell"` in its `reason`.
+- **Chart:** the grid's lines are drawn on the candles.
+- **Tests:** `test_grid.py`, `test_dca.py` (hand-worked series), `test_sizing.py` (`sell_amount`), `test_backtest_report.py` (per-sell trades), `test_backtest_simulator.py` (adds, partial sells, stops after an add, grid and DCA end to end), `test_bot_orders.py`, `test_limits.py`, `test_risk_account.py`, `test_risk_manager.py`, `test_bot_runner.py` (a DCA bot past the open-positions limit, stops after an add, no add while a stop sells, a grid's partial sell), `test_chart_parity.py`.
 
 ---
 
