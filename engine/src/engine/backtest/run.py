@@ -6,7 +6,8 @@ Add `--params '{"fast": 9, "slow": 21}'` to change the strategy's settings. The 
 ends at the last stored candle and goes back `--days`; the strategy's warm-up candles
 come from before that. `--auto-switch '{"mapping": {...}}'` switches strategy as the
 regime changes, as an auto-switching bot does (P6-5), starting on the strategy given,
-and also prints each of its configs run alone over the same candles (compare.py).
+and also runs each of its configs alone over the same candles (compare.py), storing
+them with the run and printing them beside it (D57).
 """
 
 import argparse
@@ -23,7 +24,7 @@ from engine.backtest.cli import (
     json_object_arg,
     run_settings,
 )
-from engine.backtest.compare import baselines, describe_baselines
+from engine.backtest.compare import Baseline, baselines, describe_baselines
 from engine.backtest.models import BacktestConfig, BacktestResult
 from engine.backtest.report import describe, report
 from engine.backtest.simulator import (
@@ -53,15 +54,24 @@ async def load_candles(candles: CandleStore, config: BacktestConfig, warmup: int
     return await candles.candles(series, config.start - warmup * step, config.end)
 
 
+def _run_and_compare(
+    strategy: Strategy[Any], history: list[Candle], config: BacktestConfig
+) -> tuple[BacktestResult, list[Baseline] | None]:
+    result = run_backtest(strategy, history, config)
+    found = None if config.auto_switch is None else baselines(strategy, history, config)
+    return result, found
+
+
 async def backtest(
     candles: CandleStore, runs: BacktestRunStore, strategy: Strategy[Any], config: BacktestConfig
-) -> tuple[int, BacktestResult]:
-    """Run `strategy` as `config` says and store the run. Returns the run's id and result."""
+) -> tuple[int, BacktestResult, list[Baseline] | None]:
+    """Run `strategy` as `config` says and store the run. Returns the run's id, its result
+    and, for an auto-switching run, its baselines (compare.py), stored with it (D57)."""
     warmup = warmup_needed(strategy, config)
     history = await load_candles(candles, config, warmup)
     # CPU-bound: in a thread, so the backtester's heartbeat keeps beating (worker.py).
-    result = await asyncio.to_thread(run_backtest, strategy, history, config)
-    run_id = await runs.save(config, warmup, history, result)
+    result, found = await asyncio.to_thread(_run_and_compare, strategy, history, config)
+    run_id = await runs.save(config, warmup, history, result, found)
     metrics = report(config, result)
     log.info(
         "backtest.done",
@@ -78,8 +88,9 @@ async def backtest(
         trades=metrics.trade_count,
         win_rate=None if metrics.win_rate is None else str(metrics.win_rate),
         profit_factor=None if metrics.profit_factor is None else str(metrics.profit_factor),
+        baselines=None if found is None else len(found),
     )
-    return run_id, result
+    return run_id, result, found
 
 
 async def reproduce(candles: CandleStore, runs: BacktestRunStore, run_id: int) -> BacktestResult:
@@ -118,11 +129,9 @@ async def run(args: argparse.Namespace, settings: Settings) -> None:
     candles = CandleStore(db)
     try:
         config = await run_settings(args, candles, strategy)
-        run_id, result = await backtest(candles, BacktestRunStore(db), strategy, config)
+        run_id, result, found = await backtest(candles, BacktestRunStore(db), strategy, config)
         print(describe(run_id, config, result))
-        if config.auto_switch is not None:
-            history = await load_candles(candles, config, warmup_needed(strategy, config))
-            found = await asyncio.to_thread(baselines, strategy, history, config)
+        if found is not None:
             print(describe_baselines(config, result, found))
     finally:
         await db.dispose()

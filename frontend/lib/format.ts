@@ -66,6 +66,17 @@ export function signOf(value: Decimal): -1 | 0 | 1 {
   return /[1-9]/.test(value) ? 1 : 0;
 }
 
+/**
+ * Orders two decimal strings exactly, for sorting (negative: `a` is smaller), as whole
+ * numbers of 10^-60: far finer than any Python Decimal the API sends.
+ */
+export function compareDecimal(a: Decimal, b: Decimal): number {
+  const whole = (value: Decimal) => BigInt(shiftPoint(value, 60).split(".")[0]);
+  const x = whole(a);
+  const y = whole(b);
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
 /** "12 s", "4 min", "3 h", "2 d": how long ago, for freshness (UX5). */
 export function formatAge(seconds: number): string {
   const s = Math.max(0, Math.floor(seconds));

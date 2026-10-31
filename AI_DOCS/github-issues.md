@@ -785,9 +785,16 @@ Judge them in two steps:
 
 ### P6-5c · Auto-switching backtests from the dashboard
 `frontend` · Depends on: P6-5
-- [ ] `auto_switch` on `RunBacktestCommand`; an auto-switching section in `BacktestForm` reusing `AutoSwitchSheet`'s mapping fields
+- [x] `auto_switch` on `RunBacktestCommand`; an auto-switching section in `BacktestForm` reusing `AutoSwitchSheet`'s mapping fields
 
 **Done when:** a run from the form equals `engine.backtest.run --auto-switch` with the same arguments (e2e). The baselines stay CLI-only unless this issue decides to store them.
+
+**Done (D57):**
+- **The owner's choice:** store the baselines and show them.
+- **The command:** `RunBacktestCommand.auto_switch` / `BacktestRequest.auto_switch` (`AutoSwitchSettings`: an unmapped regime is a 422). The worker checks each config with `checked_auto_switch()`, which `--auto-switch` now shares, so both refuse with the same words.
+- **The baselines:** `run.backtest()` runs `compare.baselines()` with the run and stores each as a `BaselineResult` in `backtest_runs.baselines` (migration 0016): fills and equity curve only, metrics worked out when shown. The CLI prints them from there.
+- **The page:** `AutoSwitchFields` (extracted from `AutoSwitchSheet`) and the policy radios in `BacktestForm`, behind "Switch strategy by regime"; the run's page ranks the run among its baselines ("Against each config alone").
+- **Tests:** `test_backtest_compare.py`, `test_backtest_store.py`, `test_backtest_worker.py` (a dashboard job equals the CLI's run, baselines included; a bad mapping fails with the CLI's words; the detector's warm-up gives `max_days`), `backend/tests/test_backtests.py`, and the e2e `backtests.spec.ts` (form vs. CLI: the same mapping, result and baselines).
 
 ### P6-6 · Grid and DCA strategies
 `strategy` · Depends on: P2-2

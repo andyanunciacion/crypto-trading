@@ -5,6 +5,7 @@ wave: 300 hours of BTC/USDT 1h, which EMA crossover 3/8 trades both ways.
 
 import argparse
 import asyncio
+import json
 import math
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -17,7 +18,7 @@ from redis.asyncio import Redis
 from sqlalchemy import URL, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from engine.backtest.cli import add_run_arguments, json_object_arg, run_settings
+from engine.backtest.cli import add_run_arguments, auto_switch_arg, json_object_arg, run_settings
 from engine.backtest.run import backtest
 from engine.backtest.store import BacktestRunStore
 from engine.backtest.worker import BacktestWorker
@@ -33,6 +34,7 @@ from shared.backtest_jobs import (
     read_job,
 )
 from shared.db.session import make_engine
+from shared.regime import AutoSwitchSettings
 
 T0 = datetime(2025, 1, 1, tzinfo=UTC)
 HOUR = timedelta(hours=1)
@@ -118,13 +120,104 @@ async def test_a_job_runs_and_stores_exactly_what_the_cli_would(setup: Setup) ->
     strategy = build("ema_crossover", strategy_class("ema_crossover").version, args.params)
     candles, runs = CandleStore(setup.db), BacktestRunStore(setup.db)
     config = await run_settings(args, candles, strategy, FakeRules())
-    cli_id, _ = await backtest(candles, runs, strategy, config)
+    cli_id, _, _ = await backtest(candles, runs, strategy, config)
 
     ours, theirs = await runs.load(job.run_id), await runs.load(cli_id)
     assert ours.config == theirs.config
     assert ours.candles_sha256 == theirs.candles_sha256
     assert ours.result == theirs.result
     assert len(ours.result.fills) >= 4  # the wave really traded, both ways
+
+
+# As the dashboard sends it: no versions (the backtester fills them in), params partial.
+AUTO_SWITCH: dict[str, Any] = {
+    "mapping": {
+        "trending_up": {"strategy": "ema_crossover", "params": {"fast": 3, "slow": 8}},
+        "ranging": {"strategy": "rsi_mean_reversion", "params": {"period": 2}},
+        "trending_down": {"strategy": "stay_flat"},
+        "high_volatility": {"strategy": "stay_flat"},
+    },
+    "min_hold": 1,
+    "policy": "close_first",
+}
+
+
+async def test_an_auto_switching_job_stores_what_the_cli_would(setup: Setup) -> None:
+    # 4 days: 96 hours, after the detector's 199 candles of warm-up.
+    sent = command(days=4, auto_switch=AutoSwitchSettings.model_validate(AUTO_SWITCH))
+    job = await setup.worker.handle(sent.model_dump_json())
+
+    assert job is not None and job.status == "done" and job.run_id is not None
+    # python -m engine.backtest.run ema_crossover BTC/USDT 1h --days 4
+    #   --params '{"fast": 3, "slow": 8}' --auto-switch '<the same JSON>'
+    parser = argparse.ArgumentParser()
+    add_run_arguments(parser)
+    parser.add_argument("--params", type=json_object_arg, default={})
+    parser.add_argument("--auto-switch", type=auto_switch_arg)
+    args = parser.parse_args(
+        [
+            "BTC/USDT",
+            "1h",
+            "--days",
+            "4",
+            "--params",
+            '{"fast":3,"slow":8}',
+            "--auto-switch",
+            json.dumps(AUTO_SWITCH),
+        ]
+    )
+    strategy = build("ema_crossover", strategy_class("ema_crossover").version, args.params)
+    candles, runs = CandleStore(setup.db), BacktestRunStore(setup.db)
+    config = await run_settings(args, candles, strategy, FakeRules())
+    cli_id, _, _ = await backtest(candles, runs, strategy, config)
+
+    ours, theirs = await runs.load(job.run_id), await runs.load(cli_id)
+    assert ours.config == theirs.config
+    assert ours.config.auto_switch is not None
+    assert ours.config.auto_switch.mapping["ranging"].version == 1  # filled in, as the CLI does
+    assert ours.result == theirs.result
+    assert ours.baselines is not None and ours.baselines == theirs.baselines
+
+
+@pytest.mark.parametrize(
+    ("auto_switch", "reason"),
+    [
+        (
+            AUTO_SWITCH | {"mapping": AUTO_SWITCH["mapping"] | {"ranging": {"strategy": "moon"}}},
+            "bad auto-switch: ranging: ",
+        ),
+        (
+            AUTO_SWITCH
+            | {
+                "mapping": AUTO_SWITCH["mapping"]
+                | {"ranging": {"strategy": "rsi_mean_reversion", "params": {"period": 0}}}
+            },
+            "bad auto-switch: ranging: period: ",
+        ),
+    ],
+    ids=["strategy", "params"],
+)
+async def test_an_auto_switching_job_with_a_bad_mapping_fails_as_the_cli_would(
+    setup: Setup, auto_switch: dict[str, Any], reason: str
+) -> None:
+    settings = AutoSwitchSettings.model_validate(auto_switch)
+    job = await setup.worker.handle(command(days=4, auto_switch=settings).model_dump_json())
+
+    assert job is not None and job.status == "failed"
+    assert job.error is not None and job.error.startswith(reason)
+    with pytest.raises(argparse.ArgumentTypeError) as cli:
+        auto_switch_arg(json.dumps(auto_switch))
+    assert job.error == str(cli.value)
+
+
+async def test_an_auto_switching_job_counts_the_detectors_warm_up(setup: Setup) -> None:
+    # The detector reads 199 candles: of the 300 stored, the range can start 199 hours in
+    # at the earliest, so 101 hours fit: 4 whole days, not EMA's 11.
+    settings = AutoSwitchSettings.model_validate(AUTO_SWITCH)
+    job = await setup.worker.handle(command(days=5, auto_switch=settings).model_dump_json())
+
+    assert job is not None and job.status == "failed" and job.max_days == 4
+    assert job.error is not None and job.error.startswith("needs 199 warm-up candles")
 
 
 async def test_the_job_goes_from_queued_to_running_to_done(setup: Setup) -> None:

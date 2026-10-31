@@ -2,14 +2,20 @@
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
 
+import {
+  AutoSwitchFields,
+  autoSwitchPayload,
+  initialAutoSwitch,
+} from "@/components/auto-switch-fields";
 import { StrategySetup, initialSetup, setupPayload, type Setup } from "@/components/strategy-setup";
+import { SwitchPolicyFields } from "@/components/switch-policy-fields";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { NativeSelect } from "@/components/ui/native-select";
 import { ApiError, backtestJob, candleRange, runBacktest } from "@/lib/api";
 import type { BacktestJob, CandleRange, NewBacktest } from "@/lib/backtests";
-import { fieldProblem, type Catalog, type FieldSpec } from "@/lib/bots";
+import { fieldProblem, type Catalog, type FieldSpec, type SwitchPolicy } from "@/lib/bots";
 import { formatAge, formatManila, shiftPoint } from "@/lib/format";
 
 /** How often the job is asked about while it runs. */
@@ -54,7 +60,8 @@ type Field = {
 
 /**
  * Backtests' run form (D48): the same choices as a new bot (`StrategySetup`), plus the
- * range and costs `engine.backtest.run` takes, with its defaults. Run queues a job for
+ * range and costs `engine.backtest.run` takes, with its defaults, and its `--auto-switch`
+ * (P6-5c) with a bot's auto-switching inputs (`AutoSwitchFields`). Run queues a job for
  * the backtester and follows it; once it's stored, `onDone` gets the run's id. The
  * backtester checks everything, and its reason for refusing is shown here.
  */
@@ -66,6 +73,9 @@ export function BacktestForm({
   onDone: (runId: number) => void;
 }) {
   const [setup, setSetup] = useState<Setup>(() => initialSetup(catalog));
+  const [autoOn, setAutoOn] = useState(false);
+  const [auto, setAuto] = useState(() => initialAutoSwitch(catalog, null));
+  const [policy, setPolicy] = useState<SwitchPolicy>("keep"); // the CLI's default
   const [symbol, setSymbol] = useState("BTC/USDT");
   const [timeframe, setTimeframe] = useState(
     catalog.timeframes.includes("1h") ? "1h" : (catalog.timeframes[0] ?? ""),
@@ -110,10 +120,15 @@ export function BacktestForm({
     f.spec === SLIPPAGE && f.value.trim() === "" ? null : fieldProblem(f.spec, f.value),
   );
   const payload = setupPayload(catalog, setup);
+  const autoPayload = autoOn ? autoSwitchPayload(catalog, auto) : null;
   const running = job !== null && (job.status === "queued" || job.status === "running");
   // Refused for too little stored history: the most days that would fit, offered as a fix.
   const fits = job?.status === "failed" ? job.max_days : null;
-  const valid = symbol.includes("/") && problems.every((p) => p === null) && payload !== null;
+  const valid =
+    symbol.includes("/") &&
+    problems.every((p) => p === null) &&
+    payload !== null &&
+    (!autoOn || autoPayload !== null);
 
   // What's stored of the series, so the days can be chosen to fit.
   useEffect(() => {
@@ -166,6 +181,7 @@ export function BacktestForm({
       cash: cash.trim(),
       fee_rate: fee.trim(),
       slippage: slippage.trim() === "" ? null : slippage.trim(),
+      ...(autoPayload !== null ? { auto_switch: { ...autoPayload, policy } } : {}),
     };
     setError(null);
     try {
@@ -212,7 +228,7 @@ export function BacktestForm({
           </NativeSelect>
         </div>
         <p className="text-muted-foreground text-xs sm:col-span-2" data-testid="stored-range">
-          {storedText(stored)}
+          {storedText(stored, autoOn)}
         </p>
         {fields.map((field, i) => {
           const id = `backtest-${field.spec.name}`;
@@ -243,6 +259,44 @@ export function BacktestForm({
         onChange={setSetup}
         sizingNote="How much each buy spends. Backtests don't apply the risk limits, as the CLI's don't."
       />
+
+      <fieldset className="flex flex-col gap-4">
+        <legend className="mb-2 text-sm font-semibold">Auto-switching</legend>
+        <label className="flex items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={autoOn}
+            aria-describedby="backtest-auto-note"
+            onChange={(event) => setAutoOn(event.target.checked)}
+            className="accent-primary mt-0.5 size-4 shrink-0"
+          />
+          <span className="font-medium">Switch strategy by regime</span>
+        </label>
+        <p id="backtest-auto-note" className="text-muted-foreground -mt-2 text-xs">
+          As an auto-switching bot does: the strategy above is the one it starts on, and once a new
+          regime has held for the minimum number of candles, the next candle trades on that
+          regime&apos;s strategy. The run is also compared with each strategy run alone, and with
+          buy-and-hold, over the same candles.
+        </p>
+        {autoOn && (
+          <>
+            <AutoSwitchFields
+              idPrefix="backtest-auto"
+              catalog={catalog}
+              inputs={auto}
+              onChange={setAuto}
+              timeframe={timeframe}
+              switcher="the run"
+            />
+            <SwitchPolicyFields
+              idPrefix="backtest-auto"
+              policy={policy}
+              note="What a switch does with a position the run holds. Close first sells it at the next candle's open."
+              onChange={setPolicy}
+            />
+          </>
+        )}
+      </fieldset>
 
       {error !== null && (
         <p ref={errorRef} tabIndex={-1} role="alert" className="text-loss text-sm outline-none">
@@ -286,15 +340,18 @@ function percentHint(fraction: string): string {
   return /^\d*\.?\d+$|^\d+\.$/.test(value) ? ` (${shiftPoint(value, 2)}%)` : "";
 }
 
-function storedText(range: CandleRange | null): string {
+function storedText(range: CandleRange | null, auto: boolean): string {
   if (range === null) return "";
   if (range.count === 0 || range.first === null || range.last === null) {
     return `Nothing stored for ${range.symbol} ${range.timeframe}: backfill it first.`;
   }
   const days = Math.floor((Date.parse(range.last) - Date.parse(range.first)) / 86_400_000);
+  const warmup = auto
+    ? "the warm-up comes from these too, at least the regime detector's 199 candles"
+    : "the strategy's warm-up comes from these too";
   return (
     `Stored: ${range.count.toLocaleString("en-US")} candles, ${formatManila(range.first)} to ` +
-    `${formatManila(range.last)} (about ${days} days; the strategy's warm-up comes from these too).`
+    `${formatManila(range.last)} (about ${days} days; ${warmup}).`
   );
 }
 

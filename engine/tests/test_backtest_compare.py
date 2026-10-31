@@ -9,10 +9,11 @@ import pytest
 
 from engine.backtest.compare import baselines, describe_baselines
 from engine.backtest.models import BacktestConfig
-from engine.backtest.simulator import BacktestError, run_backtest
+from engine.backtest.simulator import BacktestError, config_ref, run_backtest
 from engine.exchange.models import Candle, MarketRules
 from engine.risk.sizing import PercentOfEquity
 from engine.strategies.registry import build
+from shared.backtest import metrics
 from shared.regime import AutoSwitchSettings
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
@@ -106,13 +107,39 @@ def test_buy_and_hold_buys_everything_at_the_first_open_and_holds() -> None:
     assert hold.result.final_equity == buy.cash_after + amount * last.close
 
 
+def test_each_baseline_names_its_config() -> None:
+    found = baselines(EMA, CANDLES, config())
+
+    assert [b.config for b in found[:-1]] == [
+        config_ref(EMA),
+        config_ref(build("rsi_mean_reversion", 1, {"period": 2})),
+        config_ref(build("stay_flat", 1, {})),
+    ]
+    assert found[-1].config is None  # buy and hold isn't a config a run can switch to
+
+
+def test_a_stored_baseline_keeps_what_its_metrics_need() -> None:
+    cfg = config()
+    ema = baselines(EMA, CANDLES, cfg)[0]
+
+    stored = ema.stored()
+
+    assert (stored.label, stored.config) == (ema.label, ema.config)
+    assert stored.fills == ema.result.fills
+    assert stored.equity_curve == ema.result.equity_curve
+    # The metrics from the slim copy are the full result's, to the digit.
+    assert metrics(cfg.initial_cash, cfg.timeframe, stored) == metrics(
+        cfg.initial_cash, cfg.timeframe, ema.result
+    )
+
+
 def test_the_table_ranks_the_run_among_its_baselines() -> None:
     cfg = config()
     combined = run_backtest(EMA, CANDLES, cfg)
 
     lines = describe_baselines(cfg, combined, baselines(EMA, CANDLES, cfg)).splitlines()
 
-    assert lines[0] == "  against each config alone, over the same candles (not stored):"
+    assert lines[0] == "  against each config alone, over the same candles:"
     assert len(lines) == 6
     assert sum("auto-switching (this run)" in line for line in lines) == 1
     returns = [D(line.split("%")[0].split()[-1]) for line in lines[1:]]

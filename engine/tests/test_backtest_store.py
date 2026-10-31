@@ -9,6 +9,7 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import URL, text
 
+from engine.backtest.compare import baselines
 from engine.backtest.models import BacktestConfig
 from engine.backtest.run import backtest, reproduce
 from engine.backtest.simulator import BacktestError, run_backtest
@@ -82,14 +83,14 @@ async def stores(db_url: URL) -> AsyncIterator[Stores]:
 
 
 async def test_a_run_reproduces_from_its_stored_inputs(stores: Stores) -> None:
-    run_id, result = await backtest(stores.candles, stores.runs, STRATEGY, CONFIG)
+    run_id, result, _ = await backtest(stores.candles, stores.runs, STRATEGY, CONFIG)
     assert len(result.fills) >= 4  # the wave really traded, both ways
 
     assert await reproduce(stores.candles, stores.runs, run_id) == result
 
 
 async def test_save_and_load_round_trip_exactly(stores: Stores) -> None:
-    run_id, result = await backtest(stores.candles, stores.runs, STRATEGY, CONFIG)
+    run_id, result, _ = await backtest(stores.candles, stores.runs, STRATEGY, CONFIG)
 
     stored = await stores.runs.load(run_id)
 
@@ -107,7 +108,7 @@ async def test_an_atr_sized_run_stores_its_sizing_and_reproduces(stores: Stores)
     # strategy's own 25: the run loads and stores the larger warm-up.
     sizing = AtrRisk(risk_percent=Decimal("0.5"))
     config = CONFIG.model_copy(update={"start": T0 + 85 * HOUR, "sizing": sizing})
-    run_id, result = await backtest(stores.candles, stores.runs, STRATEGY, config)
+    run_id, result, _ = await backtest(stores.candles, stores.runs, STRATEGY, config)
     # Half a percent at risk buys less than all the cash would, on the same range.
     all_in = CONFIG.model_copy(update={"start": config.start})
     first_all_in = run_backtest(STRATEGY, [wave(h) for h in range(HOURS)], all_in).fills[0]
@@ -125,7 +126,7 @@ async def test_a_run_with_stops_stores_them_and_reproduces(stores: Stores) -> No
     # A tight trailing stop on the wave: some trades end at a stop, not the strategy's sell.
     stops = Stops(stop_loss=Percent(percent=Decimal(2)), trailing=Percent(percent=Decimal(1)))
     config = CONFIG.model_copy(update={"stops": stops})
-    run_id, result = await backtest(stores.candles, stores.runs, STRATEGY, config)
+    run_id, result, _ = await backtest(stores.candles, stores.runs, STRATEGY, config)
     assert any(f.exit is not None for f in result.fills)
 
     stored = await stores.runs.load(run_id)
@@ -156,7 +157,7 @@ AUTO_CONFIG = CONFIG.model_copy(update={"start": T0 + 199 * HOUR, "auto_switch":
 
 
 async def test_an_auto_switching_run_stores_its_settings_and_reproduces(stores: Stores) -> None:
-    run_id, result = await backtest(stores.candles, stores.runs, STRATEGY, AUTO_CONFIG)
+    run_id, result, _ = await backtest(stores.candles, stores.runs, STRATEGY, AUTO_CONFIG)
     assert result.switches  # the wave goes from trending to ranging and back
 
     stored = await stores.runs.load(run_id)
@@ -168,20 +169,33 @@ async def test_an_auto_switching_run_stores_its_settings_and_reproduces(stores: 
     assert await reproduce(stores.candles, stores.runs, run_id) == result
 
 
+async def test_an_auto_switching_run_stores_its_baselines(stores: Stores) -> None:
+    run_id, _, found = await backtest(stores.candles, stores.runs, STRATEGY, AUTO_CONFIG)
+
+    # Over the same candles, warm-up included, as the CLI prints them (D57).
+    history = [wave(h) for h in range(HOURS)]
+    assert found == baselines(STRATEGY, history, AUTO_CONFIG)
+    stored = await stores.runs.load(run_id)
+    assert stored.baselines == [b.stored() for b in found]
+    assert [b.label for b in found][-1] == "buy and hold"
+
+
 async def test_a_plain_run_stores_no_auto_switching(stores: Stores) -> None:
-    run_id, _ = await backtest(stores.candles, stores.runs, STRATEGY, CONFIG)
+    run_id, _, found = await backtest(stores.candles, stores.runs, STRATEGY, CONFIG)
 
     stored = await stores.runs.load(run_id)
 
     assert stored.config.auto_switch is None
     assert stored.regime_detector_version is None
     assert stored.result.switches == []
+    assert found is None
+    assert stored.baselines is None
 
 
 async def test_a_new_detector_version_refuses_to_reproduce(
     stores: Stores, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    run_id, _ = await backtest(stores.candles, stores.runs, STRATEGY, AUTO_CONFIG)
+    run_id, _, _ = await backtest(stores.candles, stores.runs, STRATEGY, AUTO_CONFIG)
     monkeypatch.setattr(RegimeDetector, "version", 2)  # as if its rules changed since
 
     with pytest.raises(BacktestError, match="regime detector version 1, this is version 2"):
@@ -189,7 +203,7 @@ async def test_a_new_detector_version_refuses_to_reproduce(
 
 
 async def test_changed_candles_refuse_to_reproduce(stores: Stores) -> None:
-    run_id, _ = await backtest(stores.candles, stores.runs, STRATEGY, CONFIG)
+    run_id, _, _ = await backtest(stores.candles, stores.runs, STRATEGY, CONFIG)
     await stores.candles.upsert(BTC, [wave(100, wobble=151)])  # say, a re-download differs
 
     with pytest.raises(BacktestError, match="changed"):
@@ -199,7 +213,7 @@ async def test_changed_candles_refuse_to_reproduce(stores: Stores) -> None:
 async def test_a_new_strategy_version_refuses_to_reproduce(
     stores: Stores, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    run_id, _ = await backtest(stores.candles, stores.runs, STRATEGY, CONFIG)
+    run_id, _, _ = await backtest(stores.candles, stores.runs, STRATEGY, CONFIG)
     monkeypatch.setattr(EmaCrossover, "version", 2)  # as if its logic changed since
 
     with pytest.raises(ValueError, match="version"):

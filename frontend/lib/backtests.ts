@@ -18,6 +18,8 @@ export type NewBacktest = {
   slippage: Decimal | null; // null: the pair's default
   sizing: Settings;
   stops: Record<string, Settings | number>;
+  /** `--auto-switch` (P6-5c): the strategy above is the one it starts on. Left out: a plain run. */
+  auto_switch?: AutoSwitchSettings;
 };
 
 export type JobStatus = "queued" | "running" | "done" | "failed";
@@ -106,11 +108,21 @@ export type EquityPoint = { ts: string; equity: Decimal; drawdown: Decimal };
 
 export type SkippedOrder = { signal_ts: string; side: "buy" | "sell"; reason: string };
 
+/** What an auto-switching run is judged against (D57): one config alone, or buy-and-hold. */
+export type Baseline = {
+  label: string;
+  /** null: buy-and-hold. */
+  config: ConfigRef | null;
+  metrics: Metrics;
+};
+
 export type RunDetail = RunSummary & {
   trades: Trade[];
   equity: EquityPoint[];
   skipped: SkippedOrder[];
   switches: BacktestSwitch[];
+  /** An auto-switching run's; null for a plain run, or one stored before they were. */
+  baselines: Baseline[] | null;
   fills: number;
   signals: number;
 };

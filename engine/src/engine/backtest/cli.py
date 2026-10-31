@@ -64,17 +64,30 @@ def stops_arg(text: str) -> Stops:
         raise argparse.ArgumentTypeError(f"bad stops: {_problems(e)}") from None
 
 
-def auto_switch_arg(text: str) -> AutoSwitchSettings:
-    """Auto-switching as JSON, as a bot's (`bots.auto_switch`): each regime's config is
-    checked and stored at its strategy's version now (regime/switcher.py)."""
+class BadAutoSwitch(ValueError):
+    """Auto-switching settings that can't run, and why: the CLI's and the dashboard's words."""
+
+
+def checked_auto_switch(settings: AutoSwitchSettings) -> AutoSwitchSettings:
+    """`settings` with each regime's config checked and stored at its strategy's version
+    now (regime/switcher.py), as a bot's are (`bots.auto_switch`). Used by `--auto-switch`
+    and the backtester service (worker.py), so both refuse alike."""
     try:
-        return with_versions(AutoSwitchSettings.model_validate(json_object_arg(text)))
-    except ValidationError as e:
-        raise argparse.ArgumentTypeError(f"bad auto-switch: {_problems(e)}") from None
+        return with_versions(settings)
     except MappingRefused as e:
         cause = e.cause
         detail = _problems(cause) if isinstance(cause, ValidationError) else str(cause)
-        raise argparse.ArgumentTypeError(f"bad auto-switch: {e.regime}: {detail}") from None
+        raise BadAutoSwitch(f"bad auto-switch: {e.regime}: {detail}") from None
+
+
+def auto_switch_arg(text: str) -> AutoSwitchSettings:
+    """Auto-switching as JSON (`checked_auto_switch`)."""
+    try:
+        return checked_auto_switch(AutoSwitchSettings.model_validate(json_object_arg(text)))
+    except ValidationError as e:
+        raise argparse.ArgumentTypeError(f"bad auto-switch: {_problems(e)}") from None
+    except BadAutoSwitch as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
 
 
 def _problems(e: ValidationError) -> str:
@@ -144,7 +157,7 @@ class RunSettings(BaseModel):
     sizing: Sizing = ALL_IN
     stops: Stops = NO_STOPS
     exchange: str = "mexc"
-    # The run CLI's --auto-switch only; the dashboard sends none yet (P6-5c).
+    # The run CLI's --auto-switch and the dashboard's (P6-5c), after `checked_auto_switch`.
     auto_switch: AutoSwitchSettings | None = None
 
 

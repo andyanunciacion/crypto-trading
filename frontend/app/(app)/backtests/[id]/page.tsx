@@ -37,7 +37,7 @@ import {
   type AutoSwitchSettings,
   type MappedConfig,
 } from "@/lib/bots";
-import { priceDigits, shiftPoint } from "@/lib/format";
+import { compareDecimal, priceDigits, shiftPoint } from "@/lib/format";
 
 /**
  * One backtest's results (D48): its metrics (worked out by the same function as the
@@ -318,6 +318,7 @@ function AutoSwitching({ settings, run }: { settings: AutoSwitchSettings; run: R
           </TableBody>
         </Table>
       </Card>
+      <Baselines run={run} />
       {n > 0 && (
         <Card className="py-2">
           <Table aria-label="Switches">
@@ -351,6 +352,73 @@ function AutoSwitching({ settings, run }: { settings: AutoSwitchSettings; run: R
         </Card>
       )}
     </section>
+  );
+}
+
+/**
+ * The run beside each config it switched between run alone over the same candles, and
+ * buy-and-hold (D57), best total return first, as the CLI prints them: switching only
+ * pays if the run comes out on top.
+ */
+function Baselines({ run }: { run: RunDetail }) {
+  if (run.baselines === null || run.metrics === null) {
+    return (
+      <p className="text-muted-foreground text-sm">
+        No baselines: this run was stored before they were kept with it.
+      </p>
+    );
+  }
+  const rows = [
+    { key: "run", label: "This run (auto-switching)", config: null, metrics: run.metrics },
+    ...run.baselines.map((b) => ({ key: b.label, ...b })),
+  ].sort((a, b) => compareDecimal(b.metrics.total_return, a.metrics.total_return));
+  return (
+    <Card className="py-2">
+      <Table aria-label="Against each config alone">
+        <caption className="text-muted-foreground caption-top px-2 pb-2 text-left text-sm">
+          Against each config alone, over the same candles with the same costs, sizing and stops;
+          buy-and-hold is all in at the first open.
+        </caption>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Run</TableHead>
+            <TableHead className="text-right">Total return</TableHead>
+            <TableHead className="text-right">Max drawdown</TableHead>
+            <TableHead className="text-right">Sharpe</TableHead>
+            <TableHead className="text-right">Trades</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((row) => (
+            <TableRow
+              key={row.key}
+              data-baseline={row.key}
+              className={row.key === "run" ? "font-semibold" : undefined}
+            >
+              <TableCell className="text-xs">
+                {row.config === null ? row.label : <ConfigName config={row.config} />}
+              </TableCell>
+              <TableCell className="text-right" {...metricData(row.metrics, "total_return")}>
+                <Ratio value={row.metrics.total_return} pnl />
+              </TableCell>
+              <TableCell className="text-right" {...metricData(row.metrics, "max_drawdown")}>
+                <Ratio value={row.metrics.max_drawdown} />
+              </TableCell>
+              <TableCell className="text-right" {...metricData(row.metrics, "sharpe")}>
+                <Plain value={row.metrics.sharpe} />
+              </TableCell>
+              <TableCell
+                className="text-right font-mono tabular-nums"
+                {...metricData(row.metrics, "trade_count")}
+              >
+                {row.metrics.trade_count}
+                {row.metrics.open_trade ? " + open" : ""}
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </Card>
   );
 }
 
