@@ -1,4 +1,6 @@
-"""`python -m backend.alerts`: run the alerts service. Also, to set it up and check it:
+"""`python -m backend.alerts`: run the alerts service, and with Telegram set up, the
+chat's commands (/status, /pnl, /pause, /kill; commands.py). Also, to set it up and
+check it:
 
 - `chat-id`: list the chats that have messaged the bot, to find TELEGRAM_CHAT_ID (send
   the bot any message in Telegram first). Needs only TELEGRAM_BOT_TOKEN.
@@ -17,7 +19,9 @@ from datetime import UTC, datetime
 import structlog
 import telegram
 from redis.asyncio import Redis
+from telegram.error import Conflict
 
+from backend.alerts.commands import CommandBot, ShownKills
 from backend.alerts.service import AlertsService, beat
 from backend.alerts.settings import AlertsSettings, load_alerts_settings
 from backend.alerts.telegram import DrySender, Sender, TelegramSender
@@ -54,15 +58,29 @@ async def run(settings: AlertsSettings, mirror: LogMirror) -> None:
     redis = Redis.from_url(settings.redis_url)
     db = make_engine(settings.database_url)
     sender = make_sender(settings)
+    shown_kills = ShownKills()
     try:
-        service = AlertsService(redis, db, sender, mode=settings.mode)
+        service = AlertsService(redis, db, sender, mode=settings.mode, shown_kills=shown_kills)
         await service.write_status()
         async with asyncio.TaskGroup() as tasks:
             tasks.create_task(beat(service, stop))
             tasks.create_task(mirror.ship(redis, stop))  # ends after `stop`
-            running = tasks.create_task(service.run())
+            running = [tasks.create_task(service.run())]
+            # Commands (P7-2) only with a real bot and chat: a dry run has no one to answer.
+            if isinstance(sender, TelegramSender) and settings.telegram_chat_id is not None:
+                commands = CommandBot(
+                    sender.bot,
+                    sender,
+                    redis,
+                    db,
+                    chat_id=settings.telegram_chat_id,
+                    mode=settings.mode,
+                    shown_kills=shown_kills,
+                )
+                running.append(tasks.create_task(commands.run()))
             await stop.wait()
-            running.cancel()
+            for task in running:
+                task.cancel()
     finally:
         with contextlib.suppress(Exception):
             await mirror.flush(redis)
@@ -76,8 +94,18 @@ async def chat_ids(settings: AlertsSettings) -> int:
     if settings.telegram_bot_token is None:
         print("Set TELEGRAM_BOT_TOKEN in .env first (from @BotFather).", file=sys.stderr)
         return 1
-    async with telegram.Bot(settings.telegram_bot_token.get_secret_value()) as bot:
-        updates = await bot.get_updates()
+    try:
+        async with telegram.Bot(settings.telegram_bot_token.get_secret_value()) as bot:
+            updates = await bot.get_updates()
+    except Conflict:
+        # Telegram lets one reader at a time wait for a bot's messages, and the running
+        # service is one once the chat is set (its commands, P7-2).
+        print(
+            "The alerts service is reading the bot's messages: run "
+            "`docker compose stop alerts` first, then this again.",
+            file=sys.stderr,
+        )
+        return 1
     chats = {u.effective_chat.id: u.effective_chat for u in updates if u.effective_chat}
     if not chats:
         print("No messages yet: send your bot any message in Telegram, then run this again.")

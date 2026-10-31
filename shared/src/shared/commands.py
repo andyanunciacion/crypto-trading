@@ -1,7 +1,8 @@
 """Commands to the engine over Redis, and its replies (D43).
 
 The engine obeys these even when the API is down: anything that can reach Redis can
-send one (the engine's own CLI, the dashboard through the API; Telegram later).
+send one (the engine's own CLI, the dashboard through the API, Telegram through the
+alerts service: P7-2, backend/alerts/commands.py).
 
 A sender (`send()`) `LPUSH`es the command's JSON onto `COMMANDS_KEY`, then `BLPOP`s
 `reply_key(command.id)` for the engine's answer, `BLOCK_SECONDS` at a time. The engine

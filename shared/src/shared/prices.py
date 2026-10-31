@@ -14,6 +14,9 @@ from typing import Literal
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 PriceFeed = Literal["ws", "rest"]  # WebSocket stream, or the REST fallback
+# A price older than this is stale (DESIGN UX5): the PaperBroker won't fill on one
+# (engine/marketdata/quotes.py's MAX_QUOTE_AGE). The dashboard's copy is in lib/overview.ts.
+PRICE_STALE_SECONDS = 10
 
 
 class PriceUpdate(BaseModel):

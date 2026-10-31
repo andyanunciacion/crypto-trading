@@ -2,14 +2,17 @@
 waited out, network errors retried until the message goes, refusals dropped, and the bot
 token never in a log line. A fake bot stands in for Telegram."""
 
+import asyncio
 import random
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import structlog
 from structlog.testing import capture_logs
+from telegram import BotCommandScope, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
 
 from backend.alerts.settings import AlertsSettings
@@ -25,6 +28,8 @@ class FakeBot:
     def __init__(self, *failures: Exception) -> None:
         self.failures = list(failures)  # raised by the next sends, in order
         self.sent: list[tuple[int, str]] = []
+        self.markups: list[InlineKeyboardMarkup | None] = []
+        self.edited: list[tuple[int, int, str]] = []
         self.initialized = 0
         self.shut_down = 0
 
@@ -34,11 +39,39 @@ class FakeBot:
     async def shutdown(self) -> None:
         self.shut_down += 1
 
-    async def send_message(self, chat_id: int, text: str) -> object:
+    async def send_message(
+        self, chat_id: int, text: str, *, reply_markup: InlineKeyboardMarkup | None = None
+    ) -> object:
         if self.failures:
             raise self.failures.pop(0)
         self.sent.append((chat_id, text))
-        return None
+        self.markups.append(reply_markup)
+        return SimpleNamespace(message_id=100 + len(self.sent))
+
+    async def edit_message_text(self, text: str, *, chat_id: int, message_id: int) -> object:
+        if self.failures:
+            raise self.failures.pop(0)
+        self.edited.append((chat_id, message_id, text))
+        return True
+
+    async def get_updates(
+        self,
+        *,
+        offset: int | None = None,
+        timeout: int | None = None,  # noqa: ASYNC109 (as telegram.Bot names it)
+        allowed_updates: Sequence[str] | None = None,
+    ) -> Sequence[Update]:
+        return ()
+
+    async def answer_callback_query(
+        self, callback_query_id: str, text: str | None = None
+    ) -> object:
+        return True
+
+    async def set_my_commands(
+        self, commands: Sequence[tuple[str, str]], scope: BotCommandScope | None = None
+    ) -> object:
+        return True
 
 
 class Clock:
@@ -142,6 +175,42 @@ async def test_the_token_never_reaches_a_log_line_or_the_status(clock: Clock) ->
     assert all(TOKEN not in repr(line) for line in logs)
     assert s.last_error is not None and TOKEN not in s.last_error
     assert "<token>" in s.last_error
+
+
+async def test_alerts_and_replies_sent_at_once_still_go_one_a_second(clock: Clock) -> None:
+    # The alerts loop and the commands (P7-2) share the sender; without the lock both
+    # would see the same last send and skip the wait.
+    bot = FakeBot()
+    s = sender(bot, clock)
+
+    await asyncio.gather(s.send("alert"), s.send("reply"), s.edit(7, "edited"))
+
+    assert [text for _, text in bot.sent] == ["alert", "reply"]
+    assert bot.edited == [(CHAT, 7, "edited")]
+    assert clock.slept == [1.0, 1.0]
+
+
+async def test_a_prompt_carries_its_buttons_and_says_its_message_id(clock: Clock) -> None:
+    bot = FakeBot()
+    s = sender(bot, clock)
+
+    message_id = await s.prompt("Sure?", [[("Yes", "yes")], [("Cancel", "cancel")]])
+    await s.send("plain")
+
+    assert message_id == 101
+    markup = bot.markups[0]
+    assert markup is not None
+    assert [[(b.text, b.callback_data) for b in row] for row in markup.inline_keyboard] == [
+        [("Yes", "yes")],
+        [("Cancel", "cancel")],
+    ]
+    assert bot.markups[1] is None
+
+
+async def test_a_refused_prompt_has_no_message_id(clock: Clock) -> None:
+    bot = FakeBot(Forbidden("bot was blocked by the user"))
+
+    assert await sender(bot, clock).prompt("Sure?", [[("Yes", "yes")]]) is None
 
 
 async def test_a_long_message_is_cut_to_what_telegram_takes(clock: Clock) -> None:

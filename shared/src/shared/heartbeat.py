@@ -10,6 +10,9 @@ from typing import Literal
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 ENGINE_HEARTBEAT_KEY = "engine:heartbeat"
+# A beat older than this means the engine is down or stuck (DESIGN UX5; Docker's health
+# check uses the same 30 s). The dashboard has its own copy in frontend/lib/overview.ts.
+ENGINE_STALE_SECONDS = 30
 
 
 class EngineHeartbeat(BaseModel):

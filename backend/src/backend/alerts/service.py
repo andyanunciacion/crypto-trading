@@ -17,11 +17,14 @@ It must keep working when something else is broken, because that's when alerts m
   alerts wait behind it rather than being lost.
 - The daily summary is sent at 08:00 Manila about the day before, once (`alerts:summary:
   last` holds the day it was last sent for), and tried again a minute later if it fails.
+
+The chat's commands (commands.py, P7-2) run beside this loop. A kill sent from there is
+in `shown_kills`: its result was the reply, so its `kill_switch` alert isn't sent again.
 """
 
 import asyncio
 import contextlib
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Container
 from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -91,6 +94,7 @@ class AlertsService:
         backoff: Backoff | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         trade_read_pause: float = TRADE_READ_PAUSE,
+        shown_kills: Container[str] = frozenset(),
     ) -> None:
         self._redis = redis
         self._db = db
@@ -100,6 +104,8 @@ class AlertsService:
         self._backoff = backoff or Backoff()
         self._sleep = sleep
         self._trade_read_pause = trade_read_pause
+        # Kills sent from Telegram, whose result the chat got as the reply (commands.py).
+        self._shown_kills = shown_kills
         self._quieter = Quieter()
         self._enabled: dict[AlertEvent, bool] = {e: info.default for e, info in EVENTS.items()}
         self._names: dict[int, str] = {}
@@ -179,6 +185,9 @@ class AlertsService:
         if not self._enabled.get(alert.event, False):
             return False
         entry = alert.line
+        if alert.event == "kill_switch" and entry.fields.get("id") in self._shown_kills:
+            log.info("alerts.kill_shown", line=stream_id, id=entry.fields.get("id"))
+            return False  # the reply to /kill said it already
         passed = self._quieter.check(alert, entry.ts or self._clock())
         if passed is None:
             return False  # held back; the next one sent says how many

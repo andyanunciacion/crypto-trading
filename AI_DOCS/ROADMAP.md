@@ -88,7 +88,7 @@
 ## Phase 7 — Alerts and monitoring
 
 1. [x] **Telegram alerts:** trades, stop-loss hits, switches, errors, limit breaches, daily summary; on/off per event type, on the Settings page (moved from P5-7, D50). The alerts service reads the log stream every service writes (D59).
-2. [ ] **Telegram commands:** /status, /pnl, /pause, /kill, only from your chat ID.
+2. [x] **Telegram commands:** /status, /pnl, /pause, /kill, only from your chat ID. In the alerts service, by long polling; /kill asks with buttons, as the dashboard's dialog does (D60).
 3. [ ] **Heartbeat:** alert if the engine stops sending updates.
 4. [ ] **Health + errors:** health endpoint per service; Sentry wired into API and engine.
 
@@ -111,7 +111,7 @@
 > - [ ] Walk-forward results close to in-sample results (not overfitted)
 > - [ ] Paper trading for 2–4 weeks with results close to the backtest
 > - [ ] Every risk rule covered by tests and checked by hand once
-> - [ ] Kill switch tested from the dashboard and from Telegram
+> - [x] Kill switch tested from the dashboard and from Telegram (Telegram: 2026-11-01, two bots stopped in 181 ms, D60)
 > - [ ] Restart test passed: positions and orders recovered correctly
 > - [ ] API key is trade-only, IP-locked, with no withdrawal permission; separate sub-account
 > - [ ] Dashboard behind two-factor login and Tailscale or IP limits

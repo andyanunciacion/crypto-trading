@@ -103,7 +103,7 @@ def render(
         case "switch":
             body = _switch(alert, names)
         case "kill_switch":
-            body = _kill(alert, names)
+            body = kill_lines(alert.line.fields, names)
         case _:
             body = _error(alert, names)
     ts = alert.line.ts
@@ -196,8 +196,9 @@ def _switch(alert: Alert, names: Mapping[int, str]) -> list[str]:
     return lines
 
 
-def _kill(alert: Alert, names: Mapping[int, str]) -> list[str]:
-    f = alert.line.fields
+def kill_lines(f: Mapping[str, JsonValue], names: Mapping[int, str]) -> list[str]:
+    """What the kill switch did, from `kill_switch.done`'s fields, which are its
+    `KillReply` as JSON: so the alert and the reply to Telegram's /kill read alike."""
     stopped = f.get("stopped")
     canceled = f.get("canceled")
     closing = f.get("closing")

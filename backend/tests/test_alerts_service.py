@@ -310,6 +310,21 @@ async def test_with_the_database_down_an_error_still_goes_by_the_defaults(
     assert [line["event"] for line in logs].count("alerts.db_failed") == 1
 
 
+async def test_a_kill_the_chat_got_as_a_reply_isn_t_sent_again_as_an_alert(setup: Setup) -> None:
+    # The kills sent from Telegram whose reply the chat saw (backend/alerts/commands.py).
+    service = AlertsService(
+        setup.redis, setup.db, setup.sender, mode="paper", clock=setup.clock, shown_kills={"k-1"}
+    )
+    await service.poll(block_ms=1)
+
+    await setup.log("kill_switch.done", "warning", id="k-1", ok=True, stopped=[1], took_ms=5)
+    await setup.log("kill_switch.done", "warning", id="k-2", ok=True, stopped=[1], took_ms=7)
+    await service.poll(block_ms=1)
+
+    assert len(setup.sender.sent) == 1
+    assert "in 7 ms" in setup.sender.sent[0]
+
+
 async def test_each_message_updates_the_status_the_settings_page_shows(setup: Setup) -> None:
     service = await started(setup)
 
