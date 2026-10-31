@@ -297,7 +297,9 @@ async def test_a_kill_over_redis_stops_every_bot_within_seconds(setup: Setup) ->
     assert paused == [None, None, None]
     assert await open_orders(setup.db, mode="paper") == []
     # Not asked to close: bot a keeps the 4 BTC it bought.
-    assert await setup.desk.risk.position(a.id, BTC) == Position(amount=d("4"), avg_entry=d("110"))
+    assert await setup.desk.risk.position(a.id, BTC) == Position(
+        amount=d("4"), avg_entry=d("110"), last_entry=d("110")
+    )
 
     # The bots never act again: not on the cross down (a SELL for bot a), not on a bid
     # below bot a's 104.5 stop.

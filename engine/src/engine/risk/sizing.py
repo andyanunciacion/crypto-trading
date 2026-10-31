@@ -2,8 +2,8 @@
 
 Pure, all Decimal: the backtester and the bot runner both call `entry_amount`, so a
 paper bot sizes its orders exactly as its backtests did (D7). The RiskManager's limits
-(P4-3) then cap what sizing asks for. Only entries are sized; a SELL sells the whole
-position.
+(P4-3) then cap what sizing asks for. A SELL sells the whole position, or the share its
+`size_hint` asks for (`sell_amount`, P6-6).
 
 The modes, each a `mode` plus its settings (stored per bot as JSON, `bots.sizing`):
 - `all_in`: spend all the free cash, leaving room for the fee (the default, and the
@@ -133,6 +133,31 @@ def entry_amount(
     too_small = below_minimum(amount, price, rules)
     if too_small is not None:
         # Worded as before P4, so stored backtests that skipped a buy still reproduce.
+        return NotSized(too_small)
+    return Sized(amount=amount, detail=detail)
+
+
+def sell_amount(
+    held: Decimal, fraction: Decimal | None, price: Decimal, rules: MarketRules
+) -> Sized | NotSized:
+    """How much of a position of `held` a SELL sells at `price`: all of it, or a SELL's
+    `size_hint` share (P6-6, D58).
+
+    The share rounds down to the step. If what it would leave is too small for the market,
+    nobody could ever sell that, so everything goes instead. A share that's itself too small
+    is refused, never rounded up (D22).
+    """
+    if fraction is None or fraction >= 1:
+        amount, detail = held, f"all {_show(held)} held"
+    else:
+        amount = _down(held * fraction, rules.amount_step)
+        detail = f"{_show(fraction)} of {_show(held)} held = {_show(amount)}"
+        rest = held - amount
+        if amount > 0 and rest > 0 and below_minimum(rest, price, rules) is not None:
+            amount = held
+            detail += f"; the rest {_show(rest)} couldn't be sold, so all {_show(held)}"
+    too_small = below_minimum(amount, price, rules)
+    if too_small is not None:
         return NotSized(too_small)
     return Sized(amount=amount, detail=detail)
 

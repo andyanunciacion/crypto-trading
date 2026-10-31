@@ -10,7 +10,8 @@ The limits, each off when None, checked in this order:
   fall from the high-water mark, the most the account was ever worth.
 - `max_daily_loss_pct`: no buys once today's loss reaches this share of the equity at
   midnight in Manila, and none until the next midnight, even if prices come back.
-- `max_open_positions`: no buy that would open a position past this many.
+- `max_open_positions`: no buy that would open a position past this many. A buy that
+  adds to a position the bot holds opens none, so this never blocks it (P6-6).
 - `max_coin_exposure_pct`: no coin worth more than this share of equity. A buy that
   would pass it is shrunk to fit, or blocked if what fits is too small to trade.
 
@@ -79,6 +80,9 @@ class Account:
     open_positions: int  # open positions, plus buys still opening one
     coin_exposure: Decimal  # the coin bought: what's held at the bid, plus open buys
     daily_loss_hit: bool  # the daily loss limit already blocked a buy today
+    # The buying bot already holds the coin, or a buy of its is opening a position in it:
+    # this buy adds to that position (grid, DCA; P6-6) and opens none.
+    adds: bool = False
 
     def to_json(self) -> dict[str, JsonValue]:
         return {
@@ -88,6 +92,7 @@ class Account:
             "open_positions": self.open_positions,
             "coin_exposure": show(self.coin_exposure),
             "daily_loss_hit": self.daily_loss_hit,
+            "adds": self.adds,
         }
 
 
@@ -156,7 +161,7 @@ def _daily_loss(settings: RiskSettings, account: Account) -> RiskDecision | None
 
 def _open_positions(settings: RiskSettings, account: Account) -> RiskDecision | None:
     limit = settings.max_open_positions
-    if limit is None or account.open_positions < limit:
+    if limit is None or account.open_positions < limit or account.adds:
         return None
     return _blocked(
         "max_open_positions",

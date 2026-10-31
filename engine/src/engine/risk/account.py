@@ -86,8 +86,8 @@ class PaperAccounts:
             raise LookupError(f"no {self.mode} row in risk_settings")
         return RiskSettings.model_validate(row._asdict())
 
-    async def snapshot(self, symbol: str) -> Account:
-        """The account as a buy of `symbol` finds it (module docstring)."""
+    async def snapshot(self, bot_id: int, symbol: str) -> Account:
+        """The account as a buy of `symbol` by `bot_id` finds it (module docstring)."""
         coin, quote = symbol.split("/")
         in_quote = PositionRow.symbol.endswith(f"/{quote}")
         async with self._db.connect() as conn:
@@ -159,6 +159,7 @@ class PaperAccounts:
 
         holding = {(p.bot_id, p.symbol) for p in held}
         opening = {(b.bot_id, b.symbol) for b in buys} - holding
+        adds = (bot_id, symbol) in holding | opening
         exposure = sum(
             (value for p, value in at_bid if p.symbol.split("/")[0] == coin), Decimal(0)
         ) + sum(
@@ -172,6 +173,7 @@ class PaperAccounts:
             open_positions=len(holding) + len(opening),
             coin_exposure=exposure,
             daily_loss_hit=daily_loss_hit,
+            adds=adds,
         )
 
     async def market(self, bot_id: int, symbol: str, settings: RiskSettings) -> Market:

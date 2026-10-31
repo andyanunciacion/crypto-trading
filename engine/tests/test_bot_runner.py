@@ -31,10 +31,12 @@ from engine.bots.store import Bot, create_bot, load_bots
 from engine.exchange.models import Balance, Candle, MarketRules, Timeframe
 from engine.marketdata.store import CandleStore, Series
 from engine.risk.paper import PaperDesk
-from engine.risk.sizing import ALL_IN, AtrRisk, PercentOfEquity, Sizing
+from engine.risk.sizing import ALL_IN, AtrRisk, FixedAmount, PercentOfEquity, Sizing
 from engine.risk.stops import NO_STOPS, AtrMultiple, Percent, Stops
 from engine.strategies.base import Action, Position, Signal, Strategy, StrategyParams
+from engine.strategies.dca import Dca, DcaParams
 from engine.strategies.ema_crossover import EmaCrossover, EmaCrossoverParams
+from engine.strategies.grid import Grid, GridParams
 from engine.strategies.rsi_mean_reversion import RsiMeanReversion, RsiMeanReversionParams
 from shared.db.models import BotRow, OrderRow, RiskEventRow
 from shared.db.session import make_engine
@@ -162,6 +164,16 @@ class Setup:
         stops: Stops = NO_STOPS,
     ) -> Bot:
         strategy = EmaCrossover(EmaCrossoverParams(fast=3, slow=5))
+        return await self.bot_with(strategy, name, cash, sizing, stops)
+
+    async def bot_with(
+        self,
+        strategy: Strategy[Any],
+        name: str,
+        cash: str = "1000",
+        sizing: Sizing = ALL_IN,
+        stops: Stops = NO_STOPS,
+    ) -> Bot:
         bot_id = await create_bot(
             self.db,
             name=name,
@@ -279,7 +291,9 @@ async def test_a_bot_buys_on_a_cross_up_and_sells_on_the_cross_down(setup: Setup
     assert [(f.price, f.amount, f.fee) for f in buy.fills] == [
         (d("110"), d("9.0768"), d("0.9984480"))
     ]
-    assert await risk.position(bot.id, BTC) == Position(amount=d("9.0768"), avg_entry=d("110"))
+    assert await risk.position(bot.id, BTC) == Position(
+        amount=d("9.0768"), avg_entry=d("110"), last_entry=d("110")
+    )
     # The order records why: the signal, the risk check, the bot and its config.
     signal = buy.reason["signal"]
     assert isinstance(signal, dict) and signal["action"] == "buy"
@@ -384,7 +398,7 @@ async def test_whats_left_of_an_order_is_cancelled_at_the_next_candle(setup: Set
         "BTC": Balance(currency="BTC", free=d("4"), used=d("0"), total=d("4")),
     }
     assert await setup.desk.risk.position(bot.id, BTC) == Position(
-        amount=d("4"), avg_entry=d("110")
+        amount=d("4"), avg_entry=d("110"), last_entry=d("110")
     )
 
 
@@ -402,6 +416,138 @@ async def test_no_price_means_no_order_and_says_why(setup: Setup) -> None:
         (bot.id, "buy", "no price for BTC/USDT")
     ]
     assert await setup.desk.risk.get_order("b1-202610221230-b") is None
+
+
+# --- Adding to a position and selling part of it (P6-6, D58) -----------------------------
+
+EVERY_CANDLE = Dca(DcaParams(interval=1))  # buys on every candle
+
+
+async def test_a_dca_bot_adds_to_its_position_past_the_open_positions_limit(
+    setup: Setup,
+) -> None:
+    # One position allowed: the second buy adds to it, so it opens none.
+    await set_limits(setup.db, max_open_positions=1)
+    bot = await setup.bot_with(EVERY_CANDLE, "btc-dca", sizing=FixedAmount(amount=d("100")))
+    runner = setup.runner([bot])
+    await runner.warm_up(SERIES)
+    risk = setup.desk.risk
+
+    # 100 at the 100.05 limit: 0.99950... -> 0.9995 each time, filled at the 100 ask.
+    for i in (30, 31):
+        setup.tick()
+        setup.quotes.set(ask="100", bid="99.9")
+        await runner.on_closed(SERIES, candle(i))
+
+    first = await risk.get_order("b1-202610221230-b")
+    second = await risk.get_order("b1-202610221231-b")
+    assert first is not None and second is not None
+    assert (first.status, second.status) == ("closed", "closed")
+    assert second.reason["risk"] == {
+        "decision": "allowed",
+        "rule": "within_limits",
+        "detail": "within every limit",
+    }
+    assert await risk.position(bot.id, BTC) == Position(
+        amount=d("1.999"), avg_entry=d("100"), last_entry=d("100")
+    )
+
+
+async def test_an_add_keeps_the_opening_buys_stops_placed_from_the_new_average(
+    setup: Setup,
+) -> None:
+    bot = await setup.bot_with(
+        EVERY_CANDLE, "btc-dca", sizing=FixedAmount(amount=d("100")), stops=STOP5
+    )
+    runner = setup.runner([bot])
+    await runner.warm_up(SERIES)
+    setup.tick()
+    setup.quotes.set(ask="100", bid="99.9")
+    await runner.on_closed(SERIES, candle(30))
+    setup.tick()
+    setup.quotes.set(ask="98", bid="97.9")  # above the 95 stop
+    await runner.on_closed(SERIES, candle(31, "98"))
+
+    held = await setup.held(bot)
+    assert held is not None and held.levels is not None
+    # 0.9995 at 100, then 100 / 98.05 = 1.01988... -> 1.0198 at 98.
+    entry = (d("0.9995") * 100 + d("1.0198") * 98) / d("2.0193")
+    assert held.position == Position(amount=d("2.0193"), avg_entry=entry)
+    # The position's exits still number from the buy that opened it.
+    assert held.buy_id == "b1-202610221230-b"
+    assert (held.levels_entry, held.levels.stop) == (entry, entry * d("0.95"))
+
+
+async def test_no_add_while_a_stop_is_selling_the_position(setup: Setup) -> None:
+    bot = await setup.bot_with(
+        EVERY_CANDLE, "btc-dca", sizing=FixedAmount(amount=d("100")), stops=STOP5
+    )
+    runner = setup.runner([bot])
+    await runner.warm_up(SERIES)
+    setup.tick()
+    setup.quotes.set(ask="100", bid="99.9")
+    await runner.on_closed(SERIES, candle(30))
+    # The bid reaches the 95 stop with only 0.5 on offer: the exit sells half.
+    await setup.price(runner, bid="95", size="0.5")
+
+    setup.tick()
+    setup.quotes.set(ask="95.1", bid="95")
+    with capture_logs() as logs:
+        await runner.on_closed(SERIES, candle(31, "95"))
+
+    assert await setup.desk.risk.get_order("b1-202610221231-b") is None
+    assert [(log["side"], log["reason"]) for log in logs if log["event"] == "bot.skipped"] == [
+        ("buy", "its position is being sold")
+    ]
+
+
+async def test_a_dca_bots_next_dip_waits_for_a_further_fall_from_its_last_buy(
+    setup: Setup,
+) -> None:
+    # Every 30 candles (12:30 is one), 100 a buy, 5% dips. Bought at 100 on the schedule,
+    # then at 94 on the dip through 95. The next dip level is 5% below that last buy,
+    # 89.30: 92 doesn't reach it (the 96.9 average's 92.06 would), 89 does.
+    dca = Dca(DcaParams(interval=30, dip_percent=d("5")))
+    bot = await setup.bot_with(dca, "btc-dca", sizing=FixedAmount(amount=d("100")))
+    runner = setup.runner([bot])
+    await runner.warm_up(SERIES)
+
+    for i, close in ((30, "100"), (31, "94"), (32, "93"), (33, "92"), (34, "89")):
+        setup.tick()
+        setup.quotes.set(ask=close, bid=str(d(close) - d("0.1")))
+        await runner.on_closed(SERIES, candle(i, close))
+
+    async with setup.db.connect() as conn:
+        ids = (await conn.execute(select(OrderRow.client_order_id).order_by(OrderRow.id))).scalars()
+        assert list(ids) == ["b1-202610221230-b", "b1-202610221231-b", "b1-202610221234-b"]
+
+
+async def test_a_grid_bot_sells_part_of_its_position(setup: Setup) -> None:
+    # Lines every 5 from 90 to 110, 400 for the whole grid. Its 200-candle window starts
+    # at 107, above the first buy line.
+    setup.market.rest = [candle(i, "107") for i in range(-170, 30)]
+    grid = Grid(GridParams(lower=d("90"), upper=d("110"), grids=4))
+    bot = await setup.bot_with(grid, "btc-grid", sizing=FixedAmount(amount=d("400")))
+    runner = setup.runner([bot])
+    await runner.warm_up(SERIES)
+    risk = setup.desk.risk
+
+    # 97: below 105 and 100, so 2 of 4 slices: 200 at the 97.05 limit = 2.0607.
+    setup.tick()
+    setup.quotes.set(ask="97", bid="96.9")
+    await runner.on_closed(SERIES, candle(30, "97"))
+    # 106: at 105, the sell line of the slice bought below 100: half the 2.0607 held.
+    setup.tick()
+    setup.quotes.set(ask="106.1", bid="106")
+    await runner.on_closed(SERIES, candle(31, "106"))
+
+    sell = await risk.get_order("b1-202610221231-s")
+    assert sell is not None
+    assert (sell.amount, sell.status) == (d("1.0303"), "closed")
+    assert sell.reason["sell"] == {"detail": "0.5 of 2.0607 held = 1.0303"}
+    assert await risk.position(bot.id, BTC) == Position(
+        amount=d("1.0304"), avg_entry=d("97"), last_entry=d("97")
+    )
 
 
 # --- Isolation ---------------------------------------------------------------------------
@@ -519,7 +665,9 @@ async def test_a_killed_engine_carries_on_from_the_database(setup: Setup) -> Non
     canceled = await risk.get_order("b1-202610221230-b")
     assert canceled is not None and (canceled.status, canceled.filled) == ("canceled", d("4"))
     assert (
-        await risk.position(bot.id, BTC) == position == Position(amount=d("4"), avg_entry=d("110"))
+        await risk.position(bot.id, BTC)
+        == position
+        == Position(amount=d("4"), avg_entry=d("110"), last_entry=d("110"))
     )
     # 1000 - 440 - 0.44 fee = 559.56, nothing held any more; totals as before the kill.
     after = await risk.balances(bot.id)

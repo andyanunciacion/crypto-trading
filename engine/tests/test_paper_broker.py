@@ -13,7 +13,7 @@ from typing import Any, get_args
 
 import pytest
 from pydantic import JsonValue
-from sqlalchemy import URL, func, select, text
+from sqlalchemy import URL, func, insert, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 from structlog.testing import capture_logs
 
@@ -28,7 +28,7 @@ from engine.brokers.base import (
 from engine.brokers.paper import PaperBroker
 from engine.exchange.models import CLIENT_ORDER_ID_PATTERN, Balance, MarketRules, OrderRequest
 from engine.strategies.base import Position
-from shared.db.models import ORDER_STATUSES, TRADING_MODES, OrderRow
+from shared.db.models import ORDER_STATUSES, TRADING_MODES, OrderRow, PositionRow
 from shared.db.session import make_engine
 from shared.prices import PriceUpdate
 from shared.testing import insert_bot
@@ -181,8 +181,52 @@ async def test_a_buy_fills_in_parts_at_the_ask_then_at_the_later_ask(setup: Setu
     # The 151.6515 still held (at the limit) is released; 1.5 x 100.5 = 150.75 + 0.15075
     # fee is paid. The 0.75075 left over comes back: 798.2985 + 0.75075 = 799.04925.
     assert await setup.broker.balances(BOT) == {"USDT": usdt("799.04925"), "BTC": btc("2")}
-    # Entry (0.5 x 100 + 1.5 x 100.5) / 2 = 100.375.
-    assert await setup.broker.position(BOT, BTC) == Position(amount=d("2"), avg_entry=d("100.375"))
+    # Entry (0.5 x 100 + 1.5 x 100.5) / 2 = 100.375: one buy, so that's what it paid too.
+    assert await setup.broker.position(BOT, BTC) == Position(
+        amount=d("2"), avg_entry=d("100.375"), last_entry=d("100.375")
+    )
+
+
+async def test_a_position_knows_what_its_last_buy_paid(setup: Setup) -> None:
+    # A first position, bought at 100 and sold: its buy no longer counts.
+    await setup.broker.place_order(BOT, order("buy", "1", "101"), REASON)
+    await setup.broker.place_order(BOT, order("sell", "1", "99", "b1-202610231200-s"), REASON)
+    assert await setup.broker.position(BOT, BTC) is None
+
+    # Then 1 at 90, and a buy of 1 filled 0.5 at 80 and 0.5 at 82 (taking as the ask rose).
+    setup.clock.now = T0 + timedelta(minutes=1)
+    setup.quotes.price = quote(ask="90", ts=setup.clock.now)
+    await setup.broker.place_order(BOT, order("buy", "1", "91", "b1-202610231201-b"), REASON)
+    setup.clock.now = T0 + timedelta(minutes=2)
+    setup.quotes.price = quote(ask="80", ask_size="0.5", ts=setup.clock.now)
+    await setup.broker.place_order(BOT, order("buy", "1", "83", "b1-202610231202-b"), REASON)
+    setup.clock.now += timedelta(seconds=1)
+    await setup.broker.on_price(quote(ask="82", ts=setup.clock.now))
+
+    # The last buy paid (0.5 x 80 + 0.5 x 82) / 1 = 81; the average is (90 + 81) / 2.
+    assert await setup.broker.position(BOT, BTC) == Position(
+        amount=d("2"), avg_entry=d("85.5"), last_entry=d("81")
+    )
+
+
+async def test_a_position_no_buy_filled_has_no_last_buy(setup: Setup) -> None:
+    async with setup.db.begin() as conn:
+        await conn.execute(
+            insert(PositionRow).values(
+                bot_id=BOT,
+                mode="paper",
+                exchange="mexc",
+                symbol=BTC,
+                side="long",
+                amount=d("1"),
+                avg_entry=d("100"),
+                fees_paid=d("0"),
+                opened_at=T0,
+                realized_pnl=d("0"),
+            )
+        )
+
+    assert await setup.broker.position(BOT, BTC) == Position(amount=d("1"), avg_entry=d("100"))
 
 
 async def test_an_unchanged_quote_does_not_fill_the_same_size_again(setup: Setup) -> None:
@@ -369,7 +413,9 @@ async def test_a_new_broker_carries_on_from_the_database(setup: Setup) -> None:
 
     assert await restarted.get_order(placed.client_order_id) == placed
     assert await restarted.balances(BOT) == await setup.broker.balances(BOT)
-    assert await restarted.position(BOT, BTC) == Position(amount=d("0.4"), avg_entry=d("100"))
+    assert await restarted.position(BOT, BTC) == Position(
+        amount=d("0.4"), avg_entry=d("100"), last_entry=d("100")
+    )
     # The open rest still fills. Which orders were taking isn't stored, so after a
     # restart it rests and fills at its 101 limit, not the 100.5 ask: pessimistic.
     fills = await restarted.on_price(quote(ask="100.5"))
@@ -395,7 +441,9 @@ async def test_a_crash_in_the_middle_of_a_fill_writes_none_of_it(
     restarted = setup.fresh_broker()
     assert await restarted.get_order(placed.client_order_id) == placed
     assert await restarted.balances(BOT) == balances
-    assert await restarted.position(BOT, BTC) == Position(amount=d("0.4"), avg_entry=d("100"))
+    assert await restarted.position(BOT, BTC) == Position(
+        amount=d("0.4"), avg_entry=d("100"), last_entry=d("100")
+    )
     # So the restarted engine fills the rest once, not on top of a half-written fill.
     fills = await restarted.on_price(quote(ask="100.5"))
     assert [(f.price, f.amount) for f in fills] == [(d("101"), d("0.6"))]

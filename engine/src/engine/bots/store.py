@@ -285,15 +285,19 @@ async def _with_keeper(conn: AsyncConnection, bot: Bot, switch_policy: str) -> B
     if switch_policy != "keep":
         return bot
     mode: Mode = "paper"  # _bot refuses every other mode
-    held = await conn.scalar(
-        select(PositionRow.id).where(
+    opened_at = await conn.scalar(
+        select(PositionRow.opened_at).where(
             PositionRow.bot_id == bot.id,
             PositionRow.symbol == bot.symbol,
             PositionRow.mode == mode,
             PositionRow.closed_at.is_(None),
         )
     )
-    buy = None if held is None else await opening_buy(conn, bot.id, bot.symbol, mode=mode)
+    buy = (
+        None
+        if opened_at is None
+        else await opening_buy(conn, bot.id, bot.symbol, opened_at, mode=mode)
+    )
     if buy is None:
         return bot  # flat, or a position no buy of this bot opened
     config = buy.reason.get("strategy_config")

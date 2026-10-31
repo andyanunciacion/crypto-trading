@@ -14,6 +14,7 @@ from engine.backtest.models import (
     Fill,
     default_slippage,
 )
+from engine.backtest.report import trades
 from engine.backtest.simulator import (
     BacktestError,
     fee,
@@ -26,7 +27,9 @@ from engine.risk.sizing import AtrRisk, FixedAmount, PercentOfEquity
 from engine.risk.stops import AtrMultiple, Percent, Stops
 from engine.strategies.base import Position, Signal, Strategy, StrategyParams
 from engine.strategies.bollinger_breakout import BollingerBreakout, BollingerBreakoutParams
+from engine.strategies.dca import Dca, DcaParams
 from engine.strategies.ema_crossover import EmaCrossover, EmaCrossoverParams
+from engine.strategies.grid import Grid, GridParams
 from engine.strategies.rsi_mean_reversion import RsiMeanReversion, RsiMeanReversionParams
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
@@ -59,6 +62,7 @@ class ScriptParams(StrategyParams):
     buys: tuple[int, ...] = ()  # hours (from T0) of the candles to signal BUY on
     sells: tuple[int, ...] = ()
     size_hint: Decimal | None = None
+    sell_hint: Decimal | None = None  # the share of the position each SELL sells
     warmup: int = 1
 
 
@@ -79,12 +83,23 @@ class Script(Strategy[ScriptParams]):
         if hour in self.params.buys:
             return Signal(action="buy", ts=ts, reason="scripted", size_hint=self.params.size_hint)
         if hour in self.params.sells:
-            return Signal(action="sell", ts=ts, reason="scripted")
+            return Signal(action="sell", ts=ts, reason="scripted", size_hint=self.params.sell_hint)
         return Signal(action="hold", ts=ts, reason="scripted")
+
+
+class Scaling(Script):
+    """A script that may add to its position, as grid and DCA do (P6-6)."""
+
+    name = "scaling"
+    scales_in = True
 
 
 def script(**params: Any) -> Script:
     return Script(ScriptParams(**params))
+
+
+def scaling(**params: Any) -> Scaling:
+    return Scaling(ScriptParams(**params))
 
 
 def config[P: StrategyParams](
@@ -442,6 +457,107 @@ def test_buy_while_holding_and_sell_while_flat_are_skipped() -> None:
     ]
 
 
+# --- Adding to a position and selling part of it (P6-6, D58) ----------------------------
+
+
+def test_a_scaling_strategy_adds_to_its_position() -> None:
+    # 200 each time: 2 at candle 2's open of 100, then 2.5 at candle 3's open of 80. That's
+    # 4.5 held at an average of 400 / 4.5 = 88.88..., sold at 80 on candle 5: a loss of 40.
+    candles = [*flat(range(3)), *flat(range(3, 6), "80")]
+    strategy = scaling(buys=(1, 2), sells=(4,))
+
+    result = run_backtest(
+        strategy, candles, config(strategy, 1, 6, sizing=FixedAmount(amount=D(200)))
+    )
+
+    assert [(f.side, f.price, f.amount) for f in result.fills] == [
+        ("buy", D(100), D(2)),
+        ("buy", D(80), D("2.5")),
+        ("sell", D(80), D("4.5")),
+    ]
+    assert result.equity_curve[2] == EquityPoint(ts=at(3), equity=D(600) + D("4.5") * 80)
+    assert result.final_cash == D(960)
+    (trade,) = trades(result.fills)
+    assert (trade.entry_ts, trade.entry_price, trade.pnl) == (at(2), D(400) / D("4.5"), D(-40))
+
+
+def test_an_add_is_sized_by_the_equity_coins_included() -> None:
+    # 40% of the equity each time. Buy 4 at 100, leaving 600. At 120 the account is worth
+    # 600 + 4 x 120 = 1080: 40% is 432, 432 / 120 = 3.6 (40% of the cash alone would be 2).
+    candles = [*flat(range(3)), *flat(range(3, 5), "120")]
+    strategy = scaling(buys=(1, 2))
+
+    result = run_backtest(
+        strategy, candles, config(strategy, 1, 5, sizing=PercentOfEquity(percent=D(40)))
+    )
+
+    assert [(f.price, f.amount) for f in result.fills] == [(D(100), D(4)), (D(120), D("3.6"))]
+
+
+def test_a_sell_hint_sells_that_share_of_the_position() -> None:
+    # All in: 10 at 100. A quarter sold on candle 3 (2.5), then a quarter of the 7.5 left.
+    candles = flat(range(5))
+    strategy = scaling(buys=(1,), sells=(2, 3), sell_hint=D("0.25"))
+
+    result = run_backtest(strategy, candles, config(strategy, 1, 5))
+
+    assert [(f.side, f.amount) for f in result.fills] == [
+        ("buy", D(10)),
+        ("sell", D("2.5")),
+        ("sell", D("1.875")),
+    ]
+    assert result.final_amount == D("5.625")
+    assert len(trades(result.fills)) == 2
+
+
+def test_an_add_places_the_stops_again_from_the_new_average() -> None:
+    # 120 each: 1.2 at 100 (take-profit 10% above: 110), then 2 at 60. Now 3.2 held at
+    # 240 / 3.2 = 75, so the take-profit is 82.5: candle 4's high of 83 sells it all there.
+    candles = [
+        *flat(range(3)),
+        hl(3, "60", "60", "60", "60"),
+        hl(4, "60", "83", "60", "80"),
+        hl(5, "80", "80", "80", "80"),
+    ]
+    strategy = scaling(buys=(1, 2))
+    stops = Stops(take_profit=Percent(percent=D(10)))
+    sizing = FixedAmount(amount=D(120))
+
+    result = run_backtest(strategy, candles, config(strategy, 1, 6, stops=stops, sizing=sizing))
+
+    assert [(f.ts, f.side, f.price, f.amount, f.exit) for f in result.fills] == [
+        (at(2), "buy", D(100), D("1.2"), None),
+        (at(3), "buy", D(60), D(2), None),
+        (at(4), "sell", D("82.5"), D("3.2"), "take_profit"),
+    ]
+    assert result.final_cash == D(1024)  # 1000 - 240 + 3.2 x 82.5
+
+
+def test_a_partial_sell_keeps_the_stops() -> None:
+    # 10 at 100, stop-loss 5% below: 95. Half sold at candle 3's open; the rest hits 95.
+    candles = [*flat(range(4)), hl(4, "100", "100", "94", "96"), *flat(range(5, 6), "96")]
+    strategy = scaling(buys=(1,), sells=(2,), sell_hint=D("0.5"))
+    stops = Stops(stop_loss=Percent(percent=D(5)))
+
+    result = run_backtest(strategy, candles, config(strategy, 1, 6, stops=stops))
+
+    assert [(f.side, f.price, f.amount, f.exit) for f in result.fills] == [
+        ("buy", D(100), D(10), None),
+        ("sell", D(100), D(5), None),
+        ("sell", D(95), D(5), "stop_loss"),
+    ]
+
+
+def test_a_strategy_that_doesnt_scale_still_buys_only_when_flat() -> None:
+    # The same script without scales_in: its second BUY is skipped, as before P6-6.
+    candles = flat(range(4))
+    strategy = script(buys=(1, 2))
+
+    result = run_backtest(strategy, candles, config(strategy, 1, 4))
+
+    assert [(s.signal_ts, s.reason) for s in result.skipped] == [(at(2), "already holding")]
+
+
 def test_a_signal_on_the_last_candle_is_not_filled() -> None:
     candles = flat(range(4))
     strategy = script(buys=(3,))
@@ -506,6 +622,90 @@ def test_ema_crossover_trades_where_it_crosses() -> None:
         (at(up + 1), "buy", D(110)),
         (at(down + 1), "sell", D(90)),
     ]
+
+
+def test_a_grid_buys_slices_down_and_sells_them_up() -> None:
+    # Lines every 5 from 90 to 110; 400 USDT for the whole grid, 100 a slice. Each signal
+    # fills at the next candle's open, which is that candle's close here (flat candles).
+    #   200: close 100, below line 105: 1 slice     -> buys 100 / 100 = 1 at 100
+    #   202: close  80, below 100, 95, 90: 3 more   -> buys 300 / 80 = 3.75 at 80
+    #   204: close 106, at line 105: holds 1 of 4   -> sells 3/4 of 4.75 = 3.5625 at 106
+    #   206: close 110, the top line: sells the rest  -> 1.1875 at 110
+    # 1000 - 100 - 300 + 377.625 + 130.625 = 1108.25.
+    strategy = Grid(GridParams(lower=D(90), upper=D(110), grids=4))
+    path = ["100", "100", "80", "80", "106", "106", "110", "110"]
+    closes = ["107"] * strategy.warmup_candles + path
+    candles = [candle(h, close) for h, close in enumerate(closes)]
+    cfg = config(strategy, strategy.warmup_candles, len(closes), sizing=FixedAmount(amount=D(400)))
+
+    result = run_backtest(strategy, candles, cfg)
+
+    assert [(f.side, f.price, f.amount) for f in result.fills] == [
+        ("buy", D(100), D(1)),
+        ("buy", D(80), D("3.75")),
+        ("sell", D(106), D("3.5625")),
+        ("sell", D(110), D("1.1875")),
+    ]
+    assert result.final_cash == D("1108.25")
+    assert [t.pnl for t in trades(result.fills)] == [D("77.625"), D("30.625")]
+
+
+def test_dca_buys_on_its_schedule_and_its_dips_and_takes_its_profit() -> None:
+    # Hourly from 00:00 UTC, a buy every 24 candles, 100 USDT each; 20% dip, 40% profit.
+    #   24: scheduled             -> 1 at 100
+    #   26: close 50, below 80    -> 2 at 50; now 3 at an average of 66.66...
+    #   30: close 100, above 93.3 -> sells all 3 at 100
+    #   48: scheduled             -> 1 at 100
+    strategy = Dca(DcaParams(interval=24, dip_percent=D(20), take_profit_percent=D(40)))
+    closes = ["100"] * 26 + ["50"] * 4 + ["100"] * 20
+    candles = [candle(h, close) for h, close in enumerate(closes)]
+    cfg = config(strategy, 2, len(closes), sizing=FixedAmount(amount=D(100)))
+
+    result = run_backtest(strategy, candles, cfg)
+
+    assert [(f.ts, f.side, f.price, f.amount) for f in result.fills] == [
+        (at(25), "buy", D(100), D(1)),
+        (at(27), "buy", D(50), D(2)),
+        (at(31), "sell", D(100), D(3)),
+        (at(49), "buy", D(100), D(1)),
+    ]
+    assert (result.final_cash, result.final_equity) == (D(1000), D(1100))
+
+
+def test_dca_spaces_its_dip_buys_from_the_last_buy() -> None:
+    # 100 a buy, 5% dips, no take-profit. 1 at 100 (scheduled), then 94 dips through 95:
+    # 1.0638 at 94. Version 1's next level was 5% below the 96.9 average, 92.06, which
+    # each wobble from 93 to 92 crosses. Version 2's is 5% below the last buy at 94:
+    # 89.30, first crossed by the close at 89.
+    strategy = Dca(DcaParams(interval=24, dip_percent=D(5)))
+    closes = ["100"] * 26 + ["94", "94", "93", "92", "93", "92", "93", "89", "89"]
+    candles = [candle(h, close) for h, close in enumerate(closes)]
+    cfg = config(strategy, 2, len(closes), sizing=FixedAmount(amount=D(100)))
+
+    result = run_backtest(strategy, candles, cfg)
+
+    assert [(f.ts, f.price, f.amount) for f in result.fills] == [
+        (at(25), D(100), D(1)),
+        (at(27), D(94), D("1.0638")),
+        (at(34), D(89), D("1.1235")),
+    ]
+
+
+def test_a_position_remembers_its_last_buy() -> None:
+    # 2 at 100, 2.5 at 80; a quarter sold keeps the last buy at 80. Seen by the strategy
+    # on candle 4, after the sell filled at candle 4's open.
+    candles = [*flat(range(3)), *flat(range(3, 6), "80")]
+    seen: list[Position | None] = []
+
+    class Watching(Scaling):
+        def decide(self, window: Sequence[Candle], position: Position | None) -> Signal:
+            seen.append(position)
+            return super().decide(window, position)
+
+    strategy = Watching(ScriptParams(buys=(1, 2), sells=(3,), sell_hint=D("0.25")))
+    run_backtest(strategy, candles, config(strategy, 1, 6, sizing=FixedAmount(amount=D(200))))
+
+    assert seen[-2] == Position(amount=D("3.375"), avg_entry=D(400) / D("4.5"), last_entry=D(80))
 
 
 def test_rsi_mean_reversion_trades_where_it_signals() -> None:

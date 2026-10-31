@@ -170,6 +170,21 @@ def test_one_slot_left_allows() -> None:
     assert check_buy(DEFAULTS, account, buy(), RULES).decision == WITHIN_LIMITS
 
 
+def test_adding_to_a_position_the_bot_holds_opens_none() -> None:
+    # A grid or DCA buy into a coin the bot already holds (P6-6): still 3 positions after.
+    account = replace(FLAT, open_positions=3, adds=True)
+    assert check_buy(DEFAULTS, account, buy(), RULES).decision == WITHIN_LIMITS
+
+
+def test_an_add_is_still_capped_by_the_coin_exposure() -> None:
+    # 200 held, 25% of 1000 = 250: only 50 more fits, 0.5 BTC at 100.
+    account = replace(FLAT, open_positions=3, coin_exposure=d("200"), adds=True)
+    checked = check_buy(DEFAULTS, account, buy(), RULES)
+
+    assert checked.decision.decision == "resized"
+    assert checked.request == buy("0.5")
+
+
 # --- Max exposure per coin -------------------------------------------------------------
 
 

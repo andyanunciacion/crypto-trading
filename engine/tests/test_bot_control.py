@@ -546,7 +546,7 @@ async def test_stop_cancels_its_orders_and_keeps_its_position(setup: Setup) -> N
         setup.clock.now,
     )
     assert await setup.desk.risk.position(bot_id, BTC) == Position(
-        amount=d("5.0768"), avg_entry=d("110")
+        amount=d("5.0768"), avg_entry=d("110"), last_entry=d("110")
     )
     # It never acts again: not even to skip the next cross up's BUY (it still holds).
     setup.clock.now += MINUTE
@@ -717,7 +717,7 @@ async def test_keep_leaves_the_position_to_the_config_that_bought_it(setup: Setu
         )
         assert await orders(setup, bot_id) == [BUY]
         assert await setup.desk.risk.position(bot_id, BTC) == Position(
-            amount=d("9.0768"), avg_entry=d("110")
+            amount=d("9.0768"), avg_entry=d("110"), last_entry=d("110")
         )
         # A restart now would carry on the same way.
         (loaded,) = await load_bots(setup.db, "mexc")

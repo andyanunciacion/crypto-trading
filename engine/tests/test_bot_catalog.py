@@ -16,10 +16,15 @@ NOW = datetime(2026, 10, 27, 12, 0, tzinfo=UTC)
 
 
 def defaults(choice: Choice) -> dict[str, Any]:
-    """Each setting at its default, or, for a required one, at its minimum (or 1)."""
+    """Each setting at its default, or, for a required one, just above its minimum (or
+    0), each required one a step above the one before: a grid's `lower` below its
+    `upper`."""
     values: dict[str, Any] = {}
+    required = 0
     for spec in choice.fields:
-        values[spec.name] = spec.default or str(int(spec.minimum or 0) + 1)
+        if spec.default is None:
+            required += 1
+        values[spec.name] = spec.default or str(int(spec.minimum or 0) + required)
     return values
 
 

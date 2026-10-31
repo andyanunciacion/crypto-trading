@@ -31,6 +31,9 @@ class Position(_Frozen):
 
     amount: Decimal = Field(gt=0)
     avg_entry: Decimal = Field(gt=0)
+    # What the last buy into it paid (its fills' average): DCA measures its dips from it
+    # (D58). None when no buy of the bot is known (a position made by hand).
+    last_entry: Decimal | None = Field(default=None, gt=0)
 
 
 class Signal(_Frozen):
@@ -45,7 +48,9 @@ class Signal(_Frozen):
     reason: str
     indicators: dict[str, float] = Field(default_factory=dict)
     # Optional hints for the RiskManager, which decides the real size and stop (P4).
-    size_hint: Decimal | None = Field(default=None, gt=0, le=1)  # fraction of the normal size
+    # On a BUY, the fraction of the normal size (the bot's sizing). On a SELL, the fraction
+    # of the position to sell (P6-6); None sells it all.
+    size_hint: Decimal | None = Field(default=None, gt=0, le=1)
     stop: Decimal | None = Field(default=None, gt=0)  # stop-loss price
 
 
@@ -61,6 +66,9 @@ class Strategy[P: StrategyParams](ABC):
     name: ClassVar[str]
     version: ClassVar[int]  # bump when the logic changes, so stored results stay comparable
     params_model: ClassVar[type[StrategyParams]]
+    # Whether it may BUY while holding, adding to its position (grid, DCA; P6-6, D58).
+    # Every other strategy buys only when flat: a BUY while holding is skipped.
+    scales_in: ClassVar[bool] = False
 
     def __init__(self, params: P) -> None:
         self.params = params

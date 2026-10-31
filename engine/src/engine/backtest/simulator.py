@@ -8,14 +8,20 @@ The fill model:
   in the quote currency.
 - Spot, long only, one position at a time. A BUY is sized by the run's sizing mode,
   as a paper bot's is (risk/sizing.py, D39; all-in by default), and a SELL sells
-  everything. An ATR-sized BUY uses the ATR of the candles up to its signal's candle,
-  what a live bot knows when it decides.
+  everything, or the share of it its `size_hint` asks for (`sell_amount`). An
+  ATR-sized BUY uses the ATR of the candles up to its signal's candle, what a live bot
+  knows when it decides.
+- A BUY while holding is skipped, unless its strategy `scales_in` (grid, DCA; P6-6,
+  D58): then it adds to the position, sized with the coins held counted in the equity,
+  and the position's entry is averaged as the paper ledger averages it.
 - Amounts round down to the market's step. Orders below its minimums are skipped,
   never rounded up (D22).
 - Stops (risk/stops.py, D40), if the run has any, are placed from a BUY's fill price
   and checked on every candle from that one on, after its open: a hit sells the whole
   position at the stop's price, with slippage and the fee like any fill. A BUY whose
-  stops can't be placed (no ATR) is skipped.
+  stops can't be placed (no ATR) is skipped. A BUY that adds to the position places
+  them again from its new average entry (`reentry`), as a bot does; a partial sell
+  leaves them where they were.
 
 Auto-switching (P6-5, D55), if the run has it, switches the strategy as an
 auto-switching bot does (bots/runner.py), with the same rule (regime/switcher.py):
@@ -60,6 +66,7 @@ from engine.risk.sizing import (
     below_minimum,
     entry_amount,
     lookback,
+    sell_amount,
 )
 from engine.risk.stops import (
     NO_STOPS,
@@ -68,6 +75,7 @@ from engine.risk.stops import (
     after_candle,
     exit_on_candle,
     levels_at_entry,
+    reentry,
 )
 from engine.risk.stops import lookback as stops_lookback
 from engine.strategies.base import Position, Signal, Strategy, StrategyParams
@@ -165,26 +173,31 @@ class _Account:
         signal: Signal,
         candle: Candle,
         history: Sequence[Candle],
-        decided_by: Strategy[Any] | None = None,
+        decider: Strategy[Any],
+        *,
+        recorded: bool = False,
     ) -> None:
         """Fill `signal` (from the previous candle) at `candle`'s open, if it can be.
 
         `history` is the closed candles up to the signal's, for ATR sizing and stops.
-        `decided_by` is the config whose signal it is, in an auto-switching run.
+        `decider` is the config whose signal it is; `recorded` names it on the fill (an
+        auto-switching run).
         """
         side = _side(signal)
         price = fill_price(side, candle.open, self.config.slippage_rate)
         rules = self.config.market_rules
-        exits: ExitState | None = None
+        adding = side == "buy" and self.position is not None
+        levels: ExitState | None = None
         if side == "buy":
-            if self.position is not None:
+            if adding and not decider.scales_in:
                 self.skip(signal, side, "already holding")
                 return
             sizing = self.config.sizing
             sized = entry_amount(
                 sizing,
                 cash=self.cash,
-                equity=self.cash,  # flat when buying: the cash is all there is
+                # The coins at the open, the price a bot would see as it buys.
+                equity=self.cash + self.amount * candle.open,
                 price=price,
                 fee_rate=self.config.fee_rate,
                 rules=rules,
@@ -198,25 +211,47 @@ class _Account:
             stops = self.config.stops
             if stops != NO_STOPS:
                 atr = atr_of(history, stops.atr_period, self.config.timeframe)
-                levels = levels_at_entry(stops, price, atr if stops.uses_atr else None)
-                if isinstance(levels, NoLevels):
-                    # Not opened without the stop it was told to have.
-                    self.skip(signal, side, levels.reason)
+                placed = levels_at_entry(stops, price, atr if stops.uses_atr else None)
+                if isinstance(placed, NoLevels):
+                    # Not bought without the stop it was told to have, as a bot skips it.
+                    self.skip(signal, side, placed.reason)
                     return
-                exits = levels
+                levels = placed
         else:
             if self.position is None:
                 self.skip(signal, side, "nothing to sell")
                 return
-            amount = self.position.amount
-            too_small = below_minimum(amount, price, rules)
-            if too_small is not None:
-                self.skip(signal, side, too_small)
+            sold = sell_amount(self.position.amount, signal.size_hint, price, rules)
+            if isinstance(sold, NotSized):
+                self.skip(signal, side, sold.reason)
                 return
-        by = None if decided_by is None else config_ref(decided_by)
+            amount = sold.amount
+        by = config_ref(decider) if recorded else None
         self._fill(candle.ts, side, price, amount, decided_by=by)
-        self.exits = exits  # a buy's levels; a sell leaves none
-        self.opened_by = decided_by if side == "buy" else None
+        if self.position is None:
+            self.exits = None  # sold out
+            self.opened_by = None
+        elif adding:
+            self.exits = self._exits_after_add(levels)
+        elif side == "buy":
+            self.exits = levels
+            self.opened_by = decider if recorded else None
+        # A partial sell leaves the average entry, and so the stops, as they were.
+
+    def _exits_after_add(self, levels: ExitState | None) -> ExitState | None:
+        """The stops of a position a buy just added to, placed again from its new
+        average entry, keeping the trailing stop's peak (`reentry`), as a bot does
+        (bots/runner.py's _levels). `levels` are the add's own, placed from its price."""
+        assert self.position is not None  # just bought
+        if levels is None:
+            return None  # the run has no stops
+        entry = self.position.avg_entry
+        if self.exits is None:
+            # A stop's exit was too small to sell: placed afresh, as a bot with no levels.
+            placed = levels_at_entry(self.config.stops, entry, levels.atr)
+        else:
+            placed = reentry(self.exits, self.config.stops, entry)
+        return None if isinstance(placed, NoLevels) else placed
 
     def close(self, candle: Candle) -> None:
         """Sell the whole position at `candle`'s open: an auto-switch's `close_first`."""
@@ -263,12 +298,22 @@ class _Account:
         decided_by: ConfigRef | None = None,
     ) -> None:
         paid = fee(price, amount, self.config.fee_rate)
+        position = self.position
         if side == "buy":
             self.cash -= price * amount + paid
-            self.position = Position(amount=amount, avg_entry=price)
+            # Each buy is one fill here, so the last buy paid its price (D58).
+            if position is None:
+                self.position = Position(amount=amount, avg_entry=price, last_entry=price)
+            else:
+                # Averaged as the paper ledger does (brokers/ledger.py), fees left out.
+                total = position.amount + amount
+                entry = (position.avg_entry * position.amount + price * amount) / total
+                self.position = Position(amount=total, avg_entry=entry, last_entry=price)
         else:
+            assert position is not None  # callers sell only what's held
             self.cash += price * amount - paid
-            self.position = None
+            left = position.amount - amount
+            self.position = None if left == 0 else position.model_copy(update={"amount": left})
         self.total_fees += paid
         fill = Fill(
             ts=ts,
@@ -309,8 +354,8 @@ def run_backtest[P: StrategyParams](
     equity_curve: list[EquityPoint] = []
     switches: list[BacktestSwitch] = []
     active: Strategy[Any] = strategy
-    # The signal to fill at the next open, and (auto-switching only) whose it is.
-    pending: tuple[Signal, Strategy[Any] | None] | None = None
+    # The signal to fill at the next open, and whose it is.
+    pending: tuple[Signal, Strategy[Any]] | None = None
     close_pending = False  # a `close_first` switch sells at the next open
 
     def on_candle(decider: Strategy[Any], i: int) -> Signal:
@@ -326,7 +371,8 @@ def run_backtest[P: StrategyParams](
             if pending is not None:
                 # Up to the signal's candle (i - 1): a live bot doesn't know candle i yet.
                 history = candles[max(0, i - atr_window) : i] if atr_window else ()
-                account.execute(pending[0], candle, history, pending[1])
+                signal_, decider_ = pending
+                account.execute(signal_, candle, history, decider_, recorded=auto is not None)
                 pending = None
             if close_pending:
                 account.close(candle)
@@ -336,7 +382,7 @@ def run_backtest[P: StrategyParams](
                 EquityPoint(ts=candle.ts, equity=account.cash + account.amount * candle.close)
             )
         signal: Signal | None = on_candle(active, i)
-        decider = None if auto is None else active
+        decider = active
         keeper = _keeper(auto, account, active)
         if keeper is not None and signal is not None:
             # As a live bot's _step: the position is the keeper's to sell, and only its
@@ -346,7 +392,7 @@ def run_backtest[P: StrategyParams](
                 why = f"its position is {config_ref(keeper).label}'s to sell (switched with keep)"
                 account.skip(signal, _side(signal), why)
             kept = on_candle(keeper, i)
-            signal, decider = (kept, keeper) if kept.action == "sell" else (None, None)
+            signal, decider = (kept, keeper) if kept.action == "sell" else (None, active)
         if signal is not None and signal.action != "hold":
             signals.append(signal)
             if i == last:
@@ -370,7 +416,11 @@ def run_backtest[P: StrategyParams](
         )
         log.debug("backtest.switch", **switches[-1].model_dump(mode="json"))
         if auto.settings.policy == "close_first":
-            selling = pending is not None and pending[0].action == "sell"
+            # A SELL of the whole position already does what closing would; one of part
+            # of it (P6-6) leaves the rest to close.
+            selling = (
+                pending is not None and pending[0].action == "sell" and pending[0].size_hint is None
+            )
             buying = pending is not None and pending[0].action == "buy"
             if not selling and (account.position is not None or buying):
                 if i == last:

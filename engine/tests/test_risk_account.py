@@ -164,7 +164,7 @@ async def daily_loss_block(db: AsyncEngine, ts: datetime, rule: str = "daily_los
 
 
 async def test_the_account_counts_every_bot(db: AsyncEngine) -> None:
-    assert await accounts(db).snapshot(BTC) == Account(
+    assert await accounts(db).snapshot(3, BTC) == Account(
         equity=d("3050"),  # 2600 cash + 5 BTC at the 90 bid
         # 3000.5 deposited, +150 by the first closed trade, then -50.
         peak=d("3150.5"),
@@ -176,13 +176,22 @@ async def test_the_account_counts_every_bot(db: AsyncEngine) -> None:
     )
 
 
+async def test_a_buy_adds_when_its_bot_holds_or_is_opening_the_coin(db: AsyncEngine) -> None:
+    # Bot 1 holds BTC; bot 2's open buy is opening a BTC position; bot 3 has only ETH on order.
+    assert (await accounts(db).snapshot(1, BTC)).adds
+    assert (await accounts(db).snapshot(2, BTC)).adds
+    assert not (await accounts(db).snapshot(3, BTC)).adds
+    assert (await accounts(db).snapshot(3, "ETH/USDT")).adds
+    assert not (await accounts(db).snapshot(1, "ETH/USDT")).adds
+
+
 async def test_exposure_is_per_coin(db: AsyncEngine) -> None:
-    account = await accounts(db, Quotes({BTC: "90", "ETH/USDT": "50"})).snapshot("ETH/USDT")
+    account = await accounts(db, Quotes({BTC: "90", "ETH/USDT": "50"})).snapshot(1, "ETH/USDT")
     assert account.coin_exposure == d("100")  # the open buy of 2 ETH at 50
 
 
 async def test_a_position_with_no_price_yet_counts_at_its_entry(db: AsyncEngine) -> None:
-    account = await accounts(db, Quotes({})).snapshot(BTC)
+    account = await accounts(db, Quotes({})).snapshot(3, BTC)
     assert (account.equity, account.coin_exposure) == (d("3100"), d("595"))
 
 
@@ -192,7 +201,7 @@ async def test_a_partly_filled_buy_counts_once(db: AsyncEngine) -> None:
         await conn.execute(update(OrderRow).where(OrderRow.bot_id == 2).values(filled=d("0.4")))
         await conn.execute(insert(PositionRow).values(position(2, "0.4", None, "0")))
 
-    account = await accounts(db).snapshot(BTC)
+    account = await accounts(db).snapshot(3, BTC)
 
     assert account.open_positions == 3  # bot 2's buy opened its position: no longer pending
     assert account.coin_exposure == d("5.4") * 90 + d("0.6") * 95
@@ -201,10 +210,10 @@ async def test_a_partly_filled_buy_counts_once(db: AsyncEngine) -> None:
 async def test_the_daily_loss_limit_stays_hit_until_midnight_in_manila(db: AsyncEngine) -> None:
     await daily_loss_block(db, MIDNIGHT - timedelta(seconds=1))  # yesterday, in Manila
     await daily_loss_block(db, NOW, rule="max_open_positions")
-    assert not (await accounts(db).snapshot(BTC)).daily_loss_hit
+    assert not (await accounts(db).snapshot(3, BTC)).daily_loss_hit
 
     await daily_loss_block(db, MIDNIGHT)
-    assert (await accounts(db).snapshot(BTC)).daily_loss_hit
+    assert (await accounts(db).snapshot(3, BTC)).daily_loss_hit
 
 
 async def test_settings_come_from_the_mode_row(db: AsyncEngine) -> None:
