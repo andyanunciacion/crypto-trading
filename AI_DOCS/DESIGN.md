@@ -25,7 +25,7 @@
 | Owner at the desk | Laptop/desktop; reviewing, configuring, backtesting | Bots, Backtests, Settings, History |
 | Owner checking in | Quick look; wants status at a glance | Overview |
 | Owner reacting to a problem | Urgent; something looks wrong | Kill switch, Logs, bot pause |
-| Owner away from PC | Phone only | Telegram (alerts, /status, /kill), not the dashboard |
+| Owner away from PC | Phone only | Telegram (alerts, /status, /pnl, /pause, /kill; D60), not the dashboard |
 
 ## 4. Information architecture
 
@@ -62,7 +62,7 @@ Login (password + TOTP)
 
 | # | Topic | Decision |
 |---|---|---|
-| UX1 | **Kill switch** | Red button in the header on every screen. One click opens a confirm dialog with two buttons: "Stop all bots" and "Stop all + close positions". Fast, but can't be triggered by a stray click. |
+| UX1 | **Kill switch** | Red button in the header on every screen. One click opens a confirm dialog with two buttons: "Stop all bots" and "Stop all + close positions". Fast, but can't be triggered by a stray click. Telegram's `/kill` does the same with buttons under its reply, plus "Cancel"; they work once, for 2 min (D60). |
 | UX2 | **Mode badge** | A global and per-bot badge: neutral **PAPER**, high-contrast **LIVE**. Shown as text, not just color. |
 | UX3 | **Going live** | Switching a bot to LIVE needs the global live flag (D17) plus a dialog where you type the bot's name and enter a TOTP code. |
 | UX4 | **Loosening risk limits** | Raising any limit needs a TOTP code; lowering one doesn't. A shorter breaker window, or turning any setting off, counts as raising; saving exchange keys needs a code too (D50). |

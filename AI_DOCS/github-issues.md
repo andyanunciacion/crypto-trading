@@ -833,9 +833,22 @@ Judge them in two steps:
 
 ### P7-2 · Telegram commands
 `ops` `security` · Depends on: P7-1, P4-5
-- [ ] /status, /pnl, /pause, /kill; ignore all other chat IDs
+- [x] /status, /pnl, /pause, /kill; ignore all other chat IDs
 
 **Done when:** /kill stops all bots, and a message from another chat ID is ignored and logged.
+
+**Done (D60):**
+- **The owner's choices:** /kill asks with buttons, as UX1's dialog does ("Stop all bots" / "Stop all + close positions" / "Cancel"). `/pause <name or id>` pauses one bot, and `/pause` alone offers a button per running bot plus "All running bots". Strangers are logged, not alerted.
+- **The service:** `CommandBot` (`backend/alerts/commands.py`) runs in the alerts service beside the alert loop when Telegram is set up. It long-polls `get_updates` and replies through the same `TelegramSender`, now locked so alerts and replies keep to one a second. `/kill` and `/pause` send the dashboard's `KillCommand`/`BotCommand` with source `telegram`, so the engine needed no change.
+- **Safe by default:**
+  - Another chat gets no reply and is logged (`alerts.command.ignored`).
+  - A command waiting more than 2 min in the backlog after a start or an outage isn't run; later batches aren't judged by date, so clock drift can't refuse them.
+  - Buttons work once, for 2 min, from this run only.
+  - `/start` (which Telegram sends by itself) only shows the help; nothing starts a bot.
+- **Replies:** `replies.py` (pure). `/status`: engine heartbeat age, bots, positions, oldest price. `/pnl`: equity, today's and total P&L, drawdown, positions, all from `read_overview()`. The kill's result reads as its alert does (`format.kill_lines`), and that alert isn't sent again (`ShownKills`) unless the reply timed out.
+- **Checked live (2026-11-01):** from the phone, `/pause` paused a bot (41 ms). `/kill` stopped the two active bots ("kill switch from telegram", 181 ms), with no repeated kill alert. `/status` sent in a group (another chat ID) got no reply and logged `alerts.command.ignored`, although the owner sent it.
+- **Also:** `ENGINE_STALE_SECONDS` (`shared/heartbeat.py`) and `PRICE_STALE_SECONDS` (`shared/prices.py`), the UX5 cutoffs, for P7-3 too. `chat-id` explains a `Conflict` with the running service.
+- **Tests:** `test_alerts_commands.py` (parsing, reading updates, every reply's text), `test_alerts_command_bot.py` (test DB and Redis, a fake Telegram, an engine stand-in: the kill buttons, close, cancel, double taps, expiry and restarts, no reply; strangers ignored and logged; the backlog rule; pause by name, id, buttons and all, refusals; status and pnl, the database down; offsets, the menu, polling errors without the token), `test_alerts_telegram.py` (the lock, prompts, edits) and `test_alerts_service.py` (a shown kill isn't alerted).
 
 ### P7-3 · Heartbeat alert
 `ops` · Depends on: P7-1
