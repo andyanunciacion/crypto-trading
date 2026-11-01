@@ -33,9 +33,11 @@ def test_every_event_has_its_label_and_default_and_matches_the_database_check() 
     assert [e for e, info in EVENTS.items() if not info.default] == ["risk_resize"]
 
 
-def test_the_migration_seeds_each_events_default() -> None:
-    migration = importlib.import_module("shared.db.migrations.versions.0017_alert_settings")
-    assert {event: info.default for event, info in EVENTS.items()} == migration.DEFAULTS
+def test_the_migrations_seed_each_events_default() -> None:
+    seeded: dict[str, bool] = {}
+    for name in ("0017_alert_settings", "0018_engine_down_alert"):
+        seeded |= importlib.import_module(f"shared.db.migrations.versions.{name}").DEFAULTS
+    assert {event: info.default for event, info in EVENTS.items()} == seeded
 
 
 # --- Trades ------------------------------------------------------------------------------

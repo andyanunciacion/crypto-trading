@@ -852,9 +852,18 @@ Judge them in two steps:
 
 ### P7-3 · Heartbeat alert
 `ops` · Depends on: P7-1
-- [ ] Engine heartbeat; alert when missing
+- [x] Engine heartbeat; alert when missing
 
 **Done when:** stopping the engine container triggers an alert within 2 minutes.
+
+**Done (D61):**
+- **The owner's choices:** a 60 s cutoff (a restart or rebuild of the engine stays quiet); a toggle on Settings → Alerts, on by default; only "down" and "back up", no message for a quick restart.
+- **The watch:** `EngineWatcher` (`backend/alerts/watch.py`), a third task in the alerts service, reads `engine:heartbeat` every 5 s. The engine is down when the beat hasn't changed for 60 s on the service's own monotonic clock (never its `ts` against a clock, so Docker Desktop's drift after a sleep can't fake one). That's at most ~70 s after the last beat. Down and back up are each said once, and back up only if down was. While it's down, `alerts:engine` keeps the state, so a restart of the alerts service neither repeats nor forgets.
+- **Redis too:** a minute of failed reads says Redis is unreachable, then when it's back, and the engine gets a fresh minute.
+- **The toggle:** `engine_down` in `alert_settings` (migration 0018).
+- **Checked live (2026-11-01):** `docker compose stop engine` at 02:52:09 UTC sent "Engine DOWN" at 02:53:10 (61 s); `start` sent "Engine back up" 6 s after its first beat. A `restart` sent nothing, and muted, the outage was only logged (`alerts.engine_muted`).
+- **Also:** `age()` moved from `replies.py` to `format.py`.
+- **Tests:** `test_alerts_watch.py` (the rule on fake clocks: first look, a far-off clock, once each, restarts, no beat ever, the key going away, carried state, Redis; the texts; the watcher over a fake Redis that breaks) and `test_alerts_service.py` (test DB and Redis: one message each way, muted, the database down). `shared/tests/test_alerts.py` checks 0017 + 0018 seed every default.
 
 ### P7-4 · Health and Sentry
 `ops` · Depends on: P0-T2

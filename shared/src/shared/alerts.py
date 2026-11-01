@@ -33,8 +33,16 @@ AlertEvent = Literal[
     "kill_switch",
     "error",
     "daily_summary",
+    "engine_down",
 ]
 ALERT_EVENTS: tuple[AlertEvent, ...] = get_args(AlertEvent)
+
+# The engine is down when its heartbeat (every 10 s, shared/heartbeat.py) hasn't changed
+# for this long (P7-3, D61): longer than a restart or a rebuild takes, so those stay
+# quiet, and short enough that the alert comes within PRD's 2 minutes. The alerts
+# service looks every `WATCH_SECONDS`, so it's sent at most about 70 s after the last beat.
+ENGINE_DOWN_SECONDS = 60
+WATCH_SECONDS = 5
 
 # The alerts service's own lines: alerting on them could loop (a failed send logs, the
 # log line would be an alert, which fails to send, ...).
@@ -94,6 +102,11 @@ EVENTS: dict[AlertEvent, EventInfo] = {
         "Daily summary",
         "At 08:00 Manila: equity, yesterday's closed trades, blocks and switches, open "
         "positions and bots.",
+        True,
+    ),
+    "engine_down": EventInfo(
+        "Engine down",
+        "No engine heartbeat for a minute (or Redis unreachable), and again when it's back.",
         True,
     ),
 }

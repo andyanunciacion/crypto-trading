@@ -56,6 +56,7 @@ ALERT_EVENTS = (
     "kill_switch",
     "error",
     "daily_summary",
+    "engine_down",
 )
 
 

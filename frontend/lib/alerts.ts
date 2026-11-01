@@ -12,7 +12,8 @@ export type AlertEvent =
   | "switch"
   | "kill_switch"
   | "error"
-  | "daily_summary";
+  | "daily_summary"
+  | "engine_down";
 
 export type AlertSetting = {
   event: AlertEvent;
