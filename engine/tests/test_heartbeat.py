@@ -1,5 +1,6 @@
 """The engine loop writes its heartbeat file, which Docker's health check watches, and
-the same beat to Redis, which the dashboard shows (D45)."""
+the same beat to Redis, which the dashboard shows (D45). The backtester does the same
+for Settings → System (D62)."""
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -11,7 +12,13 @@ from redis.asyncio import Redis
 from structlog.testing import capture_logs
 
 from engine import main
-from shared.heartbeat import ENGINE_HEARTBEAT_KEY, EngineHeartbeat
+from engine.backtest import worker
+from shared.heartbeat import (
+    BACKTESTER_HEARTBEAT_KEY,
+    ENGINE_HEARTBEAT_KEY,
+    EngineHeartbeat,
+    ServiceHeartbeat,
+)
 
 STARTED = datetime(2026, 10, 26, 12, 0, tzinfo=UTC)
 SYMBOLS = ["BTC/USDT", "ETH/USDT"]
@@ -73,3 +80,30 @@ async def test_without_redis_the_file_still_beats(
     await unreachable.aclose()
 
     assert any(log["event"] == "engine.heartbeat.redis_failed" for log in logs)
+
+
+async def test_the_backtester_beats_its_file_and_redis_and_without_redis_its_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, redis: Redis
+) -> None:
+    heartbeat = tmp_path / "backtester-heartbeat"
+    monkeypatch.setattr(worker, "HEARTBEAT_FILE", heartbeat)
+    unreachable = Redis.from_url("redis://127.0.0.1:1/0", socket_connect_timeout=0.5)
+
+    for client in (redis, unreachable):
+        heartbeat.unlink(missing_ok=True)
+        stop = asyncio.Event()
+        with capture_logs() as logs:
+            task = asyncio.create_task(worker.beat(stop, client, started_at=STARTED))
+            async with asyncio.timeout(5):
+                while not await asyncio.to_thread(heartbeat.exists):  # noqa: ASYNC110
+                    await asyncio.sleep(0.01)
+            stop.set()
+            async with asyncio.timeout(5):
+                await task
+        failed = [log for log in logs if log["event"] == "backtest.worker.heartbeat_failed"]
+        assert bool(failed) == (client is unreachable)
+    await unreachable.aclose()
+
+    raw = await redis.get(BACKTESTER_HEARTBEAT_KEY)
+    assert raw is not None
+    assert ServiceHeartbeat.model_validate_json(raw).started_at == STARTED

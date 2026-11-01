@@ -39,12 +39,25 @@ class Settings(BaseSettings):
         default_factory=lambda: ["BTC/USDT"]
     )
 
+    # Where the long-running services report errors (P7-4, D62; shared/errors.py): a
+    # Sentry project's DSN. Blank: errors stay in the logs only. Anyone with it can send
+    # events to the project, so it's kept like a secret.
+    sentry_dsn: SecretStr | None = None
+    # Sentry's environment tag, e.g. "local" here and "server" on the VPS.
+    sentry_environment: str = Field(default="local", min_length=1, max_length=64)
+
     @field_validator("price_symbols", mode="before")
     @classmethod
     def _split_commas(cls, value: object) -> object:
         if isinstance(value, str):
             return [part.strip() for part in value.split(",") if part.strip()]
         return value
+
+    @field_validator("sentry_dsn", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, value: object) -> object:
+        # `SENTRY_DSN=` in .env, as .env.example has it, means not set.
+        return None if isinstance(value, str) and not value.strip() else value
 
     @property
     def database_url(self) -> URL:

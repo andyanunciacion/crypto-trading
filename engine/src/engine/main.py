@@ -17,7 +17,8 @@ switches strategy when the regime calls for it (P6-4, D54), through the same Bot
 as the Bots page's switches.
 
 Its log lines go to stdout and, from INFO up, to the Redis stream the dashboard's Logs
-page reads (shared/logs.py, D49).
+page reads (shared/logs.py, D49). With SENTRY_DSN set, its error lines and a crash go to
+Sentry (shared/errors.py, D62).
 """
 
 import asyncio
@@ -45,6 +46,7 @@ from engine.risk.kill import KillSwitch
 from engine.risk.paper import PaperDesk
 from shared.config import Settings, load_settings
 from shared.db.session import make_engine
+from shared.errors import init_errors
 from shared.heartbeat import ENGINE_HEARTBEAT_KEY, EngineHeartbeat
 from shared.logs import LogMirror, configure_logging
 from shared.prices import PriceUpdate
@@ -247,5 +249,7 @@ def main() -> None:
     # First, so a bad config stops the engine before it does anything else.
     settings = load_settings()
     mirror = LogMirror("engine")
-    configure_logging(settings.log_level, mirror=mirror)
+    errors = init_errors(settings, "engine")  # error lines and crashes to Sentry (D62)
+    configure_logging(settings.log_level, mirror=mirror, errors=errors)
+    errors.announce()
     asyncio.run(run(settings, mirror))

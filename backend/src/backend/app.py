@@ -32,6 +32,7 @@ from backend.auth.deps import current_user
 from backend.backtests import routes as backtest_routes
 from backend.bots import routes as bot_routes
 from backend.dashboard import routes as dashboard_routes
+from backend.health import routes as health_routes
 from backend.history import routes as history_routes
 from backend.keys import routes as key_routes
 from backend.logs import routes as log_routes
@@ -47,15 +48,6 @@ PUBLIC = frozenset({"/health", "/auth/login"})
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
-
-
-public = APIRouter()
-
-
-@public.get("/health")
-async def health() -> dict[str, str]:
-    """Liveness check used by Docker. DB and Redis checks are added in P7-4."""
-    return {"status": "ok"}
 
 
 api_docs = APIRouter(include_in_schema=False)
@@ -135,10 +127,11 @@ def create_app(
     protected.include_router(risk_settings_routes.router)
     protected.include_router(key_routes.router)
     protected.include_router(alert_settings_routes.router)
+    protected.include_router(health_routes.router)
 
     app.add_exception_handler(RequestValidationError, _validation_failed)
     app.add_exception_handler(CodeRefused, handle_code_refused)
-    app.include_router(public)
+    app.include_router(health_routes.public)
     app.include_router(auth_routes.public)
     app.include_router(protected)
     return app

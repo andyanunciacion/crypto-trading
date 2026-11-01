@@ -136,3 +136,17 @@ test("an alert turns off and on again with no code, and stays as saved", async (
   await expect(page.getByText("Trades: on. It applies within a second.")).toBeVisible();
   expect(trades()).toBe("t");
 });
+
+test("the System tab shows every service, the engine alive", async ({ page }) => {
+  await signIn(page);
+  await page.goto("/settings?tab=system");
+  const row = (name: string) => page.locator(`tr[data-service="${name}"]`);
+
+  for (const name of ["api", "db", "redis", "engine", "backtester", "alerts"]) {
+    await expect(row(name)).toContainText("OK");
+  }
+  await expect(row("engine")).toContainText("paper");
+  // The e2e stack blanks SENTRY_DSN and Telegram (stack.ts).
+  await expect(row("sentry")).toContainText("Off");
+  await expect(row("alerts")).toContainText("Telegram isn't set up");
+});
