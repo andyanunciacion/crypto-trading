@@ -13,7 +13,7 @@ with the run's id, or `failed` with the reason.
 
 At startup it also writes the catalog the run form is drawn from (control/catalog.py),
 so the Backtests page works while the trading engine is down. A heartbeat file tells
-Docker it's alive (see compose.yaml).
+Docker it's alive (see compose.yaml), and the same beat in Redis tells Settings → System.
 """
 
 import asyncio
@@ -56,6 +56,8 @@ from shared.backtest_jobs import (
 from shared.commands import BLOCK_SECONDS
 from shared.config import Settings, load_settings
 from shared.db.session import make_engine
+from shared.errors import init_errors
+from shared.heartbeat import BACKTESTER_HEARTBEAT_KEY, ServiceHeartbeat
 from shared.logs import LogMirror, configure_logging
 
 HEARTBEAT_INTERVAL_SECONDS = 10
@@ -206,11 +208,19 @@ class BacktestWorker:
         return run_id
 
 
-async def beat(stop: asyncio.Event) -> None:
-    """Touch the file Docker's health check watches."""
+async def beat(stop: asyncio.Event, redis: Redis, *, started_at: datetime) -> None:
+    """Touch the file Docker's health check watches, and beat into Redis for Settings →
+    System (D62). Without Redis the file still beats: the worker itself is alive."""
     while not stop.is_set():
         # File I/O blocks; in a thread it can't stall the event loop.
         await asyncio.to_thread(HEARTBEAT_FILE.touch)
+        payload = ServiceHeartbeat(ts=datetime.now(UTC), started_at=started_at)
+        try:
+            await redis.set(BACKTESTER_HEARTBEAT_KEY, payload.model_dump_json())
+        except Exception as exc:
+            log.warning(
+                "backtest.worker.heartbeat_failed", error=type(exc).__name__, detail=str(exc)
+            )
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(stop.wait(), timeout=HEARTBEAT_INTERVAL_SECONDS)
 
@@ -224,13 +234,14 @@ async def run(settings: Settings, mirror: LogMirror | None = None) -> None:
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop.set)
     log.info("backtest.worker.starting")
+    started_at = datetime.now(UTC)
     redis = Redis.from_url(settings.redis_url)
     db = make_engine(settings.database_url)
     try:
-        await publish_catalog(redis, datetime.now(UTC))
+        await publish_catalog(redis, started_at)
         worker = BacktestWorker(redis, db)
         async with asyncio.TaskGroup() as tasks:
-            tasks.create_task(beat(stop))
+            tasks.create_task(beat(stop, redis, started_at=started_at))
             if mirror is not None:
                 tasks.create_task(mirror.ship(redis, stop))  # ends after `stop`
             working = tasks.create_task(worker.run())
@@ -249,7 +260,9 @@ def main() -> None:
     # First, so a bad config stops the worker before it does anything else.
     settings = load_settings()
     mirror = LogMirror("backtester")
-    configure_logging(settings.log_level, mirror=mirror)
+    errors = init_errors(settings, "backtester")  # error lines and crashes (D62)
+    configure_logging(settings.log_level, mirror=mirror, errors=errors)
+    errors.announce()
     asyncio.run(run(settings, mirror))
 
 

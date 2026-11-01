@@ -21,6 +21,8 @@ function stackEnv(): NodeJS.ProcessEnv {
     // Blank, so the alerts service only logs: the tests must never message the owner's phone.
     TELEGRAM_BOT_TOKEN: "",
     TELEGRAM_CHAT_ID: "",
+    // Blank, so a test's deliberate errors never reach the owner's Sentry project (D62).
+    SENTRY_DSN: "",
   };
 }
 

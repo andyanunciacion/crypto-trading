@@ -8,6 +8,7 @@ dependencies = [
     "asyncpg>=0.32.0",
     "pydantic-settings>=2.16.1",
     "redis>=8.1.0",
+    "sentry-sdk>=2.73.0",
     "sqlalchemy[asyncio]>=2.1.6",
     "structlog>=26.1.0",
 ]

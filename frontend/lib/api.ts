@@ -17,6 +17,7 @@ import type {
   StrategySwitch,
 } from "@/lib/bots";
 import { PAGE_ROWS, type FillRow, type OrderRow } from "@/lib/history";
+import type { ServicesHealth } from "@/lib/health";
 import type { LogPage, RiskEvent } from "@/lib/logs";
 import type { Chart, TradeExplanation } from "@/lib/market";
 import type {
@@ -291,6 +292,11 @@ export async function deleteExchangeAccount(id: number): Promise<void> {
 /** Which alerts go to Telegram, and how the alerts service is doing (D59). */
 export async function alertSettings(): Promise<AlertsView> {
   return (await (await call("/alert-settings")).json()) as AlertsView;
+}
+
+/** Every service's state, for Settings → System (D62). */
+export async function servicesHealth(): Promise<ServicesHealth> {
+  return (await (await call("/health/services")).json()) as ServicesHealth;
 }
 
 /** Turn one alert on or off; no code needed (D59). */

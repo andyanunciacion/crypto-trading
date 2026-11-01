@@ -27,6 +27,7 @@ from backend.alerts.settings import AlertsSettings, load_alerts_settings
 from backend.alerts.telegram import DrySender, Sender, TelegramSender
 from backend.alerts.watch import EngineWatcher
 from shared.db.session import make_engine
+from shared.errors import init_errors
 from shared.logs import LogMirror, configure_logging
 
 log = structlog.get_logger()
@@ -160,7 +161,9 @@ def main(argv: list[str] | None = None) -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     if args.command is None:
         mirror = LogMirror("alerts")
-        configure_logging(settings.log_level, mirror=mirror)
+        errors = init_errors(settings, "alerts")  # error lines and crashes (D62)
+        configure_logging(settings.log_level, mirror=mirror, errors=errors)
+        errors.announce()
         asyncio.run(run(settings, mirror))
         return
     configure_logging(settings.log_level, sys.stderr)  # stdout is the command's answer

@@ -7,11 +7,13 @@ import { AlertSettingsForm } from "@/components/alert-settings-form";
 import { ExchangeKeys } from "@/components/exchange-keys";
 import { PageTabs } from "@/components/page-tabs";
 import { RiskLimitsForm } from "@/components/risk-limits-form";
+import { SystemHealth } from "@/components/system-health";
 
 const TABS = [
   { id: "limits", label: "Risk limits" },
   { id: "keys", label: "Exchange keys" },
   { id: "alerts", label: "Alerts" },
+  { id: "system", label: "System" },
 ] as const;
 type Tab = (typeof TABS)[number]["id"];
 
@@ -35,8 +37,10 @@ function Settings() {
         <RiskLimitsForm />
       ) : tab === "keys" ? (
         <ExchangeKeys />
-      ) : (
+      ) : tab === "alerts" ? (
         <AlertSettingsForm />
+      ) : (
+        <SystemHealth />
       )}
       <p className="text-muted-foreground max-w-3xl text-xs">
         Two-factor sign-in is managed on the server: <code>python -m backend.users reset-totp</code>
@@ -45,7 +49,10 @@ function Settings() {
   );
 }
 
-/** Settings (DESIGN §4, D50, D59): risk limits and circuit breakers, exchange keys, alerts. */
+/**
+ * Settings (DESIGN §4, D50, D59, D62): risk limits and circuit breakers, exchange keys,
+ * alerts, and every service's state.
+ */
 export default function SettingsPage() {
   // useSearchParams needs a Suspense boundary, so the page can still prerender.
   return (

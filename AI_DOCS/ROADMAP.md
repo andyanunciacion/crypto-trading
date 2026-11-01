@@ -90,7 +90,7 @@
 1. [x] **Telegram alerts:** trades, stop-loss hits, switches, errors, limit breaches, daily summary; on/off per event type, on the Settings page (moved from P5-7, D50). The alerts service reads the log stream every service writes (D59).
 2. [x] **Telegram commands:** /status, /pnl, /pause, /kill, only from your chat ID. In the alerts service, by long polling; /kill asks with buttons, as the dashboard's dialog does (D60).
 3. [x] **Heartbeat:** alert if the engine stops sending updates. The alerts service says so when the beat hasn't changed for 60 s, and again when it's back (D61).
-4. [ ] **Health + errors:** health endpoint per service; Sentry wired into API and engine.
+4. [x] **Health + errors:** health endpoint per service; Sentry wired into API and engine. The API's `/health` checks the database and Redis, `/health/services` and Settings → System show every service, and the engine, backtester, API and alerts service send their error lines and crashes to Sentry, scrubbed of secrets (D62).
 
 **Exit criteria:** stopping the engine container triggers an alert within 2 minutes, and /kill works from your phone.
 

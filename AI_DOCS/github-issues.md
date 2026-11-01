@@ -867,9 +867,32 @@ Judge them in two steps:
 
 ### P7-4 · Health and Sentry
 `ops` · Depends on: P0-T2
-- [ ] `/health` per service; Sentry in API and engine
+- [x] `/health` per service; Sentry in API and engine
 
 **Done when:** a deliberate exception shows up in Sentry with a stack trace.
+
+**Done (D62):**
+- **The owner's choices:** a health endpoint plus a Settings → System tab; Sentry in all four long-running services (engine, backtester, API, alerts), one project with a `service` tag; crashes and every error line, rate-limited.
+- **Sentry (`shared/errors.py`):** `init_errors(settings, service)` starts Sentry only with `SENTRY_DSN` set (blank: off, as the e2e stack has it) and returns an `ErrorForwarder`, a structlog processor beside the log mirror.
+  - **Error lines:** every ERROR/CRITICAL line goes to Sentry. Inside an `except` block, it goes as that exception with its stack trace (`sys.exc_info()`), so `bot.error` and the like carry one with no change where they're logged. Outside one, it's a message grouped by service and event.
+  - **Rate limit:** the same event for the same bot at most once per 10 min; the next one says how many were held.
+  - **Breadcrumbs:** INFO and WARNING lines become breadcrumbs.
+  - **Crashes:** they come from Sentry's own excepthook, FastAPI and logging integrations. Deliberate 5xx answers aren't reported (they have their own error line).
+- **No secrets:**
+  - **Off:** frame locals, request bodies, cookies, headers, query strings and user info, through `data_collection`.
+  - **Scrubbed:** every event and breadcrumb is cleared of the settings' `SecretStr` values, the known secret variables (`POSTGRES_PASSWORD`, `JWT_SECRET`, `ENCRYPTION_KEY`, `TELEGRAM_BOT_TOKEN`, `SENTRY_DSN`) and anything shaped like a Telegram bot token, which Sentry's httpx breadcrumbs would otherwise carry in the URL.
+  - **Tracing:** off.
+- **Health:**
+  - **`GET /health`** (public, Docker's check) runs `SELECT 1` and `PING`, 2 s each: 200, or 503 saying which is down, never why. A change is logged once (`api.health.failed`/`.recovered`).
+  - **`GET /health/services`** (signed in) adds the engine's, backtester's (`backtester:heartbeat`, new) and alerts service's beats in Redis and whether Sentry is on. It's judged by the pure `backend/health/report.py` and shown by `SystemHealth` on Settings → System, refreshed every 5 s.
+- **Checked live (2026-11-01):** with the owner's DSN, `python -m shared.errors test` from the engine and API images each showed up in Sentry as an issue with its stack trace and `service` tag; all four services logged `errors.reporting`, and `/health` answered 200.
+- **Also:** `python -m shared.errors test [--service NAME]` sends a deliberate exception. The `sentry_events` fixture (`shared.testing`) keeps events instead of sending them. `json_default` in `shared/logs.py` is public.
+- **Tests:**
+  - `test_errors.py`: stack traces with no locals, messages, breadcrumbs, the rate limit, scrubbing, no DSN, a failing capture, the test command.
+  - `test_health.py`: 200, 503 for the database or Redis, logged once and on recovery.
+  - `test_services_health.py`: every state, the route reading each beat, an unhandled route exception reaching Sentry without the body or cookie.
+  - `test_heartbeat.py`: the backtester's beat.
+  - e2e `settings.spec.ts`: the System tab.
 
 ---
 

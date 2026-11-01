@@ -54,6 +54,10 @@ services:
       dockerfile: backend/Dockerfile
     # Settings are validated at startup by shared/config.py.
     env_file: .env
+    environment: &sentry
+      # From .env too, but through here so the e2e stack can blank it (frontend/e2e/
+      # stack.ts) and its tests never report to Sentry. Blank: errors stay in the logs.
+      SENTRY_DSN: ${SENTRY_DSN:-}
     ports:
       - "127.0.0.1:${API_PORT:-8000}:8000"
     depends_on:
@@ -64,7 +68,8 @@ services:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      # The slim Python image has no curl; urlopen raises (exit 1) on any non-2xx.
+      # The slim Python image has no curl; urlopen raises (exit 1) on any non-2xx. /health
+      # is 503 while the database or Redis doesn't answer (P7-4).
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
       interval: 10s
       timeout: 5s
@@ -76,6 +81,7 @@ services:
       context: .
       dockerfile: engine/Dockerfile
     env_file: .env
+    environment: *sentry
     depends_on:
       db:
         condition: service_healthy
@@ -100,6 +106,7 @@ services:
       context: .
       dockerfile: engine/Dockerfile
     env_file: .env
+    environment: *sentry
     command: ["python", "-m", "engine.backtest.worker"]
     depends_on:
       db:
@@ -129,6 +136,7 @@ services:
       # stack.ts) and its tests never message your phone. Without them it only logs.
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      SENTRY_DSN: ${SENTRY_DSN:-}
     command: ["python", "-m", "backend.alerts"]
     depends_on:
       db:

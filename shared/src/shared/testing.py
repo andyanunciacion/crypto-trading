@@ -7,6 +7,8 @@ conftest.py because mypy can't check two modules both named `conftest`.
 compose.yaml) once per test run, via testcontainers (a dev dependency), and remove it
 afterwards. They need Docker: without it, those tests are skipped locally, but fail in
 CI so they can't quietly stop running.
+
+`sentry_events` is a Sentry transport that keeps events instead of sending them (D62).
 """
 
 import os
@@ -16,6 +18,10 @@ from collections.abc import Iterator, Mapping
 from typing import Any
 
 import pytest
+import sentry_sdk
+import structlog
+from sentry_sdk.envelope import Envelope
+from sentry_sdk.transport import Transport
 from sqlalchemy import URL, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -157,3 +163,34 @@ def redis_url() -> Iterator[str]:
     with container:
         host = container.get_container_host_ip()
         yield f"redis://{host}:{container.get_exposed_port(6379)}/0"
+
+
+class SentryEvents(Transport):
+    """A Sentry transport that keeps every event it's given (`init_errors(...,
+    transport=)`), instead of sending it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[dict[str, Any]] = []
+
+    def capture_envelope(self, envelope: Envelope) -> None:
+        event = envelope.get_event()
+        if event is not None:
+            self.events.append(dict(event))
+
+
+def reset_sentry() -> None:
+    """Back to no Sentry client, with empty scopes (breadcrumbs, tags)."""
+    sentry_sdk.get_client().close()
+    sentry_sdk.get_global_scope().set_client(None)  # the client that does nothing
+    sentry_sdk.get_isolation_scope().clear()
+    sentry_sdk.get_global_scope().clear()
+
+
+@pytest.fixture
+def sentry_events() -> Iterator[SentryEvents]:
+    """A fake Sentry transport; Sentry and structlog are reset before and after."""
+    reset_sentry()
+    yield SentryEvents()
+    reset_sentry()
+    structlog.reset_defaults()

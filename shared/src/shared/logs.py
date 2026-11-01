@@ -20,7 +20,7 @@ import structlog
 from pydantic import AwareDatetime, BaseModel, ConfigDict, JsonValue, ValidationError
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
-from structlog.typing import EventDict, WrappedLogger
+from structlog.typing import EventDict, Processor, WrappedLogger
 
 # The stream the Logs page reads, newest last; XADD trims it to about LOGS_MAXLEN.
 LOGS_KEY = "logs"
@@ -35,7 +35,8 @@ OWN_EVENTS = "logs.mirror."  # the mirror's own lines: mirroring them could loop
 log = structlog.get_logger()
 
 
-def _json_default(value: object) -> object:
+def json_default(value: object) -> object:
+    """How a log line's values become JSON (here and for Sentry, shared/errors.py)."""
     if isinstance(value, Decimal):
         return format(value, "f")  # exact, and never "1E-8"
     if isinstance(value, datetime):
@@ -45,7 +46,7 @@ def _json_default(value: object) -> object:
 
 def mirrored_line(event_dict: EventDict, service: str) -> str:
     """A log line as the mirror sends it to the stream: its JSON, with the service."""
-    return json.dumps({**event_dict, "service": service}, default=_json_default)
+    return json.dumps({**event_dict, "service": service}, default=json_default)
 
 
 class LogMirror:
@@ -172,15 +173,22 @@ def read_entry(stream_id: str, line: bytes) -> LogEntry | None:
 
 
 def configure_logging(
-    level: str, stream: TextIO | None = None, *, mirror: LogMirror | None = None
+    level: str,
+    stream: TextIO | None = None,
+    *,
+    mirror: LogMirror | None = None,
+    errors: Processor | None = None,
 ) -> None:
     """JSON logs to `stream` (default stdout). CLIs whose stdout is data log to stderr.
-    A long-running service passes a `mirror` and runs its `ship()` (D49)."""
+    A long-running service passes a `mirror` and runs its `ship()` (D49), and the
+    `ErrorForwarder` from `shared.errors.init_errors()`, which sends error lines to
+    Sentry (D62)."""
     structlog.configure(
         processors=[
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
             *([mirror] if mirror is not None else []),
+            *([errors] if errors is not None else []),
             structlog.processors.JSONRenderer(),
         ],
         # Drops calls below LOG_LEVEL before they do any work.
