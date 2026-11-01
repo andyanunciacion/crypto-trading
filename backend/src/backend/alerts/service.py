@@ -18,6 +18,9 @@ It must keep working when something else is broken, because that's when alerts m
 - The daily summary is sent at 08:00 Manila about the day before, once (`alerts:summary:
   last` holds the day it was last sent for), and tried again a minute later if it fails.
 
+The engine's heartbeat is watched beside it too (watch.py, P7-3), and its changes are
+sent through `send_engine()` with the same toggles and sender.
+
 The chat's commands (commands.py, P7-2) run beside this loop. A kill sent from there is
 in `shown_kills`: its result was the reply, so its `kill_switch` alert isn't sent again.
 """
@@ -35,11 +38,12 @@ from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from backend.alerts.format import render, render_summary
+from backend.alerts.format import render, render_engine, render_summary
 from backend.alerts.status import AlertsStatus, write_status
 from backend.alerts.summary import read_summary
 from backend.alerts.telegram import Sender
 from backend.alerts.trades import TradeFacts, read_trade_facts
+from backend.alerts.watch import Change
 from shared.account import MANILA
 from shared.alerts import EVENTS, Alert, AlertEvent, Quieter, to_alert
 from shared.backoff import Backoff
@@ -296,6 +300,24 @@ class AlertsService:
         log.info("alerts.summary_sent" if delivered else "alerts.dropped", day=str(summary.day))
         await self.write_status()
         return delivered
+
+    # --- The engine's heartbeat (watch.py) --------------------------------------------
+
+    async def send_engine(self, change: Change) -> bool:
+        """The message for `change` if `engine_down` is on; True if it was sent (or
+        refused by Telegram for good)."""
+        await self._refresh()
+        if not self._enabled.get("engine_down", False):
+            log.info("alerts.engine_muted", change=type(change).__name__)
+            return False
+        delivered = await self._sender.send(render_engine(change, self._clock()))
+        log.info(
+            "alerts.sent" if delivered else "alerts.dropped",
+            alert="engine_down",
+            change=type(change).__name__,
+        )
+        await self.write_status()
+        return True
 
     # --- Status -----------------------------------------------------------------------
 

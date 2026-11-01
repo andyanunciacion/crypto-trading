@@ -13,6 +13,7 @@ from pydantic import JsonValue
 
 from backend.alerts.summary import DaySummary
 from backend.alerts.trades import TradeFacts
+from backend.alerts.watch import Change, EngineDown, EngineUp, RedisDown, RedisUp
 from shared.account import MANILA
 from shared.alerts import QUIET, Alert, Passed
 
@@ -31,6 +32,18 @@ STOP_LEVELS = {"stop_loss": "stop", "trailing_stop": "stop", "take_profit": "tak
 
 def manila(ts: datetime) -> str:
     return ts.astimezone(MANILA).strftime("%d %b %H:%M")
+
+
+def age(seconds: float) -> str:
+    """A duration a person reads at a glance: 4 s, 3 min, 2 h, 5 days."""
+    s = max(int(seconds), 0)
+    if s < 120:
+        return f"{s} s"
+    if s < 120 * 60:
+        return f"{s // 60} min"
+    if s < 48 * 3600:
+        return f"{s // 3600} h"
+    return f"{s // 86400} days"
 
 
 def number(value: Decimal | JsonValue) -> str:
@@ -234,6 +247,42 @@ def _error(alert: Alert, names: Mapping[int, str]) -> list[str]:
         shown = ", ".join(f"{k}={v}" for k, v in f.items())
         lines.append(shown[:500])
     return lines
+
+
+def render_engine(change: Change, now: datetime) -> str:
+    """The message for an `engine_down` change (watch.py): down or back, engine or Redis."""
+    match change:
+        case EngineDown(last=last, silent_s=silent):
+            if last is None:
+                seen = "No heartbeat at all since the alerts service started"
+            else:
+                seen = f"Last beat {manila(last.ts)}, running since {manila(last.started_at)}"
+            lines = [
+                f"Engine DOWN: no new heartbeat for {age(silent)}",
+                seen,
+                "Bots aren't trading or watching their stops. "
+                "Check: docker compose ps engine (and its logs).",
+                "A /kill now stays queued until the engine starts again.",
+            ]
+        case EngineUp(beat=beat, previous=previous):
+            restarted = previous is None or beat.started_at != previous.started_at
+            if previous is None:
+                lines = ["Engine back up"]
+            else:
+                gap = age((beat.ts - previous.ts).total_seconds())
+                lines = [f"Engine back up, after {gap} without a heartbeat"]
+            if restarted:
+                lines.append(f"Restarted at {manila(beat.started_at)}")
+            lines.append(f"Running {len(beat.bots)} bots, streaming {len(beat.symbols)} symbols")
+        case RedisDown(silent_s=silent, error=error):
+            lines = [
+                f"Redis unreachable for {age(silent)}: the engine's status is unknown",
+                error[:200],
+                "Other alerts and commands wait until it's back. Check: docker compose ps redis",
+            ]
+        case RedisUp(down_s=down):
+            lines = [f"Redis reachable again, after {age(down)}"]
+    return "\n".join([*lines, manila(now)])
 
 
 def render_summary(s: DaySummary) -> str:

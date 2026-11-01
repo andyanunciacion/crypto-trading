@@ -18,6 +18,7 @@ from structlog.testing import capture_logs
 
 from backend.alerts.service import CURSOR_KEY, SUMMARY_KEY, AlertsService
 from backend.alerts.status import read_status
+from backend.alerts.watch import EngineWatcher
 from shared.alerts import EVENTS
 from shared.db.models import (
     AlertSettingRow,
@@ -30,6 +31,7 @@ from shared.db.models import (
     StrategySwitchRow,
 )
 from shared.db.session import make_engine
+from shared.heartbeat import ENGINE_HEARTBEAT_KEY, EngineHeartbeat
 from shared.logs import LogMirror
 
 T0 = datetime(2026, 10, 31, 2, 0, tzinfo=UTC)  # 10:00 in Manila
@@ -433,3 +435,97 @@ async def test_a_summary_turned_off_isn_t_sent_but_counts_as_done(setup: Setup) 
     assert await setup.service().summary_if_due()
 
     assert setup.sender.sent == []
+
+
+# --- The engine's heartbeat (watch.py, P7-3) ------------------------------------------
+
+
+@dataclass
+class Mono:
+    now: float = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def heartbeat(n: int) -> EngineHeartbeat:
+    return EngineHeartbeat(
+        ts=T0 + timedelta(seconds=10 * n),
+        started_at=T0,
+        mode="paper",
+        beat=n,
+        exchange="mexc",
+        symbols=[BTC],
+        bots=[1],
+    )
+
+
+async def test_the_engine_stopping_sends_one_message_and_its_return_another(
+    setup: Setup,
+) -> None:
+    mono = Mono()
+    watcher = EngineWatcher(setup.service(), setup.redis, monotonic=mono)
+    await setup.redis.set(ENGINE_HEARTBEAT_KEY, heartbeat(1).model_dump_json())
+    await watcher.step()
+    for t in (5, 30, 59):
+        mono.now = t
+        await watcher.step()
+    assert setup.sender.sent == []
+
+    mono.now = 60
+    await watcher.step()
+    mono.now = 65
+    await watcher.step()
+    await setup.redis.set(ENGINE_HEARTBEAT_KEY, heartbeat(9).model_dump_json())
+    mono.now = 70
+    await watcher.step()
+
+    assert [m.splitlines()[0] for m in setup.sender.sent] == [
+        "Engine DOWN: no new heartbeat for 60 s",
+        "Engine back up, after 80 s without a heartbeat",
+    ]
+    status = await read_status(setup.redis)
+    assert status is not None and status.last_sent_at is not None
+
+
+async def test_the_engine_down_alert_turned_off_sends_neither(setup: Setup) -> None:
+    async with setup.db.begin() as conn:
+        await conn.execute(
+            update(AlertSettingRow)
+            .where(AlertSettingRow.event == "engine_down")
+            .values(enabled=False)
+        )
+    mono = Mono()
+    watcher = EngineWatcher(setup.service(), setup.redis, monotonic=mono)
+    await setup.redis.set(ENGINE_HEARTBEAT_KEY, heartbeat(1).model_dump_json())
+    await watcher.step()
+    mono.now = 60
+    with capture_logs() as logs:
+        await watcher.step()
+        await setup.redis.set(ENGINE_HEARTBEAT_KEY, heartbeat(2).model_dump_json())
+        await watcher.step()
+
+    assert setup.sender.sent == []
+    events = [line["event"] for line in logs]
+    assert "alerts.engine_down" in events  # still on the Logs page
+    assert "alerts.engine_up" in events
+
+
+async def test_the_engine_down_alert_goes_with_the_database_down_too(
+    setup: Setup, db_url: URL
+) -> None:
+    down = make_engine(db_url.set(port=1))  # nothing listens there
+    service = AlertsService(setup.redis, down, setup.sender, mode="paper", clock=setup.clock)
+    mono = Mono()
+    watcher = EngineWatcher(service, setup.redis, monotonic=mono)
+    try:
+        await watcher.step()  # no heartbeat ever
+        mono.now = 60
+        await watcher.step()
+    finally:
+        await down.dispose()
+
+    assert setup.sender.sent[0].splitlines()[:2] == [
+        "Engine DOWN: no new heartbeat for 60 s",
+        "No heartbeat at all since the alerts service started",
+    ]

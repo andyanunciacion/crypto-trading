@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from decimal import Decimal
 
-from backend.alerts.format import kill_lines, manila, money, number, signed, signed_money
+from backend.alerts.format import age, kill_lines, manila, money, number, signed, signed_money
 from backend.alerts.telegram import Buttons
 from backend.dashboard.overview import Overview, PositionView
 from shared.commands import BotReply, KillReply
@@ -55,18 +55,6 @@ NO_BOT_RUNNING = "No bot is running, so there's nothing to pause."
 CANCELLED = "Cancelled: nothing was done."
 EXPIRED = "These buttons have expired, so nothing was done. Send the command again."
 DB_DOWN = "Couldn't read the database in time."
-
-
-def age(seconds: float) -> str:
-    """A duration a person reads at a glance: 4 s, 3 min, 2 h, 5 days."""
-    s = max(int(seconds), 0)
-    if s < 120:
-        return f"{s} s"
-    if s < 120 * 60:
-        return f"{s // 60} min"
-    if s < 48 * 3600:
-        return f"{s // 3600} h"
-    return f"{s // 86400} days"
 
 
 def unknown(name: str) -> str:

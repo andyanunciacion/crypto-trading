@@ -25,6 +25,7 @@ from backend.alerts.commands import CommandBot, ShownKills
 from backend.alerts.service import AlertsService, beat
 from backend.alerts.settings import AlertsSettings, load_alerts_settings
 from backend.alerts.telegram import DrySender, Sender, TelegramSender
+from backend.alerts.watch import EngineWatcher
 from shared.db.session import make_engine
 from shared.logs import LogMirror, configure_logging
 
@@ -65,6 +66,8 @@ async def run(settings: AlertsSettings, mirror: LogMirror) -> None:
         async with asyncio.TaskGroup() as tasks:
             tasks.create_task(beat(service, stop))
             tasks.create_task(mirror.ship(redis, stop))  # ends after `stop`
+            # The engine's heartbeat (P7-3); it ends after `stop`.
+            tasks.create_task(EngineWatcher(service, redis).run(stop))
             running = [tasks.create_task(service.run())]
             # Commands (P7-2) only with a real bot and chat: a dry run has no one to answer.
             if isinstance(sender, TelegramSender) and settings.telegram_chat_id is not None:
